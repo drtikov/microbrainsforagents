@@ -357,6 +357,7 @@ def evaluate_baselines_comparison(
 
     def _run_selector(name: str, select_fn: Any) -> Dict[str, Any]:
         dropped = 0
+        escalated = 0
         gross_toks = 0
         retry_toks = 0
         lat_ms: List[float] = []
@@ -364,6 +365,8 @@ def evaluate_baselines_comparison(
             t0 = time.perf_counter_ns()
             cands = select_fn(task["query"])
             lat_ms.append((time.perf_counter_ns() - t0) / 1_000_000.0)
+            if len(cands) >= len(all_names):
+                escalated += 1
             gross_toks += count_schema_tokens([schema_by_name[c] for c in cands if c in schema_by_name])
             if task["expected_tool"] not in cands:
                 dropped += 1
@@ -378,20 +381,24 @@ def evaluate_baselines_comparison(
             "baseline": name,
             "recall_at_k_pct": round(100.0 - drop_pct, 1),
             "dropped": f"{dropped}/{n_tasks}",
+            "escalated": f"{escalated}/{n_tasks}",
             "drop_rate_pct": round(drop_pct, 1),
             "cp95_upper_drop_pct": round(cp_upper, 1),
             "net_saved_pct": round(net_saved_pct, 1),
             "p95_ms": round(lat_ms[int(len(lat_ms) * 0.95)], 3),
         }
 
-    def _kw_select(q: str) -> List[str]:
+    def _kw_scored(q: str) -> List[Tuple[int, str]]:
         q_toks = set(re.findall(r"(?u)\b\w+\b", q.lower()))
         scored = []
         for n in all_names:
             d_toks = set(re.findall(r"(?u)\b\w+\b", f"{n.replace('_', ' ')} {descriptions[n]}".lower()))
             scored.append((len(q_toks & d_toks), n))
         scored.sort(key=lambda x: -x[0])
-        return [n for _, n in scored[:top_k]]
+        return scored
+
+    def _kw_select(q: str) -> List[str]:
+        return [n for _, n in _kw_scored(q)[:top_k]]
 
     def _emb_ridge_select(q: str) -> List[str]:
         q_vec = moe._embed_context(re.findall(r"(?u)\b\w+\b", q.lower()))
@@ -402,8 +409,24 @@ def evaluate_baselines_comparison(
     def _mb_select(q: str) -> List[str]:
         return mb.narrow_tool_surface(q, available_tools=all_names, top_k=top_k, tool_descriptions=descriptions)["candidate_tools"]
 
+    # Match full-catalog escalation budget of Microbrains on the Naive Keyword baseline
+    mb_escalated_queries = sum(1 for t in tasks if len(_mb_select(t["query"])) >= len(all_names))
+    kw_margins = []
+    for idx, t in enumerate(tasks):
+        sc = _kw_scored(t["query"])
+        margin = sc[0][0] - sc[min(top_k, len(sc) - 1)][0]
+        kw_margins.append((margin, sc[0][0], idx, t["query"]))
+    kw_margins.sort(key=lambda x: (x[0], x[1], x[2]))
+    matched_esc_queries = {x[3] for x in kw_margins[:mb_escalated_queries]}
+
+    def _kw_matched_select(q: str) -> List[str]:
+        if q in matched_esc_queries:
+            return list(all_names)
+        return _kw_select(q)
+
     return [
         _run_selector("Naive Keyword Top-4", _kw_select),
+        _run_selector("Naive Keyword Top-4 (Matched Esc.)", _kw_matched_select),
         _run_selector("Embedding + Ridge Top-4", _emb_ridge_select),
         _run_selector("Microbrains Top-4 (Hybrid)", _mb_select),
     ]
@@ -431,11 +454,11 @@ def main() -> None:
         )
 
     print("\n=== Baseline Comparison (Top-4 on 38 External Tasks) ===")
-    print("| Architecture | Recall@4 | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print("| Architecture | Recall@4 | Escalated | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for b in evaluate_baselines_comparison(top_k=4):
         print(
-            f"| {b['baseline']} | {b['recall_at_k_pct']}% | {b['dropped']} | "
+            f"| {b['baseline']} | {b['recall_at_k_pct']}% | {b['escalated']} | {b['dropped']} | "
             f"{b['drop_rate_pct']}% | <= {b['cp95_upper_drop_pct']}% | {b['net_saved_pct']}% | {b['p95_ms']:.3f} ms |"
         )
 

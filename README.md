@@ -165,7 +165,7 @@ print("Nearest models in parameter space:", nearest)
 
 Microbrains integrates directly into **Claude Code**, **Codex**, or any custom agent framework as a pre-tool execution hook.
 
-Add to your `~/.claude/settings.json` or project hook configuration:
+Add to your `~/.claude/settings.json` or project `.claude/settings.json` hook configuration (note: `onFailure: "block"` requires Claude Code ≥ `2.1.295`):
 
 ```json
 {
@@ -173,13 +173,20 @@ Add to your `~/.claude/settings.json` or project hook configuration:
     "PreToolUse": [
       {
         "matcher": ".*",
-        "command": "python -m aetheris_microbrains.hook --strict-ast",
-        "onFailure": "block"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m aetheris_microbrains.hook --strict-ast",
+            "onFailure": "block"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Verify inside Claude Code that the hook is registered via `/hooks` (or test that `rm -rf /` is blocked with exit code `2` and `stderr` output).
 
 **Key Hook Modes & CLI Flags:**
 * **Prefilter Mode (Default):** On safe operations, the hook exits `0` silently. It does **not** bypass Claude Code's native user confirmation dialogs—it only intercepts dangerous or broken calls before the prompt is shown.
@@ -313,13 +320,14 @@ python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
 | 6 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 40.5% | 36.6% | 0.906 ms |
 | 8 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 37.5% | 33.6% | 0.916 ms |
 
-**Baseline Comparison (Top-4 on 38 External Tasks, with 95% Clopper-Pearson Upper Drop Bound):**
+**Baseline Comparison (Top-4 on 38 External Tasks, including Matched-Escalation Keyword Baseline):**
 
-| Architecture | Recall@4 | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Naive Keyword Top-4 | 76.3% | 9/38 | 23.7% | <= 37.7% | 52.1% | 1.468 ms |
-| Embedding + Ridge Top-4 | 73.7% | 10/38 | 26.3% | <= 40.5% | 49.0% | 0.734 ms |
-| **Microbrains Top-4 (Hybrid)** | **97.4%** | **1/38** | **2.6%** | **<= 11.9%** | **39.6%** | **0.941 ms** |
+| Architecture | Recall@4 | Escalated | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Naive Keyword Top-4 | 76.3% | 0/38 | 9/38 | 23.7% | <= 37.7% | 52.1% | 0.740 ms |
+| Naive Keyword Top-4 (Matched Esc.) | 97.4% | 19/38 | 1/38 | 2.6% | <= 11.9% | 39.6% | 0.612 ms |
+| Embedding + Ridge Top-4 | 73.7% | 0/38 | 10/38 | 26.3% | <= 40.5% | 49.0% | 0.349 ms |
+| **Microbrains Top-4 (Hybrid)** | **97.4%** | **19/38** | **1/38** | **2.6%** | **<= 11.9%** | **39.6%** | **6.495 ms** |
 
 ### 2. Local 25-Step Regression & Token-Accounting Smoke Test (`examples/05_reproducible_25step_benchmark.py`)
 Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (no live LLM called):
@@ -341,15 +349,23 @@ Evaluates `decide()` and `narrow_tool_surface(top_k=4)` against all **300 real i
 python examples/07_swebench_lite_gate_benchmark.py
 ```
 
-| Metric (300 Real SWE-bench Lite Issues) | Result |
+**Patch Gate (300 Real Gold File Diffs):**
+
+| Metric (Denominator: 300 File Diffs / 60 Mutated Diffs) | Result |
 | --- | ---: |
-| Gold patches allowed (`layer1_structural_verified`) | **213 / 300 (71.0%)** |
+| Gold file diffs allowed (`layer1_structural_verified`) | **213 / 300 (71.0%)** |
 | Partial hunks escalated without full `original_source` | **82 / 300 (27.3%)** |
-| Gold patch false-deny rate (`AST syntax FP: 0`) | **5 / 300 (1.67%)** |
-| Synthetic mutation templates caught (syntax / secrets / `getattr` / `eval` / `shell=True`) | **60 / 60 (100.0%)** |
+| Gold file diff false-deny rate (`AST syntax FP: 0`) | **5 / 300 (1.67%)** |
+| Synthetic mutation templates caught (6 patterns: syntax / secrets / `getattr` / `eval` / `shell=True` / `__builtins__`) | **60 / 60 (100.0%)** |
 | Diff gate local latency (`p50` / `p95`) | **1.660 ms / 8.773 ms** |
-| SWE core tool retained in `narrow_tool_surface(top_k=4)` (all tasks) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
-| SWE core retained strictly within narrowed queries (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `read_file`: **103 / 127**) |
+
+**Tool-Surface Narrowing (300 Issue Prompts):**
+
+| Metric (Denominator: 300 Issues / 127 Narrowed Prompts) | Result |
+| --- | ---: |
+| Prompts narrowed to Top-4 vs. full-catalog escalation | **127 / 300 narrowed**, **173 / 300 full-catalog** |
+| SWE core tool retained across all prompts (including full-catalog) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
+| Any SWE core tool retained within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `repo_read`: **103 / 127**) |
 
 ### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.6.9`)
 Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials and internal errors write structured reasons to `stderr` with exit code `2` (fail-closed):
