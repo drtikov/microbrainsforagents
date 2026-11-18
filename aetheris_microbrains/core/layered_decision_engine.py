@@ -30,7 +30,7 @@ import re
 import shlex
 import textwrap
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple
@@ -510,6 +510,131 @@ def _detect_secret_leaks(lines: Sequence[str]) -> List[str]:
     return []
 
 
+def _apply_unified_diff_to_source(original_source: str, diff_text: str) -> Optional[str]:
+    """Apply a unified diff (with `@@` headers) or contiguous `-`/`+` hunk to `original_source` in memory."""
+    orig_lines = original_source.splitlines()
+    raw_lines = diff_text.splitlines()
+    hunks: List[Tuple[int, List[str], List[str]]] = []
+
+    idx = 0
+    while idx < len(raw_lines):
+        ln = raw_lines[idx]
+        m = re.match(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@", ln)
+        if m:
+            old_start = max(0, int(m.group(1)) - 1)
+            idx += 1
+            old_blk: List[str] = []
+            new_blk: List[str] = []
+            while idx < len(raw_lines) and not raw_lines[idx].startswith(("@@ ", "--- ", "+++ ")):
+                cur = raw_lines[idx]
+                if cur.startswith("\\ No newline"):
+                    idx += 1
+                    continue
+                if cur.startswith("-"):
+                    old_blk.append(cur[1:])
+                elif cur.startswith("+"):
+                    new_blk.append(cur[1:])
+                elif cur.startswith(" "):
+                    old_blk.append(cur[1:])
+                    new_blk.append(cur[1:])
+                else:
+                    old_blk.append(cur)
+                    new_blk.append(cur)
+                idx += 1
+            hunks.append((old_start, old_blk, new_blk))
+            continue
+        idx += 1
+
+    if not hunks:
+        has_markers = any(
+            (l.startswith("-") and not l.startswith("---")) or (l.startswith("+") and not l.startswith("+++"))
+            for l in raw_lines
+        )
+        if not has_markers:
+            return None
+        old_blk = []
+        new_blk = []
+        for cur in raw_lines:
+            if cur.startswith(("--- ", "+++ ", "\\ No newline")):
+                continue
+            if cur.startswith("-"):
+                old_blk.append(cur[1:])
+            elif cur.startswith("+"):
+                new_blk.append(cur[1:])
+            elif cur.startswith(" "):
+                old_blk.append(cur[1:])
+                new_blk.append(cur[1:])
+            else:
+                old_blk.append(cur)
+                new_blk.append(cur)
+        if old_blk:
+            hunks.append((0, old_blk, new_blk))
+        else:
+            return None
+
+    result = list(orig_lines)
+    offset_delta = 0
+    applied_any = False
+    for old_start, old_blk, new_blk in hunks:
+        anchor = max(0, min(len(result), old_start + offset_delta))
+        blk_len = len(old_blk)
+        pos: Optional[int] = None
+
+        if blk_len == 0:
+            pos = anchor
+        elif anchor + blk_len <= len(result) and result[anchor : anchor + blk_len] == old_blk:
+            pos = anchor
+        else:
+            for scan in range(0, len(result) - blk_len + 1):
+                if result[scan : scan + blk_len] == old_blk:
+                    pos = scan
+                    break
+
+        if pos is None:
+            return None
+
+        result[pos : pos + blk_len] = new_blk
+        offset_delta += len(new_blk) - blk_len
+        applied_any = True
+
+    if not applied_any:
+        return None
+    suffix = "\n" if original_source.endswith("\n") else ""
+    return "\n".join(result) + suffix
+
+
+def _collect_ast_node_tags(tree: ast.AST) -> List[str]:
+    """Collect structural AST node tags for downstream microbrain feature vectors."""
+    ast_nodes: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name != "_hunk_ctx":
+            ast_nodes.append("ast_node_function_def")
+        elif isinstance(node, ast.ClassDef):
+            ast_nodes.append("ast_node_class_def")
+        elif isinstance(node, ast.ImportFrom):
+            ast_nodes.append("ast_node_import_from")
+            ast_nodes.append("ast_node_import")
+        elif isinstance(node, ast.Import):
+            ast_nodes.append("ast_node_import")
+        elif isinstance(node, ast.Try):
+            ast_nodes.append("ast_node_try_except")
+        elif isinstance(node, ast.Return):
+            ast_nodes.append("ast_node_return_stmt")
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            ast_nodes.append("ast_node_for_loop")
+        elif isinstance(node, ast.If):
+            ast_nodes.append("ast_node_if_stmt")
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            ast_nodes.append("ast_node_with_stmt")
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            ast_nodes.append("ast_node_assign")
+        elif isinstance(node, ast.Assert):
+            ast_nodes.append("ast_node_assert_stmt")
+        elif isinstance(node, ast.Call):
+            ast_nodes.append("ast_node_call")
+    return list(dict.fromkeys(ast_nodes))
+
+
 def analyze_code_diff(
     file_path: Optional[str],
     diff_text: Optional[str],
@@ -517,8 +642,10 @@ def analyze_code_diff(
 ) -> Dict[str, Any]:
     """Layer 1 language-aware structural diff analysis.
 
-    If `original_source` is supplied for Python files, pre-seeds module/alias context
-    from the enclosing file so cross-line alias obfuscation in a hunk is resolved.
+    When `original_source` (or an on-disk Python file at `file_path`) is available and
+    `diff_text` can be anchored as a unified/contextual patch, reconstructs the complete
+    patched file in memory and verifies full-file `ast.parse` plus delta security and
+    signature hazards. Falls back to context-wrapped hunk parsing for standalone diffs.
     """
     if not diff_text:
         return {
@@ -530,11 +657,21 @@ def analyze_code_diff(
             "line_count": 0,
             "ast_nodes": [],
             "context_ast_parsed": False,
+            "patched_file_ast_verified": False,
         }
 
     path_str = str(file_path or "").strip()
     ext = Path(path_str).suffix.lower() if path_str else ""
     line_count = len(diff_text.splitlines())
+
+    resolved_source = original_source
+    if resolved_source is None and path_str and (ext == ".py" or not ext):
+        try:
+            candidate_path = Path(path_str)
+            if candidate_path.is_file():
+                resolved_source = candidate_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            resolved_source = None
 
     # Extract proposed lines carefully
     raw_lines = diff_text.splitlines()
@@ -581,6 +718,7 @@ def analyze_code_diff(
             "line_count": line_count,
             "ast_nodes": [],
             "context_ast_parsed": False,
+            "patched_file_ast_verified": False,
         }
 
     if ext in {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".md", ".yaml", ".yml", ".toml", ".txt", ".c", ".cpp", ".h", ".rs", ".go"}:
@@ -601,29 +739,55 @@ def analyze_code_diff(
             "line_count": line_count,
             "ast_nodes": [],
             "context_ast_parsed": False,
+            "patched_file_ast_verified": False,
         }
 
     # Python (or unspecified code snippet)
     context_ast_parsed = False
+    patched_file_ast_verified = False
     seed_visitor: Optional[_SecurityASTVisitor] = None
-    if original_source:
-        orig_tree = _parse_python_with_context(original_source)
+    orig_tree: Optional[ast.AST] = None
+    if resolved_source:
+        orig_tree = _parse_python_with_context(resolved_source)
         if orig_tree is not None:
             seed_visitor = _SecurityASTVisitor()
             seed_visitor.visit(orig_tree)
             context_ast_parsed = True
 
+    patched_source = _apply_unified_diff_to_source(resolved_source, diff_text) if resolved_source else None
+    patched_tree: Optional[ast.AST] = None
+    if patched_source is not None:
+        patched_file_ast_verified = True
+        context_ast_parsed = True
+        try:
+            patched_tree = ast.parse(patched_source)
+        except SyntaxError:
+            return {
+                "language": "python",
+                "syntax_valid": False,
+                "security_clean": False,
+                "findings": ["syntax_tree_malformed", "patched_file_syntax_error"],
+                "interface_hazards": [],
+                "line_count": line_count,
+                "ast_nodes": [],
+                "context_ast_parsed": True,
+                "patched_file_ast_verified": True,
+            }
+
     tree = _parse_python_with_context(dedented)
-    if tree is None and original_source:
-        combined = original_source.rstrip("\n") + "\n" + textwrap.indent(dedented, "    ")
+    if tree is None and patched_tree is not None:
+        tree = patched_tree
+    elif tree is None and resolved_source:
+        combined = resolved_source.rstrip("\n") + "\n" + textwrap.indent(dedented, "    ")
         tree = _parse_python_with_context(combined)
         if tree is None:
-            combined_top = original_source.rstrip("\n") + "\n" + dedented
+            combined_top = resolved_source.rstrip("\n") + "\n" + dedented
             tree = _parse_python_with_context(combined_top)
         if tree is not None:
             context_ast_parsed = True
 
-    if tree is None:
+    analysis_tree = patched_tree if patched_tree is not None else tree
+    if analysis_tree is None:
         return {
             "language": "python",
             "syntax_valid": False,
@@ -633,36 +797,60 @@ def analyze_code_diff(
             "line_count": line_count,
             "ast_nodes": [],
             "context_ast_parsed": context_ast_parsed,
+            "patched_file_ast_verified": patched_file_ast_verified,
         }
 
-    visitor = _SecurityASTVisitor()
-    if seed_visitor is not None:
-        visitor.module_aliases.update(seed_visitor.module_aliases)
-        visitor.dangerous_aliases.update(seed_visitor.dangerous_aliases)
-        visitor.decoded_vars.update(seed_visitor.decoded_vars)
-    visitor.visit(tree)
+    hunk_findings: List[str] = []
+    if tree is not None and tree is not patched_tree:
+        visitor = _SecurityASTVisitor()
+        if seed_visitor is not None:
+            visitor.module_aliases.update(seed_visitor.module_aliases)
+            visitor.dangerous_aliases.update(seed_visitor.dangerous_aliases)
+            visitor.decoded_vars.update(seed_visitor.decoded_vars)
+        visitor.visit(tree)
+        hunk_findings.extend(visitor.findings)
 
-    all_findings = list(dict.fromkeys(list(visitor.findings) + secret_findings))
-    interface_hazards = _detect_interface_hazards(raw_lines, tree) if has_unified else []
+    if patched_tree is not None:
+        patched_visitor = _SecurityASTVisitor()
+        patched_visitor.visit(patched_tree)
+        baseline_counts = Counter(seed_visitor.findings) if seed_visitor is not None else Counter()
+        delta_counts = Counter(patched_visitor.findings) - baseline_counts
+        for finding, cnt in delta_counts.items():
+            if cnt > 0:
+                hunk_findings.append(finding)
 
-    ast_nodes: List[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name != "_hunk_ctx":
-            ast_nodes.append("ast_node_function_def")
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            ast_nodes.append("ast_node_import")
-        elif isinstance(node, ast.Call):
-            ast_nodes.append("ast_node_call")
+    all_findings = list(dict.fromkeys(hunk_findings + secret_findings))
+    interface_hazards = _detect_interface_hazards(raw_lines, analysis_tree) if has_unified else []
+
+    if patched_source is not None and resolved_source:
+        orig_defs, orig_tries = _extract_defs_from_lines(resolved_source.splitlines())
+        new_defs, new_tries = _extract_defs_from_lines(patched_source.splitlines())
+        for sym, (old_min, old_max) in orig_defs.items():
+            if sym in new_defs:
+                new_min, new_max = new_defs[sym]
+                if old_min >= 0 and new_min >= 0 and (new_min != old_min or new_max < old_max):
+                    haz = f"breaking_signature_change:{sym}"
+                    if haz not in interface_hazards:
+                        interface_hazards.append(haz)
+            elif not sym.startswith("_"):
+                haz = f"public_symbol_removed:{sym}"
+                if haz not in interface_hazards:
+                    interface_hazards.append(haz)
+        if orig_tries > new_tries and any("try:" in l for l in raw_lines if l.startswith("-")) and "exception_guard_removed" not in interface_hazards:
+            interface_hazards.append("exception_guard_removed")
+
+    ast_nodes = _collect_ast_node_tags(tree if tree is not None else analysis_tree)
 
     return {
         "language": "python",
         "syntax_valid": True,
         "security_clean": len(all_findings) == 0,
         "findings": all_findings,
-        "interface_hazards": interface_hazards,
+        "interface_hazards": list(dict.fromkeys(interface_hazards)),
         "line_count": line_count,
-        "ast_nodes": list(dict.fromkeys(ast_nodes)),
+        "ast_nodes": ast_nodes,
         "context_ast_parsed": context_ast_parsed,
+        "patched_file_ast_verified": patched_file_ast_verified,
     }
 
 
@@ -997,7 +1185,12 @@ def decide(
         if ctx.get("_test_fail_layer1"):
             raise RuntimeError("Simulated Layer 1 parser failure")
 
-        # --- Layer 0: Policy & Permissions ---
+        # --- Layer 0: Live Registry & Policy Permissions ---
+        if available_tools is not None and clean_tool:
+            avail_norm = {str(t).strip().lower() for t in available_tools if t}
+            if clean_tool not in avail_norm:
+                return _finish("deny", clean_tool, ["deny"], "layer0_unregistered_tool", 0)
+
         l0 = evaluate_layer0_policy(tool_name, target_path, cfg)
         if l0["decision"] == "deny":
             return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)

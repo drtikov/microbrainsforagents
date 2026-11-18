@@ -248,7 +248,7 @@ def test_fable_10_examples_01_to_05_run_cleanly_and_no_syntaxerror_hack():
         text=True,
         check=True,
     )
-    assert "Aetheris Microbrains v0.6.1 Reproducible 25-Step Agent Benchmark" in proc.stdout
+    assert "Aetheris Microbrains v0.6.2 Reproducible 25-Step Agent Benchmark" in proc.stdout
     assert "Token Reduction" in proc.stdout
 
     # Also verify structured return contract of benchmark helper
@@ -292,5 +292,159 @@ def test_fable_11_save_does_not_pollute_cwd_with_memory_store(tmp_path: Path):
         amt_mod.STORE_DIR = orig_store
         amt_mod.CANONICAL_STORE_DIRS[:] = orig_canon
         os.chdir(orig_cwd)
+
+
+def test_fable_12_full_file_patched_ast_context_parsing():
+    original_src = (
+        "import os\n\n"
+        "def compute(x, y):\n"
+        "    total = (x + y\n"
+        "             + 1)\n"
+        "    return total\n"
+    )
+    # 1. Valid unified diff applied to full file -> patched_file_ast_verified=True & syntax_valid=True
+    good_diff = (
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -3,4 +3,4 @@\n"
+        " def compute(x, y):\n"
+        "-    total = (x + y\n"
+        "+    total = (x * 2 + y\n"
+        "              + 1)\n"
+        "     return total\n"
+    )
+    res_good = analyze_code_diff("mod.py", good_diff, original_source=original_src)
+    assert res_good["patched_file_ast_verified"] is True
+    assert res_good["syntax_valid"] is True
+    assert res_good["security_clean"] is True
+
+    # 2. Diff dropping a closing paren (or breaking full-file AST structure) fails full-file ast.parse
+    bad_diff = (
+        "--- a/mod.py\n"
+        "+++ b/mod.py\n"
+        "@@ -3,4 +3,4 @@\n"
+        " def compute(x, y):\n"
+        "     total = (x + y\n"
+        "-             + 1)\n"
+        "+             + 1\n"
+        "     return total\n"
+    )
+    res_bad = analyze_code_diff("mod.py", bad_diff, original_source=original_src)
+    assert res_bad["patched_file_ast_verified"] is True
+    assert res_bad["syntax_valid"] is False
+    assert "patched_file_syntax_error" in res_bad["findings"]
+
+
+def test_fable_13_critical_ensemble_multi_feature_structural_tokens():
+    ce = CriticalEnsemble()
+    diff_text = (
+        "--- a/src/calc.py\n"
+        "+++ b/src/calc.py\n"
+        "@@ -1,2 +1,5 @@\n"
+        " def add(a, b):\n"
+        "+    val = a + b\n"
+        "+    if val > 0:\n"
+        "+        return val\n"
+        "     return 0\n"
+    )
+    res = ce.evaluate_critical_action("apply_patch", "src/calc.py", diff_text)
+    assert res.status == "CONSENSUS_APPROVED"
+    for v in res.votes:
+        toks = v.details.get("tokens", [])
+        assert len(toks) >= 3, f"{v.estimator_name} received trivial <=2 tokens: {toks}"
+
+    verifier_vote = next(v for v in res.votes if v.estimator_name == "code_edit_verifier")
+    verifier_toks = verifier_vote.details["tokens"]
+    assert any(t.startswith("ast_node_") for t in verifier_toks)
+    assert "ast_interface_stable" in verifier_toks
+
+
+def test_fable_14_counterfactual_reasoner_and_blast_radius_work_outside_ouroboros(tmp_path: Path):
+    from aetheris_microbrains.core.causal_world_model import StructuralCausalModel
+    from aetheris_microbrains.core.counterfactual_reasoner import _find_downstream_dependents, simulate_counterfactual
+
+    # Build a standalone non-ouroboros project layout (`src/...`) with 4 importing modules
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    target_mod = src_dir / "helper_lib.py"
+    target_mod.write_text("def run_ok(x):\n    return x + 1\n", encoding="utf-8")
+    for idx in range(4):
+        (src_dir / f"consumer_{idx}.py").write_text("from src.helper_lib import run_ok\n", encoding="utf-8")
+
+    deps = _find_downstream_dependents(tmp_path, str(target_mod))
+    assert len(deps) >= 4
+
+    scm = StructuralCausalModel(tmp_path)
+    assert scm._eval_blast_radius(str(target_mod)) >= 4
+
+    # Destructive flag-reordered shell must be blocked
+    sh_bad = simulate_counterfactual(tmp_path, "run_command", "rm -fr /var/data", recent_tools=["repo_read"])
+    assert sh_bad.is_safe is False
+    assert any("irreversible_action" in h for h in sh_bad.hazards)
+
+    # Obfuscated getattr sink must be blocked via analyze_code_diff
+    code_bad = simulate_counterfactual(
+        tmp_path,
+        "repo_write",
+        str(target_mod),
+        proposed_content="getattr(os, 'sys' + 'tem')('id')\n",
+        recent_tools=["repo_read"],
+    )
+    assert code_bad.is_safe is False
+    assert any("security_violation" in h for h in code_bad.hazards)
+
+
+def test_fable_15_live_tool_registry_enforcement_in_moe_and_decide():
+    moe = mb.ToolRoutingMoE(d_model=256)
+
+    # Empty live registry cannot return any executable tool or claim conformal pass
+    empty_res = moe.route("read file src/app.py", available_tools=[])
+    assert empty_res.selected_tool == "<none>"
+    assert empty_res.conformal_passed is False
+
+    # Narrow custom registry only permits registered tools; unrelated request escalates instead of misfiring
+    restricted = ["git_status"]
+    mismatch = moe.route("delete production sql table", available_tools=restricted)
+    assert mismatch.selected_tool in restricted
+    assert mismatch.conformal_passed is False
+
+    matched = moe.route("check git status in repository", available_tools=restricted)
+    assert matched.selected_tool == "git_status"
+    assert matched.conformal_passed is True
+
+    # Layer 0 decide() denies tools outside `available_tools`
+    denied = mb.decide({"tool": "run_command", "cmd": "ls -la"}, context={"available_tools": ["read_file", "git_status"]})
+    assert denied["decision"] == "deny"
+    assert denied["reason_code"] == "layer0_unregistered_tool"
+    assert denied["layer"] == 0
+
+
+def test_fable_16_clopper_pearson_bound_and_nonconformity_drift_monitor():
+    # Exact Clopper-Pearson upper bound matches 1 - alpha**(1/n)
+    ub22 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(0, 22, alpha=0.05)
+    assert 0.12 <= ub22 <= 0.14
+    ub100 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(0, 100, alpha=0.05)
+    assert abs(ub100 - 0.0295) < 0.002
+
+    # Rolling nonconformity & abstention monitor triggers drift_detected after OOD burst
+    b = AnalyticalMicroTransformer(name="tmp_drift_test", d_model=32, n_heads=2, d_mlp=64)
+    b.compile_logic_association("read_file_token", "allow_read")
+    b.compile_logic_association("write_file_token", "allow_write")
+    cal_data = [(["read_file_token"], "allow_read")] * 11 + [(["write_file_token"], "allow_write")] * 11
+    cal_rep = b.calibrate_conformal(cal_data, alpha=0.05, in_sample=False)
+    assert cal_rep["upper_error_bound_95"] == ub22
+
+    in_dist = b.infer_conformal(["read_file_token"])
+    assert in_dist["upper_error_bound_95"] == ub22
+    assert in_dist["drift_detected"] is False
+
+    last = None
+    for i in range(12):
+        last = b.infer_conformal([f"unseen_ood_token_{i}"])
+    assert last is not None
+    assert last["abstained"] is True
+    assert last["drift_detected"] is True
+    assert last["rolling_abstention_rate"] >= 0.80
+
 
 

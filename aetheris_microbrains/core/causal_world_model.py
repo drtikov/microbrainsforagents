@@ -151,6 +151,8 @@ class StructuralCausalModel:
         return bool(res["syntax_valid"] and res["security_clean"])
 
     def _eval_ancestral(self, target_path: str) -> bool:
+        from .layered_decision_engine import is_protected_path
+
         clean = str(target_path).replace("\\", "/")
         core_modules = (
             "ouroboros/agent.py",
@@ -158,28 +160,48 @@ class StructuralCausalModel:
             "ouroboros/context.py",
             "ouroboros/llm.py",
             "ouroboros/causal_world_model.py",
+            "core/analytical_micro_transformer.py",
+            "core/layered_decision_engine.py",
+            "core/critical_ensemble_abstention.py",
         )
-        return any(c in clean for c in core_modules)
+        return is_protected_path(clean) or any(c in clean for c in core_modules)
 
     def _eval_blast_radius(self, target_path: str) -> int:
         if not str(target_path).endswith(".py"):
             return 0
         stem = Path(target_path).stem
-        count = 0
-        ouroboros_dir = self.repo_dir / "ouroboros"
-        if not ouroboros_dir.is_dir():
+        if not stem or not self.repo_dir.is_dir():
             return 0
-        for py_file in ouroboros_dir.rglob("*.py"):
-            if py_file.stem == stem:
-                continue
-            try:
-                content = py_file.read_text(encoding="utf-8", errors="ignore")
-                if f"import {stem}" in content or f"from ouroboros.{stem}" in content:
-                    count += 1
-                    if count >= 10:
-                        break
-            except Exception:
-                continue
+        import re as _re
+
+        skip_dirs = {".git", ".venv", "venv", "__pycache__", "build", "dist", ".pytest_cache", "node_modules"}
+        preferred = [
+            d for d in (self.repo_dir / "ouroboros", self.repo_dir / "aetheris_microbrains", self.repo_dir / "src", self.repo_dir / "core", self.repo_dir / "tools")
+            if d.is_dir()
+        ]
+        scan_roots = preferred if preferred else [self.repo_dir]
+        import_re = _re.compile(
+            rf"\b(?:import\s+{_re.escape(stem)}\b|from\s+(?:[A-Za-z0-9_.]+\.)?{_re.escape(stem)}\s+import\b|from\s+[A-Za-z0-9_.]+\s+import\s+[^#\n]*\b{_re.escape(stem)}\b)"
+        )
+        count = 0
+        scanned = 0
+        for root in scan_roots:
+            for py_file in root.rglob("*.py"):
+                if any(part in skip_dirs for part in py_file.parts):
+                    continue
+                if py_file.stem == stem:
+                    continue
+                scanned += 1
+                if scanned > 400:
+                    return count
+                try:
+                    content = py_file.read_text(encoding="utf-8", errors="ignore")
+                    if import_re.search(content):
+                        count += 1
+                        if count >= 10:
+                            return count
+                except Exception:
+                    continue
         return count
 
     def do(self, interventions: Dict[str, Any]) -> StructuralCausalModel:
@@ -283,10 +305,10 @@ class StructuralCausalModel:
 
         # Consult Neural Microbrain using structural input features BEFORE finalizing verdict
         struct_tokens: List[str] = [
-            "syntax_valid" if ast_ok else "syntax_invalid",
-            "preconditions_ok" if precond_ok else "precondition_breach",
-            "ancestral_core" if ancestral else "regular_module",
-            "high_blast_radius" if blast_radius >= 4 else "low_blast_radius",
+            "ast_structure_valid" if ast_ok else "ast_signature_break",
+            "policy_reversible_write" if precond_ok else "policy_irreversible_block",
+            "sacred_boundary_protected" if ancestral else "resilience_buffer_adequate",
+            "rollback_cost_expensive" if blast_radius >= 4 else "rollback_cost_negligible",
         ]
         neural_conf = round(max(0.0, 1.0 - min(1.0, risk_score)), 4)
         neural_veto = False

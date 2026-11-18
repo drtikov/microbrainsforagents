@@ -27,6 +27,7 @@ import logging
 import math
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
@@ -105,6 +106,47 @@ class AnalyticalMicroTransformer:
         # How the current conformal_quantile was obtained — honest provenance
         # for the quantile, which otherwise looks calibrated no matter what.
         self.conformal_basis: str = "uncalibrated"
+        # Rolling runtime telemetry for live distribution-shift / abstention drift monitoring
+        self._live_nonconformity_window: deque = deque(maxlen=50)
+        self._live_abstention_window: deque = deque(maxlen=50)
+
+    @staticmethod
+    def compute_clopper_pearson_upper_bound(k_errors: int, n_samples: int, alpha: float = 0.05) -> float:
+        """Exact one-sided Clopper-Pearson (1 - alpha) upper binomial failure bound (handles k=0 properly)."""
+        n = int(n_samples)
+        k = int(k_errors)
+        a = max(1e-9, min(0.999999, float(alpha)))
+        if n <= 0:
+            return 1.0
+        if k <= 0:
+            return round(1.0 - (a ** (1.0 / float(n))), 4)
+        if k >= n:
+            return 1.0
+        lo, hi = 0.0, 1.0
+        for _ in range(35):
+            mid = 0.5 * (lo + hi)
+            cum = sum(math.comb(n, j) * (mid ** j) * ((1.0 - mid) ** (n - j)) for j in range(k + 1))
+            if cum > a:
+                lo = mid
+            else:
+                hi = mid
+        return round(hi, 4)
+
+    def get_drift_status(self) -> Dict[str, Any]:
+        """Return rolling window nonconformity and abstention drift telemetry."""
+        win_nc = list(getattr(self, "_live_nonconformity_window", ()))
+        win_ab = list(getattr(self, "_live_abstention_window", ()))
+        n_win = len(win_nc)
+        mean_nc = round(float(sum(win_nc) / n_win), 4) if n_win > 0 else 0.0
+        abstain_rate = round(float(sum(1 for a in win_ab if a) / max(1, len(win_ab))), 4) if win_ab else 0.0
+        q_ref = float(self.conformal_quantile) if self.conformal_quantile is not None else 0.50
+        drift = bool(n_win >= 10 and (mean_nc > (q_ref * 1.5 + 0.05) or abstain_rate > 0.50))
+        return {
+            "window_size": n_win,
+            "mean_nonconformity": mean_nc,
+            "rolling_abstention_rate": abstain_rate,
+            "drift_detected": drift,
+        }
 
     def _init_orthogonal_embeddings(self):
         """Initialize distinct orthogonal basis directions for vocabulary using Gram-Schmidt QR."""
@@ -439,6 +481,7 @@ class AnalyticalMicroTransformer:
         guarantee_valid = (not in_sample) and (n >= min_required)
         cov_std_err = round(math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(n + 2)), 4)
         upper_bound_rule3 = round(3.0 / float(max(1, n)), 4)
+        upper_bound_cp95 = self.compute_clopper_pearson_upper_bound(0, n, float(alpha))
 
         self.conformal_quantile = q_hat
         self.per_class_quantiles = per_class_quantiles
@@ -462,6 +505,7 @@ class AnalyticalMicroTransformer:
             "per_class_quantiles": per_class_quantiles,
             "coverage_std_error": cov_std_err,
             "upper_error_bound_rule_of_3": upper_bound_rule3,
+            "upper_error_bound_95": upper_bound_cp95,
             "mean_nonconformity": round(float(np.mean(scores)), 4),
             "basis": self.conformal_basis,
         }
@@ -561,6 +605,14 @@ class AnalyticalMicroTransformer:
             or (math.sqrt(max(0.0, effective_alpha * (1.0 - effective_alpha)) / float(max(1, n_cal + 2))) if n_cal > 0 else 0.0),
             4,
         )
+        if not hasattr(self, "_live_nonconformity_window"):
+            self._live_nonconformity_window = deque(maxlen=50)
+        if not hasattr(self, "_live_abstention_window"):
+            self._live_abstention_window = deque(maxlen=50)
+        self._live_nonconformity_window.append(1.0 - float(top_p))
+        self._live_abstention_window.append(bool(abstained))
+        drift_info = self.get_drift_status()
+        upper_bound_cp95 = self.compute_clopper_pearson_upper_bound(0, n_cal, effective_alpha)
 
         return {
             "prediction_set": prediction_set,
@@ -575,6 +627,9 @@ class AnalyticalMicroTransformer:
             "conformal_quantile": round(float(q_hat), 4),
             "per_class_quantiles": dict(mondrian_map),
             "coverage_std_error": cov_std,
+            "upper_error_bound_95": upper_bound_cp95,
+            "rolling_abstention_rate": drift_info["rolling_abstention_rate"],
+            "drift_detected": drift_info["drift_detected"],
             "calibrated": not uncalibrated,
             "calibration_basis": "uncalibrated_default" if uncalibrated else self.conformal_basis,
             "n_calibration_samples": n_cal,

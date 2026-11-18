@@ -339,17 +339,26 @@ class ToolRoutingMoE:
         available_set: Optional[set] = None,
     ) -> str:
         """Score every permitted tool within the selected expert so all 32 tools (or custom subsets) are reachable."""
+        selected, _ = self._select_tool_with_score(expert, tokens, available_set=available_set)
+        return selected
+
+    def _select_tool_with_score(
+        self,
+        expert: str,
+        tokens: List[str],
+        available_set: Optional[set] = None,
+    ) -> Tuple[str, float]:
         tools = list(self.EXPERT_TOOLS[expert])
         if available_set is not None:
             tools = [t for t in tools if t in available_set]
             if not tools:
                 tools = sorted(available_set)
         if not tools:
-            return self.EXPERT_TOOLS[expert][0]
+            return ("<none>" if available_set is not None else self.EXPERT_TOOLS[expert][0]), 0.0
         if not tokens:
-            return tools[0]
+            return tools[0], 0.0
         ranked = self._score_candidate_tools(tools, tokens, expert=expert)
-        return ranked[0][0]
+        return ranked[0][0], float(ranked[0][1])
 
     def route(
         self,
@@ -365,6 +374,21 @@ class ToolRoutingMoE:
 
         available_list = list(dict.fromkeys(str(t) for t in available_tools if t)) if available_tools is not None else None
         available_set = set(available_list) if available_list is not None else None
+
+        if available_list is not None and len(available_list) == 0:
+            exp1, exp2 = self.EXPERTS[0], self.EXPERTS[1]
+            return MoERoutingDecision(
+                selected_tool="<none>",
+                secondary_tool="<none>",
+                top_experts=[(exp1, 0.5), (exp2, 0.5)],
+                confidence=0.0,
+                conformal_passed=False,
+                per_expert_conformal={
+                    exp1: self.per_expert_quantiles[exp1],
+                    exp2: self.per_expert_quantiles[exp2],
+                },
+                routing_rationale="No registered tools in live agent catalog; escalating.",
+            )
 
         # Compute analytical ridge-fitted gating + trigram prototype logits
         logits, signal_hits = self._compute_raw_gate_logits(tokens, ctx_vec)
@@ -397,8 +421,8 @@ class ToolRoutingMoE:
         weight_1 = float(probs[top1_idx] / (probs[top1_idx] + probs[top2_idx]))
         weight_2 = float(probs[top2_idx] / (probs[top1_idx] + probs[top2_idx]))
 
-        tool_1 = self._select_tool_for_expert(expert_1, tokens, available_set=available_set)
-        tool_2 = self._select_tool_for_expert(expert_2, tokens, available_set=available_set)
+        tool_1, tool_1_score = self._select_tool_with_score(expert_1, tokens, available_set=available_set)
+        tool_2, _ = self._select_tool_with_score(expert_2, tokens, available_set=available_set)
         if available_set is not None and tool_2 == tool_1 and len(available_list or []) > 1:
             ranked_all = self._score_candidate_tools(available_list, tokens)
             for cand, _ in ranked_all:
@@ -409,7 +433,13 @@ class ToolRoutingMoE:
         q1 = self.per_expert_quantiles[expert_1]
         q2 = self.per_expert_quantiles[expert_2]
         nonconformity_top1 = 1.0 - float(probs[top1_idx])
-        conformal_passed = bool(signal_hits > 0 and nonconformity_top1 <= (q1 + 1e-6))
+        expert_has_registered = (
+            available_set is None
+            or any(t in available_set for t in self.EXPERT_TOOLS[expert_1])
+            or tool_1_score > 0.0
+        )
+        registry_grounded = (available_set is None) or (tool_1 in available_set and expert_has_registered and tool_1_score > 0.0)
+        conformal_passed = bool(signal_hits > 0 and nonconformity_top1 <= (q1 + 1e-6) and registry_grounded)
 
         conf = float(probs[top1_idx])
         rationale = f"MoE Top-2: {expert_1} ({weight_1:.1%}) & {expert_2} ({weight_2:.1%}), signals={signal_hits}"
@@ -423,6 +453,8 @@ class ToolRoutingMoE:
             per_expert_conformal={expert_1: q1, expert_2: q2},
             routing_rationale=rationale,
         )
+
+    route_LockFree = route
 
     def narrow_tool_surface(
         self,

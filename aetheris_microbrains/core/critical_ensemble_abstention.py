@@ -169,6 +169,143 @@ class CriticalEnsemble:
             self._models_cache[model_name] = m
         return m
 
+    @staticmethod
+    def _unique_tokens(tokens: List[str], anchor: str) -> List[str]:
+        """Deduplicate context tokens while guaranteeing the readout anchor stays at `[-1]`."""
+        seen: Set[str] = {anchor}
+        prefix: List[str] = []
+        for tok in tokens:
+            if tok and tok not in seen:
+                seen.add(tok)
+                prefix.append(tok)
+        prefix.append(anchor)
+        return prefix
+
+    def _build_guardian_tokens(self, path_str: str, action_name: str, is_sacred: bool) -> List[str]:
+        norm = path_str.replace("\\", "/").lower()
+        feats: List[str] = []
+        if "bible" in norm:
+            feats.append("sacred_site_bible_md")
+        if "seal" in norm or "manifest" in norm:
+            feats.append("sacred_site_integrity_seal")
+        if "constitution" in norm or "aboriginal" in norm:
+            feats.append("sacred_site_aboriginal_core")
+        if is_sacred or "kinship" in norm or "totem" in norm:
+            feats.append("sacred_site_aboriginal_core")
+        feats.append(
+            "action_shell_exec_checked"
+            if action_name in ("run_command", "execute_shell")
+            else ("action_config_mutate_checked" if norm.endswith((".json", ".yaml", ".yml", ".toml")) else "clean_tool_call")
+        )
+        feats.extend(["kinship_dreamkeeper_guard", "boundary_containment_active"])
+        anchor = "action_repo_write_checked" if is_sacred else "ancestral_law_honored"
+        return self._unique_tokens(feats, anchor)
+
+    def _build_verifier_tokens(
+        self,
+        diff_analysis: Dict[str, Any],
+        has_secret_leak: bool,
+        vocab: Optional[Dict[str, int]] = None,
+    ) -> List[str]:
+        syntax_clean = bool(diff_analysis.get("syntax_valid", True))
+        security_clean = bool(diff_analysis.get("security_clean", True))
+        interface_hazards = diff_analysis.get("interface_hazards") or []
+        feats: List[str] = []
+        for tag in diff_analysis.get("ast_nodes") or []:
+            if tag not in ("ast_node_try_except", "ast_node_function_def") and (vocab is None or tag in vocab):
+                feats.append(tag)
+        if diff_analysis.get("language") not in ("python", "empty", ""):
+            feats.append("non_python_ts_json")
+        if diff_analysis.get("context_ast_parsed"):
+            feats.extend(["hunk_verified", "indented_block_valid"])
+        feats.append("ast_signature_break" if interface_hazards else "ast_interface_stable")
+        feats.append("syntax_tree_malformed" if not syntax_clean else "ast_structure_valid")
+
+        if not syntax_clean:
+            anchor = "ast_node_try_except"
+        elif has_secret_leak:
+            anchor = "secret_leak_pattern_found"
+        elif not security_clean:
+            anchor = "side_effect_subprocess_spawn"
+        else:
+            anchor = "ast_node_function_def"
+        return self._unique_tokens(feats, anchor)
+
+    def _build_predictor_tokens(
+        self,
+        path_str: str,
+        diff_lines: int,
+        diff_analysis: Dict[str, Any],
+        interface_hazards: List[str],
+    ) -> List[str]:
+        syntax_valid = bool(diff_analysis.get("syntax_valid", True))
+        norm = path_str.lower()
+        feats: List[str] = [
+            "ast_syntax_verified_clean" if syntax_valid else "ast_syntax_malformed",
+            "touches_tests_only" if "test" in norm else ("touches_documentation_only" if norm.endswith(".md") else "touches_tools_only"),
+            "ast_signature_break" if interface_hazards else "ast_interface_stable",
+        ]
+        if diff_lines > 500:
+            feats.extend(["diff_lines_massive_five_hundred", "regression_probability_high"])
+        elif diff_lines > 50:
+            feats.extend(["diff_lines_sub_two_hundred", "regression_probability_low"])
+        else:
+            feats.extend(["diff_lines_sub_ten", "atomic_hunk_isolated", "regression_probability_low"])
+
+        anchor = (
+            "breaking_change_signature_detected"
+            if (diff_lines > 500 or interface_hazards)
+            else "backward_compatibility_preserved"
+        )
+        return self._unique_tokens(feats, anchor)
+
+    def _build_classifier_tokens(
+        self,
+        shell_res: Optional[Dict[str, Any]],
+        payload_diff: Optional[str],
+        syntax_clean: bool,
+        security_clean: bool,
+    ) -> List[str]:
+        feats: List[str] = []
+        is_destructive_shell = bool(shell_res and not shell_res.get("is_safe", True))
+        if shell_res is not None:
+            feats.append(
+                "shell_destructive_block"
+                if is_destructive_shell
+                else ("shell_allowlist_pass" if shell_res.get("allowlisted") else "shell_unrecognized_escalate")
+            )
+            finding_str = " ".join(shell_res.get("findings") or []).lower()
+            if "rm_rf" in finding_str:
+                feats.append("destructive_rm_rf")
+            if "remote_code_execution" in finding_str:
+                feats.append("curl_pipe_sh_rce")
+            if "raw_disk_write" in finding_str:
+                feats.append("destructive_dd_disk")
+            if "disk_format" in finding_str:
+                feats.append("format_disk_cmd")
+            if "chmod_777" in finding_str:
+                feats.append("chmod_777_root")
+            if is_destructive_shell:
+                feats.extend(["suki_class_boundary", "failure_severity_system_critical"])
+            else:
+                feats.extend(["safe_ls_echo_pwd", "failure_severity_benign"])
+        elif payload_diff:
+            feats.append("suki_class_syntax" if not syntax_clean else "ast_structure_valid")
+            feats.append("ast_obfuscated_call" if not security_clean else "ast_interface_stable")
+            if syntax_clean and security_clean:
+                feats.append("failure_severity_benign")
+            else:
+                feats.append("failure_severity_system_critical")
+        else:
+            feats.extend(["benign_file_open", "ast_structure_valid", "failure_severity_benign"])
+
+        anchor = (
+            "failure_fatal_circuit_breaker"
+            if (is_destructive_shell or (payload_diff and (not syntax_clean or not security_clean)))
+            else "action_inspect_stack_trace"
+        )
+        return self._unique_tokens(feats, anchor)
+
     def evaluate_critical_action(
         self,
         action_name: str,
@@ -184,7 +321,7 @@ class CriticalEnsemble:
         # =========================================================================
         guardian = self._get_model("neuro_constitutional_guardian")
         is_sacred = is_protected_path(path_str)
-        g_tokens = ["sacred_site_aboriginal_core", "action_repo_write_checked"] if is_sacred else ["boundary_containment_active", "ancestral_law_honored"]
+        g_tokens = self._build_guardian_tokens(path_str, action_name, is_sacred)
 
         if guardian is None:
             g_verdict = "ABSTAIN"
@@ -231,15 +368,11 @@ class CriticalEnsemble:
         diff_findings = diff_analysis.get("findings", [])
         interface_hazards = diff_analysis.get("interface_hazards", [])
         has_secret_leak = "secret_leak_pattern_found" in diff_findings
-
-        if not syntax_clean:
-            ast_tokens = ["syntax_tree_malformed", "ast_node_try_except"]
-        elif has_secret_leak:
-            ast_tokens = ["ast_node_call", "secret_leak_pattern_found"]
-        elif not security_clean:
-            ast_tokens = ["ast_node_call", "side_effect_subprocess_spawn"]
-        else:
-            ast_tokens = ["syntax_tree_valid", "ast_node_function_def"]
+        ast_tokens = self._build_verifier_tokens(
+            diff_analysis,
+            has_secret_leak=has_secret_leak,
+            vocab=verifier.vocab if verifier is not None else None,
+        )
 
         if verifier is None:
             v_verdict = "ABSTAIN"
@@ -263,6 +396,7 @@ class CriticalEnsemble:
             v_details = {
                 "syntax_clean": syntax_clean,
                 "security_clean": security_clean,
+                "patched_file_ast_verified": bool(diff_analysis.get("patched_file_ast_verified", False)),
                 "tokens": ast_tokens,
                 "predicted_token": v_pred,
                 "prediction_set": v_res.get("prediction_set", []),
@@ -282,13 +416,7 @@ class CriticalEnsemble:
         # =========================================================================
         predictor = self._get_model("neuro_patch_quality_predictor")
         diff_lines = len(payload_diff.splitlines()) if payload_diff else 0
-
-        if diff_lines > 500 or interface_hazards:
-            p_tokens = ["diff_lines_massive_five_hundred", "breaking_change_signature_detected"]
-        elif diff_lines > 50:
-            p_tokens = ["diff_lines_sub_two_hundred", "backward_compatibility_preserved"]
-        else:
-            p_tokens = ["diff_lines_sub_ten", "backward_compatibility_preserved"]
+        p_tokens = self._build_predictor_tokens(path_str, diff_lines, diff_analysis, interface_hazards)
 
         if predictor is None:
             p_verdict = "ABSTAIN"
@@ -330,17 +458,18 @@ class CriticalEnsemble:
         # Estimator 4: Tool Failure Classifier (Layer 1 Shell Structural Parser)
         # =========================================================================
         classifier = self._get_model("neuro_tool_failure_classifier")
+        shell_res: Optional[Dict[str, Any]] = None
         if action_name in ["run_command", "execute_shell"] and path_str:
             shell_res = analyze_shell_command(path_str)
             is_destructive_shell = not shell_res["is_safe"]
         else:
             is_destructive_shell = False
-        if is_destructive_shell:
-            tf_tokens = ["suki_class_boundary", "failure_fatal_circuit_breaker"]
-        elif payload_diff and (not syntax_clean or not security_clean):
-            tf_tokens = ["suki_class_syntax", "failure_fatal_circuit_breaker"]
-        else:
-            tf_tokens = ["failure_severity_benign", "action_inspect_stack_trace"]
+        tf_tokens = self._build_classifier_tokens(
+            shell_res=shell_res,
+            payload_diff=payload_diff,
+            syntax_clean=syntax_clean,
+            security_clean=security_clean,
+        )
 
         if classifier is None:
             tf_verdict = "ABSTAIN"

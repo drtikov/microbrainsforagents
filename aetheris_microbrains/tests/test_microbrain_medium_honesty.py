@@ -264,27 +264,34 @@ class TestPipelineFixedSurfacesStayHonest:
     """Source tripwires for the concurrency-fixed surfaces (red vs their old bodies)."""
 
     def test_incubator_success_semantics(self):
-        target = ROOT / "execution/tools/dynamic/neuro_brain_incubator.py"
+        target = ROOT / "tools/neuro_brain_incubator.py"
         if not target.exists():
-            pytest.skip("Ouroboros monolith runtime path not present")
+            target = ROOT / "execution/tools/dynamic/neuro_brain_incubator.py"
         src = target.read_text(encoding="utf-8")
         assert 'res["success"] = not res.get("abstained", False)' in src
         assert 'result["success"] = result.get("status") == "updated"' in src
 
     def test_neuro_route_connectome_uses_real_route_success(self):
-        target = ROOT / "execution/tools/dynamic/neuro_route.py"
+        target = ROOT / "tools/neuro_route.py"
         if not target.exists():
-            pytest.skip("Ouroboros monolith runtime path not present")
+            target = ROOT / "execution/tools/dynamic/neuro_route.py"
         src = target.read_text(encoding="utf-8")
         assert "is_route_success" in src
 
     def test_harness_ollama_is_probed_not_hardcoded(self):
         target = ROOT / "api/routers/harness.py"
-        if not target.exists():
-            pytest.skip("Ouroboros monolith runtime path not present")
-        src = target.read_text(encoding="utf-8")
-        assert "ollama_reachable" in src
-        assert '"is_configured": True,\n        "masked_key": ollama_url' not in src
+        if target.exists():
+            src = target.read_text(encoding="utf-8")
+            assert "ollama_reachable" in src
+            assert '"is_configured": True,\n        "masked_key": ollama_url' not in src
+        else:
+            from tools.microbrain import microbrain_status
+
+            src = (ROOT / "tools/microbrain.py").read_text(encoding="utf-8")
+            assert 'BRAINS_DIR.glob("*_meta.json")' in src
+            status = microbrain_status()
+            assert status["success"] is True
+            assert len(status["brains"]) == status["count"] == 42
 
     def test_autotelic_scans_npz_not_only_npy(self):
         src = (ROOT / "core/autotelic_void_explorer.py").read_text(encoding="utf-8")

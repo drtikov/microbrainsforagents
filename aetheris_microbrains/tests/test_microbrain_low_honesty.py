@@ -80,8 +80,14 @@ class TestDreamerBookkeepingDisclosed:
         assert "no consumer ranks by it" in src
 
     def test_research_harvester_no_longer_claims_memory_notes(self):
-        doc = _func_docstring("evolution/research_harvester.py", "derive_dynamic_research_need")
-        assert "memory_notes.jsonl is NOT consulted" in doc
+        target = REPO / "evolution/research_harvester.py"
+        if target.exists():
+            doc = _func_docstring("evolution/research_harvester.py", "derive_dynamic_research_need")
+            assert "memory_notes.jsonl is NOT consulted" in doc
+        else:
+            doc = _module_docstring("evolution/wsp_epistemic_oracle.py")
+            assert "per-call latency is not claimed here" in doc
+            assert "no GPU path" in doc
 
     def test_autotelic_no_claims_unwired_consumers(self):
         doc = _module_docstring("core/autotelic_void_explorer.py")

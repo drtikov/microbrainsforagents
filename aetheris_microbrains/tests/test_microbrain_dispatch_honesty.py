@@ -253,7 +253,13 @@ class TestVisionHonesty:
         try:
             from core.vision import describe_image
         except ImportError:
-            pytest.skip("core.vision not found in standalone SDK")
+            from tools.microbrain import microbrain_consult
+
+            res = microbrain_consult("describe PNG 16x32px pixel bitmap image channels")
+            assert res["success"] is True
+            assert res["abstained"] is True
+            assert res["reason_code"] == "ood_coverage_breach"
+            return
 
         png_bytes = (
             b"\x89PNG\r\n\x1a\n"
