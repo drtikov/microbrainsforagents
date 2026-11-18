@@ -248,7 +248,7 @@ def test_fable_10_examples_01_to_05_run_cleanly_and_no_syntaxerror_hack():
         text=True,
         check=True,
     )
-    assert "Aetheris Microbrains v0.6.3 Reproducible 25-Step Agent Benchmark" in proc.stdout
+    assert "Aetheris Microbrains v0.6.4 Local 25-Step Smoke Test" in proc.stdout
     assert "Token Reduction" in proc.stdout
 
     # Also verify structured return contract of benchmark helper
@@ -566,6 +566,35 @@ def test_fable_22_zero_proposal_n_comments_in_codebase():
         if re.search(r"\bProposal\s+\d+", text):
             offenders.append(str(pyf.relative_to(PKG_DIR)))
     assert not offenders, f"Found residual Proposal references in: {offenders}"
+
+
+def test_fable_23_expanded_calibration_and_external_drop_rate():
+    import importlib.util
+    import json
+
+    meta_files = sorted((PKG_DIR / "memory" / "store" / "neuro_brains").glob("*_meta.json"))
+    assert len(meta_files) == 42
+    for mf in meta_files:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        assert data.get("n_calibration_samples", 0) >= 100, f"{mf.name} n_cal={data.get('n_calibration_samples')}"
+        assert data.get("conformal_alpha") == 0.05
+
+    bench_path = PKG_DIR.parent / "examples" / "06_real_llm_ab_benchmark.py"
+    assert bench_path.exists()
+    spec = importlib.util.spec_from_file_location("bench06", str(bench_path))
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    rep = mod.evaluate_drop_rate_and_net_savings(top_k_values=(4,))
+    assert rep["full_32_tool_schema_tokens"] >= 1500
+    row4 = rep["sweep"][0]
+    assert row4["top_k"] == 4
+    assert row4["recall_at_k_pct"] >= 95.0
+    assert row4["drop_rate_pct"] <= 5.0
+    assert row4["net_saved_pct"] >= 35.0
+    assert row4["p95_ms"] < 2.5
+
 
 
 

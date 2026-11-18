@@ -1,9 +1,14 @@
-"""Example 05: Reproducible 25-Step Agent Loop Benchmark (Latency, Token Economics & Safety).
+"""Example 05: Deterministic 25-Step Local Regression & Token-Accounting Smoke Test.
 
-Compares three configurations over an identical 25-step autonomous agent trajectory:
-1. Unfiltered 32-Tool Agent Loop (full 32-tool JSON schema prompt sent on every step, zero local gate)
+Note on scope: This script measures local CPU gate latency, deterministic safety/OOD
+decisions, and serialized JSON tool-schema token accounting without calling a remote LLM.
+For Needed-Tool Drop Rate (1 - Recall@K), retry-adjusted net token savings, and optional
+live-LLM A/B measurements, run `examples/06_real_llm_ab_benchmark.py`.
+
+Compares three configurations over an identical 25-step trajectory:
+1. Unfiltered 32-Tool Agent Loop (full 32-tool JSON schema sent on every step, zero local gate)
 2. Naive Plain Keyword Baseline (basic EN substring matcher)
-3. Aetheris Microbrains v0.6.1 (4-Layer AST/shlex Pre-Filter + MCP-Zero Top-4 Tool Narrowing)
+3. Aetheris Microbrains v0.6.4 (4-Layer AST/shlex Pre-Filter + MCP-Zero Top-4 Tool Narrowing)
 
 Usage:
     python examples/05_reproducible_25step_benchmark.py
@@ -23,10 +28,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 import aetheris_microbrains as mb
 
-# Estimated JSON schema cost per tool definition (~120 tokens/tool in OpenAI/Anthropic function schemas)
-TOKENS_PER_TOOL_SCHEMA = 120
+# Measured from real serialized 32-tool OpenAI JSON schemas (~81 tokens/tool average)
+TOKENS_PER_TOOL_SCHEMA = 81
 TOTAL_TOOLS = 32
-# Conservative energy estimate per frontier 1k schema tokens processed on datacenter GPU (~0.04 Wh/1k tok)
+# Conservative energy estimate per frontier 1k prefill schema tokens on datacenter GPU (~0.04 Wh/1k tok)
 WH_PER_1K_TOKENS = 0.04
 
 
@@ -165,13 +170,13 @@ def main() -> None:
     report = run_25step_benchmark(trials=5)
     mb_m = report["aetheris_microbrains"]
     kw_m = report["keyword_baseline"]
-    print("=== Aetheris Microbrains v0.6.3 Reproducible 25-Step Agent Benchmark ===\n")
-    print("| Architecture | 25-Step Schema Tokens | Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |")
+    print("=== Aetheris Microbrains v0.6.4 Local 25-Step Smoke Test (No Live LLM) ===\n")
+    print("| Architecture | 25-Step Schema Tokens | Prefill Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |")
     print("| --- | ---: | ---: | ---: | ---: | ---: |")
-    print(f"| Unfiltered 32-Tool Agent | {report['unfiltered_25step_schema_tokens']:,} | 0.0% | — (runs unfiltered) | 0 | — (cloud RTT) |")
+    print(f"| Unfiltered 32-Tool Agent | {report['unfiltered_25step_schema_tokens']:,} | 0.0% | — (runs unfiltered) | 0 | — (not measured) |")
     print(f"| Naive Keyword Baseline | {kw_m['25step_schema_tokens']:,} | 0.0% | {kw_m['dangerous_missed_fn']} | {kw_m['benign_false_positive_fp']} | {kw_m['mean_latency_ms']:.3f} ms |")
     print(
-        f"| Aetheris Microbrains v0.6.3 | {mb_m['25step_schema_tokens']:,} | "
+        f"| Aetheris Microbrains v0.6.4 | {mb_m['25step_schema_tokens']:,} | "
         f"{mb_m['token_reduction_pct']}% | {mb_m['dangerous_missed_fn']} | "
         f"{mb_m['benign_false_positive_fp']} | {mb_m['p95_latency_ms']:.3f} ms |"
     )

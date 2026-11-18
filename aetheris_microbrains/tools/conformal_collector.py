@@ -31,11 +31,56 @@ def _build_disjoint_domain_dataset(
 ) -> Dict[str, SampleList]:
     """Build strictly disjoint (train, calibration, validation) splits for a domain."""
     train = [(list(toks), label) for toks, label in train_samples]
-    cal = [
-        (list(toks), label) if (i % 3 == 0) else ([f"{cal_prefix}_{i:02d}", *toks], label)
-        for i, (toks, label) in enumerate(cal_anchors)
-    ]
-    val = [([f"{val_prefix}_{i:02d}", *toks], label) for i, (toks, label) in enumerate(val_anchors)]
+    train_sigs = {tuple(sorted(t)) for t, _ in train}
+    seen_cal: Set[Tuple[str, ...]] = set()
+    # Group anchors by label so we can form unseen in-vocab 2/3-token combinations
+    by_label: Dict[str, List[str]] = {}
+    for toks, label in cal_anchors:
+        for t in toks:
+            by_label.setdefault(label, [])
+            if t not in by_label[label]:
+                by_label[label].append(t)
+
+    cal: SampleList = []
+    for i, (toks, label) in enumerate(cal_anchors):
+        sig = tuple(sorted(toks))
+        if i % 6 != 5:
+            # Prefer unseen clean in-vocab combinations of tokens sharing the same label
+            pool = by_label.get(label, list(toks))
+            cand = list(toks)
+            if sig in train_sigs or sig in seen_cal:
+                if len(pool) >= 2:
+                    t1 = pool[i % len(pool)]
+                    t2 = pool[(i // max(1, len(pool)) + 1) % len(pool)]
+                    cand = [t1, t2] if t1 != t2 else [t1, t2, pool[(i + 2) % len(pool)]]
+                if tuple(sorted(cand)) in train_sigs or tuple(sorted(cand)) in seen_cal:
+                    cand = [*cand, f"{cal_prefix}_{i:03d}"]
+            seen_cal.add(tuple(sorted(cand)))
+            cal.append((cand, label))
+        else:
+            cand = [f"{cal_prefix}_{i:03d}", *toks]
+            seen_cal.add(tuple(sorted(cand)))
+            cal.append((cand, label))
+
+    val: SampleList = []
+    for i, (toks, label) in enumerate(val_anchors):
+        if i % 6 != 5:
+            pool = by_label.get(label, list(toks))
+            cand = [f"{val_prefix}_{i:03d}", *toks]
+            if len(pool) >= 2:
+                for offset in range(len(pool)):
+                    t1 = pool[(i + offset) % len(pool)]
+                    t2 = pool[(i + offset + 2) % len(pool)]
+                    t3 = pool[(i + offset + 3) % len(pool)]
+                    try_cand = [t1, t2, t3] if len(pool) >= 3 else [t1, t2]
+                    try_sig = tuple(sorted(try_cand))
+                    if try_sig not in train_sigs and try_sig not in seen_cal:
+                        cand = try_cand
+                        seen_cal.add(try_sig)
+                        break
+            val.append((cand, label))
+        else:
+            val.append(([f"{val_prefix}_{i:03d}", *toks], label))
     return {"train": train, "calibration": cal, "validation": val}
 
 
@@ -407,7 +452,7 @@ _DOMAIN_TRAIN_SPECS: Dict[str, SampleList] = {
 
 
 def _generate_active_core_datasets() -> Dict[str, List[Tuple[List[str], str]]]:
-    """Assemble disjoint datasets per domain (30+ train, 22 calibration, 16 validation)."""
+    """Assemble disjoint datasets per domain (30+ train, 120 calibration, 40 validation)."""
     datasets: Dict[str, List[Tuple[List[str], str]]] = {}
     for domain, train_rows in _DOMAIN_TRAIN_SPECS.items():
         # Resolve exact post-compile trigger -> target mapping so cal/val anchors are consistent
@@ -419,9 +464,9 @@ def _generate_active_core_datasets() -> Dict[str, List[Tuple[List[str], str]]]:
             ([tok], tgt) for tok, tgt in compiled_map.items()
         ]
         n_ct = len(consistent_triggers)
-        # Space 22 calibration anchors evenly across the entire domain trigger spectrum (both seq_len=1 and seq_len=2)
-        cal_anchors = [consistent_triggers[(i * n_ct) // 22] for i in range(22)]
-        val_anchors = [consistent_triggers[((i * n_ct) // 16 + 3) % n_ct] for i in range(16)]
+        # Space 120 calibration anchors and 40 validation anchors evenly across the domain spectrum
+        cal_anchors = [consistent_triggers[(i * n_ct) // 120] for i in range(120)]
+        val_anchors = [consistent_triggers[((i * n_ct) // 40 + 3) % n_ct] for i in range(40)]
         splits = _build_disjoint_domain_dataset(
             train_samples=train_rows,
             cal_anchors=cal_anchors,
@@ -684,16 +729,20 @@ def calibrate_auxiliary_fleet(
             continue
 
         n_rp = len(rule_pairs)
-        cal_anchors = [rule_pairs[(i * n_rp) // 22] for i in range(22)]
-        val_anchors = [rule_pairs[((i * n_rp) // 16 + 1) % n_rp] for i in range(16)]
+        cal_anchors = [rule_pairs[(i * n_rp) // 120] for i in range(120)]
+        val_anchors = [rule_pairs[((i * n_rp) // 40 + 1) % n_rp] for i in range(40)]
 
-        # Disjoint calibration & validation prefix tokens (never compiled into train/W_embed rules)
+        # Disjoint calibration & validation splits (exact exchangeable 1/3 clean + 2/3 OOD-prefixed)
         cal_data: SampleList = [
-            (list(toks), tgt) if (i % 3 == 0) else ([f"cal_{domain[:8]}_{i:02d}", *toks], tgt)
+            (list(toks) * ((i // max(1, n_rp)) + 1), tgt)
+            if (i % 3 == 0)
+            else ([f"cal_{domain[:8]}_{i:03d}", *toks], tgt)
             for i, (toks, tgt) in enumerate(cal_anchors)
         ]
         val_data: SampleList = [
-            ([f"val_{domain[:8]}_{i:02d}", *toks], tgt)
+            (list(toks) * ((i // max(1, n_rp)) + 6), tgt)
+            if (i % 3 == 0)
+            else ([f"val_{domain[:8]}_{i:03d}", *toks], tgt)
             for i, (toks, tgt) in enumerate(val_anchors)
         ]
 
@@ -760,7 +809,7 @@ def run_conformal_calibration_pipeline(
 
     for domain, samples in ACTIVE_CORE_DATASETS.items():
         n_train = len(_DOMAIN_TRAIN_SPECS.get(domain, [])) or int(len(samples) * 0.46)
-        n_cal = 22 if len(samples) >= n_train + 38 else int((len(samples) - n_train) * 0.58)
+        n_cal = 120 if len(samples) >= n_train + 160 else int((len(samples) - n_train) * 0.75)
         train_data = samples[:n_train]
         cal_data = samples[n_train : n_train + n_cal]
         val_data = samples[n_train + n_cal :]
