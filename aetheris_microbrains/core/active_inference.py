@@ -91,43 +91,50 @@ ACTION_TRANSITION_PRIORS: Dict[str, Dict[str, float]] = {
 }
 
 _DEFAULT_CATEGORY = "generic_action"
+NEGATION_WINDOW = 8
 
 _NEGATION_TOKENS = {
-    "not", "don't", "dont", "do", "didn't", "didnt", "never",
+    "not", "don't", "dont", "didn't", "didnt", "never",
     "avoid", "skip", "without", "no", "не", "без", "перестань",
 }
+_NEGATION_BIGRAMS = {("do", "not"), ("did", "not"), ("не", "надо"), ("не", "нужно")}
 
 
-def _has_negation_prefix(text: str, match_start: int, window: int = 4) -> bool:
-    """Return True if a negation particle appears within `window` words before `match_start`."""
+def _has_negation_prefix(text: str, match_start: int, window: int = NEGATION_WINDOW) -> bool:
+    """Return True if a negation particle/bigram appears within `window` words in the same clause."""
     preceding = text[:match_start].lower()
-    tokens = [tok for tok in re.split(r"[\s,;:.!?()\[\]\"]+", preceding.strip()) if tok]
+    # Scope negation search to the current clause (stop at sentence/clause punctuation)
+    clause = re.split(r"[,;.!?]+", preceding)[-1]
+    tokens = [tok for tok in re.split(r"[\s()\[\]\"]+", clause.strip()) if tok]
     if not tokens:
         return False
-    return any(tok in _NEGATION_TOKENS for tok in tokens[-window:])
+    tail = tokens[-max(1, int(window)):]
+    if any(tok in _NEGATION_TOKENS for tok in tail):
+        return True
+    return any((tail[i], tail[i + 1]) in _NEGATION_BIGRAMS for i in range(len(tail) - 1))
 
 
-def _has_unnegated_keyword(text: str, keywords: Tuple[str, ...]) -> bool:
+def _has_unnegated_keyword(text: str, keywords: Tuple[str, ...], negation_window: int = NEGATION_WINDOW) -> bool:
     for kw in keywords:
         start = 0
         while True:
             idx = text.find(kw, start)
             if idx == -1:
                 break
-            if not _has_negation_prefix(text, idx):
+            if not _has_negation_prefix(text, idx, window=negation_window):
                 return True
             start = idx + len(kw)
     return False
 
 
-def _action_category(text: str) -> str:
+def _action_category(text: str, negation_window: int = NEGATION_WINDOW) -> str:
     """Map goal/prompt text to an action category, ignoring negated clauses."""
     t = str(text or "").lower()
-    if _has_unnegated_keyword(t, ("fix", "repair", "bug", "error", "debug", "broken")):
+    if _has_unnegated_keyword(t, ("fix", "repair", "bug", "error", "debug", "broken"), negation_window):
         return "careful_repair"
-    if _has_unnegated_keyword(t, ("how", "why", "analy", "анализ", "breakdown", "explain", "question")):
+    if _has_unnegated_keyword(t, ("how", "why", "analy", "анализ", "breakdown", "explain", "question"), negation_window):
         return "logical_breakdown"
-    if _has_unnegated_keyword(t, ("build", "implement", "create", "write", "optimi", "deploy")):
+    if _has_unnegated_keyword(t, ("build", "implement", "create", "write", "optimi", "deploy"), negation_window):
         return "focused_execution"
     return _DEFAULT_CATEGORY
 

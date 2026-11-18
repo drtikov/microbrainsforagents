@@ -155,9 +155,8 @@ class IntentPersistenceTracker:
                 instant_drift = min(1.0, max(0.55, 1.0 - overlap_ratio + 0.35 * (len(negated_roots) / max(1, len(self.root_terms)))))
             else:
                 instant_drift = max(0.0, 1.0 - overlap_ratio)
-                if not overlap:
-                    sem_sim = _trigram_cosine_similarity(self.root_goal, combined_current)
-                    instant_drift = min(instant_drift, max(0.25, 1.0 - 1.5 * sem_sim))
+                sem_sim = _trigram_cosine_similarity(self.root_goal, combined_current)
+                instant_drift = min(instant_drift, max(0.25, 1.0 - 1.5 * sem_sim))
         else:
             instant_drift = 0.0
 
@@ -197,7 +196,12 @@ class IntentPersistenceTracker:
             res = consult_microbrain("intent_persistence_tracker", tokens)
             if isinstance(res, dict) and not res.get("abstained", False):
                 neural_sig = res.get("prediction")
-            drift_res = consult_microbrain("drift_detector", ["kl_divergence_spike"] if pre_drift else ["stable_distribution"])
+            drift_res = consult_microbrain(
+                "drift_detector",
+                ["intent_alignment_cosine_low_drift", "task_amnesia_risk_detected"]
+                if pre_drift
+                else ["scratchpad_entropy_stable", "context_coherence_optimal"],
+            )
             if isinstance(drift_res, dict) and not drift_res.get("abstained", False) and drift_res.get("prediction"):
                 d_pred = str(drift_res["prediction"])
                 neural_sig = f"{neural_sig} | drift:{d_pred}" if neural_sig else f"drift:{d_pred}"
