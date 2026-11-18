@@ -30,7 +30,7 @@ Modern LLM agents send thousands of redundant tool-schema tokens in every prompt
 
 ### 🌍 Ecological & Sustainable AI (Green AI) Impact
 * **Orders-of-Magnitude Lower Energy Per Gate:** Running a `< 2 ms` NumPy / AST / `shlex` pre-filter on a local CPU consumes fractions of a milliwatt-hour—**thousands of times less electricity** than waking a cluster of datacenter GPUs for a full transformer forward pass per agent loop step.
-* **Cutting Quadratic Attention Compute on Every Agent Turn:** Narrowing 32+ tool definitions down to Top-4 via `narrow_tool_surface()` eliminates ~75–87.5% of redundant tool-schema tokens across every prompt turn, shrinking total datacenter FLOPs, $\text{CO}_2\text{e}$ carbon footprint, and datacenter evaporative cooling water consumed over long multi-step autonomous runs.
+* **Cutting Quadratic Attention Compute on Every Agent Turn:** Narrowing 32+ tool definitions down to Top-4 via `narrow_tool_surface()` eliminates **39.7% net prefill schema tokens after retries** on diverse external tasks (`81.0%` on the 25-step local smoke test), shrinking datacenter FLOPs, $\text{CO}_2\text{e}$ carbon footprint, and cooling water consumed over long multi-step autonomous runs.
 * **Hardware Longevity & Zero E-Waste Pressure:** Runs efficiently on existing laptops, edge CPUs, and legacy OpenCL GPUs without demanding continuous hardware upgrades just to route tools or validate patches.
 
 ---
@@ -55,7 +55,7 @@ Agent Input (tool call, diff, shell command, or intent query)
  │
  ├─ Layer 2: Analytical Micro-Classifiers & Split-Conformal Abstention
  │    • Deterministic SHA-256 bilingual (RU/EN) char-trigram + lexical routing (`ToolRoutingMoE`), constrained to `available_tools` + MCP-Zero Top-K narrowing (`narrow_tool_surface`, >=75% schema reduction)
- │    • 42-model fleet calibrated at alpha=0.05 on n_cal=22 held-out samples (>= 19 required), Mondrian per-class quantiles, dynamic caller `alpha` recomputation, `W_embed_anchor`, and SHA-256 checksums (`allow_pickle=False`)
+ │    • 42-model fleet calibrated at alpha=0.05 on n_cal=120 held-out samples (n_val=40, std error <= 0.0197), Mondrian per-class quantiles, dynamic caller `alpha` recomputation, `W_embed_anchor`, and SHA-256 checksums (`allow_pickle=False`)
  │    • Pickle-safe Weight-Space VSA (`weight_space_vsa.npz`) ranking nearest domains via actual Count-Sketch projected parameter weights
  │    • Empirical Fisher diagonal EWC continual plasticity (`_candidates/` → leak-free holdout verification → `_rollback/`)
  │    • Sliding-window drift telemetry (`drift_detected`) + Gibbs-Candès Adaptive Conformal Inference (`update_aci_quantile`)
@@ -240,7 +240,7 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.6.3`: 17 Suites — 190 Passed, 0 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.6.4`: 17 Suites — 191 Passed, 0 Skipped)
 
 Run the full verification suite (zero monolith runtime skips):
 
@@ -248,19 +248,32 @@ Run the full verification suite (zero monolith runtime skips):
 pytest aetheris_microbrains/tests -q
 ```
 
-Run the standalone reproducible 25-step agent trajectory benchmark (`examples/05_reproducible_25step_benchmark.py`):
+### 1. External Tool-Drop Rate, Retry Economics & Live-LLM A/B (\examples/06_real_llm_ab_benchmark.py\)
+Evaluates arrow_tool_surface(top_k=K)\ across 40 diverse external SWE/DevOps/BFCL-style tasks using real serialized 32-tool OpenAI JSON schemas (**,589\ tokens/step**):
 
-```bash
+\\ash
+python examples/06_real_llm_ab_benchmark.py
+# Optional live-LLM A/B comparison against any OpenAI-compatible / Ollama endpoint:
+python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
+\
+| Top-K | Recall@K | Needed-Tool Drop Rate | Escalated to Full | OOD Escalated | Gross Saved | Net Saved (After Retries) | Local p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 92.1% | 7.9% (3/38) | 19/38 | 1/2 | 46.7% | 35.1% | 1.718 ms |
+| **4** | **97.4%** | **2.6% (1/38)** | **19/38** | **1/2** | **43.5%** | **39.7%** | **0.984 ms** |
+| 6 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 40.5% | 36.6% | 1.859 ms |
+| 8 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 37.5% | 33.6% | 1.140 ms |
+
+### 2. Local 25-Step Regression & Token-Accounting Smoke Test (\examples/05_reproducible_25step_benchmark.py\)
+Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (no live LLM called):
+
+\\ash
 python examples/05_reproducible_25step_benchmark.py
-```
-
-Measured output across the 25-step mixed autonomous trajectory (bilingual RU/EN routing, indented/except/comment/non-Python hunks, obfuscated AST/secret/shell attacks, and OOD queries):
-
-| Architecture | 25-Step Schema Tokens | Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
+\
+| Architecture | 25-Step Schema Tokens | Prefill Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Unfiltered 32-Tool Agent | 96,000 | 0.0% | — (unfiltered) | 0 | — (cloud RTT) |
-| Naive Keyword Baseline | 96,000 | 0.0% | 8 | 4 | 0.004 ms |
-| **Aetheris Microbrains v0.6.3** | **18,240** | **81.0%** | **0** | **0** | **1.115 ms** |
+| Unfiltered 32-Tool Agent | 64,800 | 0.0% | — (runs unfiltered) | 0 | — (not measured) |
+| Naive Keyword Baseline | 64,800 | 0.0% | 8 | 4 | 0.002 ms |
+| **Aetheris Microbrains v0.6.4** | **12,312** | **81.0%** | **0** | **0** | **0.962 ms** |
 
 Also run the **de-leaked 120-query RU/EN + 20-query Held-Out Paraphrased SWE Ablation** (`aetheris_microbrains/tests/test_colony_swe_shadow.py`):
 * **Standard 120 RU/EN Queries:** Hybrid Microbrain **106/120 (88.3%)** strict accuracy (**56/60 = 93.3%** RU) with **`0/50`** missed escalations vs. **`4/50`** missed on Pure Rules Baseline.
