@@ -456,17 +456,58 @@ class ToolRoutingMoE:
 
     route_LockFree = route
 
+    def _semantic_description_scores(
+        self,
+        task_description: str,
+        catalog: Sequence[str],
+        tool_descriptions: Optional[Dict[str, str]] = None,
+        embed_fn: Optional[Any] = None,
+    ) -> Dict[str, float]:
+        """Compute semantic similarity between task_description and tool descriptions.
+
+        Uses caller-supplied `embed_fn(texts) -> (N, D)` when provided, otherwise falls
+        back to a zero-dependency pure-NumPy char-trigram + lexical cosine projection.
+        """
+        if not catalog or (not tool_descriptions and embed_fn is None):
+            return {}
+        texts = [
+            f"{name.replace('_', ' ')} {str((tool_descriptions or {}).get(name, '')).strip()}".strip()
+            for name in catalog
+        ]
+        if embed_fn is not None:
+            vecs = np.asarray(embed_fn([task_description, *texts]), dtype=np.float64)
+            q_vec = vecs[0]
+            q_norm = float(np.linalg.norm(q_vec)) + 1e-12
+            doc_vecs = vecs[1:]
+            doc_norms = np.linalg.norm(doc_vecs, axis=1) + 1e-12
+            sims = (doc_vecs @ q_vec) / (doc_norms * q_norm)
+            return {name: float(sims[idx]) for idx, name in enumerate(catalog)}
+
+        q_tokens = [t for t in re.findall(r"(?u)\b\w+\b", str(task_description or "").lower()) if len(t) > 1]
+        q_emb = self._embed_context(q_tokens)
+        q_norm = float(np.linalg.norm(q_emb)) + 1e-12
+        scores: Dict[str, float] = {}
+        for name, txt in zip(catalog, texts):
+            d_tokens = [t for t in re.findall(r"(?u)\b\w+\b", txt.lower()) if len(t) > 1]
+            d_emb = self._embed_context(d_tokens)
+            d_norm = float(np.linalg.norm(d_emb)) + 1e-12
+            scores[name] = float(np.dot(q_emb, d_emb) / (q_norm * d_norm))
+        return scores
+
     def narrow_tool_surface(
         self,
         task_description: str,
         available_tools: Optional[Sequence[str]] = None,
         top_k: int = 5,
         context_tags: Optional[List[str]] = None,
+        tool_descriptions: Optional[Dict[str, str]] = None,
+        embed_fn: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """MCP-Zero style hierarchical Top-K tool surface narrowing before LLM invocation.
 
         Returns Top-K candidate tools when conformal gating succeeds; escalates the full
-        catalog unchanged on out-of-distribution / ambiguous queries.
+        catalog unchanged on out-of-distribution / ambiguous queries. Supports optional
+        semantic `tool_descriptions` and dense `embed_fn` hybrid re-ranking.
         """
         k = max(1, int(top_k))
         all_catalog = (
@@ -476,6 +517,26 @@ class ToolRoutingMoE:
         )
         decision = self.route(task_description, context_tags=context_tags, available_tools=all_catalog if available_tools is not None else None)
         if not decision.conformal_passed:
+            if embed_fn is not None and all_catalog:
+                sem = self._semantic_description_scores(
+                    task_description,
+                    all_catalog,
+                    tool_descriptions=tool_descriptions,
+                    embed_fn=embed_fn,
+                )
+                if sem and max(sem.values()) >= 0.70:
+                    ranked_sem = sorted(sem.items(), key=lambda x: -x[1])
+                    narrowed_sem = [name for name, _ in ranked_sem[:k]]
+                    reduction = round(1.0 - (len(narrowed_sem) / max(1, len(all_catalog))), 4)
+                    return {
+                        "mode": "narrowed",
+                        "candidate_tools": narrowed_sem,
+                        "selected_tool": narrowed_sem[0],
+                        "conformal_passed": False,
+                        "confidence": round(max(sem.values()), 4),
+                        "reduction_ratio": max(0.0, reduction),
+                        "semantic_hybrid": True,
+                    }
             return {
                 "mode": "escalate_full_catalog",
                 "candidate_tools": all_catalog,
@@ -491,21 +552,38 @@ class ToolRoutingMoE:
 
         top_expert = decision.top_experts[0][0]
         ranked = self._score_candidate_tools(all_catalog, tokens, expert=top_expert)
-        narrowed: List[str] = [decision.selected_tool]
-        for tool_name, _ in ranked:
-            if tool_name not in narrowed and len(narrowed) < k:
-                narrowed.append(tool_name)
-        if decision.secondary_tool in all_catalog and decision.secondary_tool not in narrowed and len(narrowed) < k:
-            narrowed.append(decision.secondary_tool)
+        if tool_descriptions or embed_fn is not None:
+            sem = self._semantic_description_scores(
+                task_description,
+                all_catalog,
+                tool_descriptions=tool_descriptions,
+                embed_fn=embed_fn,
+            )
+            ranked = sorted(
+                ((name, score + 3.0 * sem.get(name, 0.0)) for name, score in ranked),
+                key=lambda x: -x[1],
+            )
+            narrowed: List[str] = []
+            for tool_name, _ in ranked:
+                if tool_name not in narrowed and len(narrowed) < k:
+                    narrowed.append(tool_name)
+        else:
+            narrowed = [decision.selected_tool]
+            for tool_name, _ in ranked:
+                if tool_name not in narrowed and len(narrowed) < k:
+                    narrowed.append(tool_name)
+            if decision.secondary_tool in all_catalog and decision.secondary_tool not in narrowed and len(narrowed) < k:
+                narrowed.append(decision.secondary_tool)
 
         reduction = round(1.0 - (len(narrowed) / max(1, len(all_catalog))), 4)
         return {
             "mode": "narrowed",
             "candidate_tools": narrowed,
-            "selected_tool": decision.selected_tool,
+            "selected_tool": narrowed[0] if narrowed else decision.selected_tool,
             "conformal_passed": True,
             "confidence": round(decision.confidence, 4),
             "reduction_ratio": max(0.0, reduction),
+            "semantic_hybrid": bool(tool_descriptions or embed_fn is not None),
         }
 
 
@@ -525,6 +603,8 @@ def narrow_tool_surface(
     available_tools: Optional[Sequence[str]] = None,
     top_k: int = 5,
     context_tags: Optional[List[str]] = None,
+    tool_descriptions: Optional[Dict[str, str]] = None,
+    embed_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Convenience entrypoint for MCP-Zero Top-K tool catalog narrowing."""
     return get_tool_routing_moe().narrow_tool_surface(
@@ -532,4 +612,6 @@ def narrow_tool_surface(
         available_tools=available_tools,
         top_k=top_k,
         context_tags=context_tags,
+        tool_descriptions=tool_descriptions,
+        embed_fn=embed_fn,
     )

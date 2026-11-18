@@ -11,6 +11,7 @@ Clean Python package: does NOT mutate `sys.path` or shadow host modules.
 
 from __future__ import annotations
 
+from .hook import evaluate_hook_payload
 from .core.layered_decision_engine import (
     PolicyConfig,
     analyze_code_diff,
@@ -226,4 +227,5 @@ __all__ = [
     "run_wsp_surgeon",
     "ConformalCalibrationReport",
     "run_conformal_calibration_pipeline",
+    "evaluate_hook_payload",
 ]

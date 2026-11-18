@@ -5,9 +5,9 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.6.4`) is a deterministic, layered local pre-flight safety, full-file AST/shell verification, and registry-enforced tool-routing library for autonomous LLM agents built in pure NumPy (with optional OpenCL acceleration).
+**Aetheris Microbrains** (`v0.6.5`) is a deterministic, layered local pre-flight safety, full-file AST/shell verification, and registry-enforced tool-routing library for autonomous LLM agents built in pure NumPy (with optional OpenCL acceleration).
 
-> **Architectural Honesty Note (`v0.6.4`):** Microbrains are **not** SGD-trained generative deep LLMs, and they do **not** replace general language reasoning. They are a **fast (`< 2 ms` p95 on CPU), deterministic 4-layer hybrid pre-filter and coprocessor** that stands *in front* of cloud LLMs and runtime execution: **Layer 0 universal SWE security paths (`.env`, `.git/hooks/`, `.ssh/`, `credentials.json`), risk classes, and live `available_tools` enforcement**, **Layer 1 full-file patched Python AST reconstruction (`ast.parse` over applied unified diffs), cyclomatic complexity vs. static data-table differentiation, hardcoded secret-leak detection, generic repo blast-radius scanning, and allowlist-first `shlex` shell parsing**, **Layer 2 grounded `CascadeEnsembleRouter`, bilingual `IntentPersistenceTracker`, `MetacognitiveCalibrator`, ridge-fitted `ToolRoutingMoE`, multi-feature ensemble voting, and 42 clean-vocabulary Kuramoto-Hopfield models** ($n_{\text{cal}} = 120 \gg 19$, $1 - \alpha = 95\%$, std error $\le 0.0197$, exact Clopper-Pearson 95% upper failure bounds, and journal recalibration), and **Layer 3 honest LLM / human escalation** (with structured `escalation_payload` whenever tools or prompts are unrecognized).
+> **Architectural Honesty Note (`v0.6.5`):** Microbrains are **not** SGD-trained generative deep LLMs, and they do **not** replace general language reasoning or an OS sandbox. They are a **fast (`< 2 ms` p95 on CPU), deterministic 4-layer hybrid pre-filter and coprocessor** that stands *in front* of cloud LLMs and runtime execution: **Layer 0 universal SWE security paths (`.env`, `.git/hooks/`, `.ssh/`, `credentials.json`), risk classes, and live `available_tools` enforcement**, **Layer 1 full-file patched Python AST reconstruction (`ast.parse` over applied unified diffs), opt-in `strict_ast_allowlist` mode, cyclomatic complexity vs. static data-table differentiation, hardcoded secret-leak detection, generic repo blast-radius scanning, and allowlist-first `shlex` shell parsing**, **Layer 2 grounded `CascadeEnsembleRouter`, bilingual `IntentPersistenceTracker`, `MetacognitiveCalibrator`, ridge-fitted `ToolRoutingMoE` + optional semantic `embed_fn`/`tool_descriptions` hybrid, and 42 clean-vocabulary Kuramoto-Hopfield models** ($n_{\text{cal}} = 120 \gg 19$, $1 - \alpha = 95\%$, std error $\le 0.0197$, exact Clopper-Pearson 95% upper failure bounds, and journal recalibration), **Layer 3 honest LLM / human escalation**, plus a drop-in **`PreToolUse` hook CLI (`python -m aetheris_microbrains.hook`)**. **License:** PolyForm Noncommercial 1.0.0 (commercial use requires a commercial license).
 
 ---
 
@@ -229,18 +229,26 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🎯 Scope & Design Principles
+## 🎯 Scope, Where It Fits & Alternatives
 
-* **What Microbrains Are Built For:**
-  - Sub-millisecond pre-flight structural filtering on diffs (AST syntax + call-graph sinks + signature diffs), shell commands (`shlex`), and policy risk boundaries before hitting remote LLMs.
-  - Narrow tool routing across known tool registries with explicit abstention (`ood_coverage_breach` / `conformal_passed=False`) whenever input shares insufficient vocabulary.
+* **Where Microbrains Fits:** A **single `pip install` (`numpy`-only), zero-GPU pre-flight bundle** for custom/local agents or harnesses that want AST diff checks, secret scanning, allowlist-first `shlex` shell gating, and Top-K tool narrowing in `< 2 ms` without wiring 4 separate external binaries/services.
+* **Established Alternatives by Component:**
+
+| Capability | Microbrains Approach | Established Specialized Alternatives |
+| --- | --- | --- |
+| Python code & diff checks | Full-file `ast.parse` + sink visitor + opt-in `PolicyConfig(strict_ast_allowlist=True)` | Bandit, Semgrep, Meta LlamaFirewall CodeShield |
+| Secret detection | Diff literal & token-prefix scanner (`secret_leak_pattern_found`) | `gitleaks`, `trufflehog` |
+| Shell allow/deny | Allowlist-first `shlex` parser (`unknown -> escalate`) | Harness permission rules / `PreToolUse` hooks (Claude Code, Codex) — or drop in `python -m aetheris_microbrains.hook` |
+| Tool narrowing | `< 1 ms` bilingual SHA-256 char-trigram MoE + optional `embed_fn`/`tool_descriptions` hybrid | Anthropic deferred tool loading, `langgraph-bigtool` |
+
 * **What Microbrains Are NOT For:**
-  - Replacing general LLM reasoning on arbitrary natural language tasks. Unknown or open-ended prompts deterministically abstain and escalate to Layer 3 (LLM).
-  - Acting as a standalone OS sandbox: executable confirmation & environment isolation remain enforced at the runtime policy boundary.
+  - Replacing general LLM reasoning on arbitrary natural language tasks (unknown prompts deterministically abstain and escalate to Layer 3).
+  - Acting as a standalone OS sandbox: whatever static rules miss gets through unless isolated at the OS/container boundary.
+* **License:** **PolyForm Noncommercial 1.0.0** — free for educational, research, and noncommercial use; commercial/work use requires a commercial license.
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.6.4`: 17 Suites — 191 Passed, 0 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.6.5`: 17 Suites — 194 Passed, 0 Skipped)
 
 Run the full verification suite (zero monolith runtime skips):
 
@@ -248,14 +256,15 @@ Run the full verification suite (zero monolith runtime skips):
 pytest aetheris_microbrains/tests -q
 ```
 
-### 1. External Tool-Drop Rate, Retry Economics & Live-LLM A/B (\examples/06_real_llm_ab_benchmark.py\)
-Evaluates arrow_tool_surface(top_k=K)\ across 40 diverse external SWE/DevOps/BFCL-style tasks using real serialized 32-tool OpenAI JSON schemas (**,589\ tokens/step**):
+### 1. External Tool-Drop Rate, Retry Economics & Live-LLM A/B (`examples/06_real_llm_ab_benchmark.py`)
+Evaluates `narrow_tool_surface(top_k=K)` across 40 diverse external SWE/DevOps/BFCL-style tasks using real serialized 32-tool OpenAI JSON schemas (**`2,589` tokens/step**):
 
-\\ash
+```bash
 python examples/06_real_llm_ab_benchmark.py
 # Optional live-LLM A/B comparison against any OpenAI-compatible / Ollama endpoint:
 python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
-\
+```
+
 | Top-K | Recall@K | Needed-Tool Drop Rate | Escalated to Full | OOD Escalated | Gross Saved | Net Saved (After Retries) | Local p95 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 2 | 92.1% | 7.9% (3/38) | 19/38 | 1/2 | 46.7% | 35.1% | 1.718 ms |
@@ -263,17 +272,25 @@ python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
 | 6 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 40.5% | 36.6% | 1.859 ms |
 | 8 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 37.5% | 33.6% | 1.140 ms |
 
-### 2. Local 25-Step Regression & Token-Accounting Smoke Test (\examples/05_reproducible_25step_benchmark.py\)
+### 2. Local 25-Step Regression & Token-Accounting Smoke Test (`examples/05_reproducible_25step_benchmark.py`)
 Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (no live LLM called):
 
-\\ash
+```bash
 python examples/05_reproducible_25step_benchmark.py
-\
+```
+
 | Architecture | 25-Step Schema Tokens | Prefill Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Unfiltered 32-Tool Agent | 64,800 | 0.0% | — (runs unfiltered) | 0 | — (not measured) |
 | Naive Keyword Baseline | 64,800 | 0.0% | 8 | 4 | 0.002 ms |
-| **Aetheris Microbrains v0.6.4** | **12,312** | **81.0%** | **0** | **0** | **0.962 ms** |
+| **Aetheris Microbrains v0.6.5** | **12,312** | **81.0%** | **0** | **0** | **0.962 ms** |
+
+### 3. Drop-In `PreToolUse` Hook CLI & Strict AST Allowlist (`v0.6.5`)
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON:
+
+```bash
+echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast
+```
 
 Also run the **de-leaked 120-query RU/EN + 20-query Held-Out Paraphrased SWE Ablation** (`aetheris_microbrains/tests/test_colony_swe_shadow.py`):
 * **Standard 120 RU/EN Queries:** Hybrid Microbrain **106/120 (88.3%)** strict accuracy (**56/60 = 93.3%** RU) with **`0/50`** missed escalations vs. **`4/50`** missed on Pure Rules Baseline.

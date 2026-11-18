@@ -100,6 +100,13 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
 )
 
 
+DEFAULT_ALLOWED_AST_IMPORTS: Tuple[str, ...] = (
+    "abc", "collections", "dataclasses", "datetime", "enum",
+    "functools", "itertools", "json", "math", "pathlib",
+    "re", "statistics", "typing",
+)
+
+
 @dataclass
 class PolicyConfig:
     """Configurable security policy without hardcoded domain dogma."""
@@ -108,6 +115,8 @@ class PolicyConfig:
     require_approval_for_external: bool = False
     require_approval_for_irreversible: bool = True
     max_diff_lines: int = 480
+    strict_ast_allowlist: bool = False
+    allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
 
 
 DEFAULT_POLICY = PolicyConfig()
@@ -888,6 +897,22 @@ def analyze_code_diff(
         and executable_stmt_count <= 2
     )
     ast_nodes = _collect_ast_node_tags(complexity_tree)
+    imported_modules: List[str] = []
+    dynamic_calls: List[str] = []
+    for node in ast.walk(complexity_tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_mod = alias.name.split(".")[0]
+                if top_mod and top_mod not in imported_modules:
+                    imported_modules.append(top_mod)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top_mod = node.module.split(".")[0]
+            if top_mod and top_mod not in imported_modules:
+                imported_modules.append(top_mod)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in {"getattr", "setattr", "delattr", "__import__", "compile", "vars", "globals", "locals"}:
+                if node.func.id not in dynamic_calls:
+                    dynamic_calls.append(node.func.id)
 
     return {
         "language": "python",
@@ -901,6 +926,8 @@ def analyze_code_diff(
         "is_static_data_or_doc": is_static_data_or_doc,
         "context_ast_parsed": context_ast_parsed,
         "patched_file_ast_verified": patched_file_ast_verified,
+        "imported_modules": imported_modules,
+        "dynamic_calls": dynamic_calls,
     }
 
 
@@ -1213,7 +1240,7 @@ def decide(
             ood_hits += 1
         denom = max(1, len(recent) + 1)
         drift_detected = bool(denom >= 10 and (ood_hits / float(denom)) > 0.60)
-        upper_error_bound_95 = round(1.0 - (0.05 ** (1.0 / 22.0)), 4)
+        upper_error_bound_95 = round(1.0 - (0.05 ** (1.0 / 120.0)), 4)
 
         out: Dict[str, Any] = {
             "decision": decision,
@@ -1280,6 +1307,26 @@ def decide(
                 return _finish("deny", diff_res["findings"][0], ["deny"], "layer1_ast_security_veto", 1)
             if diff_res["line_count"] > cfg.max_diff_lines:
                 return _finish("escalate", "high_blast_radius", ["allow", "deny"], "layer1_diff_scale_exceeded", 1)
+            if cfg.strict_ast_allowlist and diff_res.get("language") == "python":
+                allowed_mods = set(cfg.allowed_ast_imports)
+                unapproved = [m for m in diff_res.get("imported_modules", []) if m not in allowed_mods]
+                if unapproved:
+                    return _finish(
+                        "escalate",
+                        f"strict_ast_unapproved_import:{unapproved[0]}",
+                        ["allow", "deny"],
+                        "layer1_strict_ast_allowlist_escalate",
+                        1,
+                    )
+                dyn_calls = diff_res.get("dynamic_calls", [])
+                if dyn_calls:
+                    return _finish(
+                        "escalate",
+                        f"strict_ast_dynamic_call:{dyn_calls[0]}",
+                        ["allow", "deny"],
+                        "layer1_strict_ast_allowlist_escalate",
+                        1,
+                    )
 
         # Pure allowlisted/verified tool invocation without free-text routing
         if tool_name and not query_text:
