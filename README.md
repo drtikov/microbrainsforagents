@@ -5,7 +5,7 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.6.9`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of AI coding agents (Claude Code, SWE-agent, Codex, or custom LLM loops).
+**Aetheris Microbrains** (`v0.6.9`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of any autonomous AI agent — from coding agents (**Claude Code**, **SWE-agent**, **Codex**) to personal/OS assistants (**OpenClaw**, **Hermes**, or custom LLM loops).
 
 It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**.
 
