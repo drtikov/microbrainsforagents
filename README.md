@@ -161,7 +161,36 @@ nearest = vsa.find_nearest_domains("tool_routing_v2", top_k=3)
 print("Nearest models in parameter space:", nearest)
 ```
 
-### 5. Allowlist-First Shell Gate, File-Context AST & Shadow Mode
+### 5. Claude Code & Agent Harness PreToolUse Hook Integration
+
+Microbrains integrates directly into **Claude Code**, **Codex**, or any custom agent framework as a pre-tool execution hook.
+
+Add to your `~/.claude/settings.json` or project hook configuration:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "command": "python -m aetheris_microbrains.hook --strict-ast",
+        "onFailure": "block"
+      }
+    ]
+  }
+}
+```
+
+**Key Hook Modes & CLI Flags:**
+* **Prefilter Mode (Default):** On safe operations, the hook exits `0` silently. It does **not** bypass Claude Code's native user confirmation dialogs—it only intercepts dangerous or broken calls before the prompt is shown.
+* **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
+* **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
+* **Fail-Closed on Exceptions:** Unexpected runtime errors return exit code `2` with error details in `stderr`, preventing unsafe actions from running if the hook fails.
+* **`--log-decisions` (or `AETHERIS_LOG_DECISIONS=1`):** Records decision telemetry to `memory/decision_journal.jsonl` across independent hook processes, enabling cross-process drift detection.
+
+---
+
+### 6. Allowlist-First Shell Gate, File-Context AST & Shadow Mode
 
 ```python
 import aetheris_microbrains as mb
@@ -183,7 +212,7 @@ verdict = mb.decide(
 print(verdict["decision"], verdict["shadow_decision"]) # -> "escalate" "deny"
 ```
 
-### 6. Dynamic Tool Registry (`available_tools`) & MCP-Zero Top-K Narrowing
+### 7. Dynamic Tool Registry (`available_tools`) & MCP-Zero Top-K Narrowing
 
 ```python
 import aetheris_microbrains as mb
@@ -202,7 +231,7 @@ narrowed = mb.narrow_tool_surface("fix bug and write repository patch", top_k=4)
 print(narrowed["mode"], narrowed["candidate_tools"], narrowed["reduction_ratio"])
 ```
 
-### 7. Mondrian Conformal Quantiles, SHA-256 Checksums & Staged Plasticity
+### 8. Mondrian Conformal Quantiles, SHA-256 Checksums & Staged Plasticity
 
 ```python
 import aetheris_microbrains as mb
