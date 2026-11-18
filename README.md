@@ -47,6 +47,19 @@ When an AI agent writes code or executes commands, it frequently wastes time and
 
 ---
 
+## 🤝 Compatible Agent Ecosystems
+
+Microbrains is architecturally independent of any specific LLM provider or orchestration framework. It plugs cleanly anywhere tool calls, shell commands, or diffs are evaluated:
+
+| Category | Agents & Frameworks | Why Microbrains Fits Here | Integration Mode |
+| :--- | :--- | :--- | :--- |
+| **Autonomous Coding Agents** | **Claude Code**, **SWE-agent** / **mini-SWE-agent**, **Codex**, **OpenHands** (OpenDevin), **Aider**, **Cursor Agent** | Stops invalid syntax / indent loops, prevents accidental secret leaks in commits, and intercepts fatal shell mistakes before test execution. | CLI `PreToolUse` hook (`hookSpecificOutput`) or Python pre-execution interceptor. |
+| **Personal & Desktop OS Assistants** | **OpenClaw** (50+ chat channels & ClawHub skills), **Hermes Agent** (Nous Research self-improving loop), **Goose**, **Computer Use Agents** | Guards the host OS: protects `.env`, `.git/hooks/`, `.ssh/` credentials, denies destructive commands (`rm -rf`, `DROP DATABASE`), and safely escalates uninspected external tools to `"ask"`. | Local daemon middleware or CLI hook subprocess before shell/file execution. |
+| **Orchestration & Workflow Frameworks** | **LangGraph**, **CrewAI**, **AutoGPT**, **LlamaIndex Workflows**, **AutoGen** / **AG2** | Shrinks massive tool & MCP registries (30+ tools) down to Top-4 per step (`narrow_tool_surface`), cutting schema prefill tokens by ~39% across multi-agent turns. | Native Python API (`mb.decide(...)`, `mb.narrow_tool_surface(...)`). |
+| **MCP (Model Context Protocol) Hosts** | **Any MCP Client / Host** (Desktop, CLI, or server) | Sits in front of untrusted or third-party MCP servers to enforce allowlists, parameter sanitization, and structured escalation. | Pre-call proxy or wrapper around MCP tool execution. |
+
+---
+
 ## 💡 Key Benefits
 
 ### 1. 💰 Lower API Bills & Fewer Wasted Turns
