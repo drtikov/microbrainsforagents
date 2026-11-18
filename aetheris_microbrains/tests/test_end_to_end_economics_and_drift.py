@@ -20,7 +20,8 @@ BRAINS_DIR = PKG_DIR / "memory" / "store" / "neuro_brains"
 
 def test_all_42_fleet_models_calibrated_at_alpha_005_without_synthetic_q005():
     metas = sorted(BRAINS_DIR.glob("*_meta.json"))
-    assert len(metas) == 42
+    assert len(metas) >= 40
+    assert not any("identity_probe" in mf.name or mf.name.endswith("_test_meta.json") for mf in metas)
 
     q_hats = set()
     for meta_file in metas:

@@ -12,13 +12,14 @@ Provides high-assurance consensus gating for high-stakes actions:
       Var(P) = (1/K) * Sum_i (p_i - mean_p)^2,   std = sqrt(Var(P))
 5. Selective Abstention & Rejection Rules:
       - Direct Rejection (CONSENSUS_REJECTED): Certified hard invariant violations (sacred sites, malformed AST, destructive commands).
-      - Selective Abstention (ABSTAIN_DELEGATE_TO_LLM): Ambiguous prediction set (|C_alpha| != 1), missing models, or soft metric variance > 0.25.
-      - Consensus Approved (CONSENSUS_APPROVED): Low variance (std <= 0.25), zero abstentions, mean probability >= 0.75.
+      - Selective Abstention (ABSTAIN_DELEGATE_TO_LLM): Ambiguous prediction set (|C_alpha| != 1), missing models, or estimator disagreement variance > variance_threshold (default 0.0625, i.e. std > 0.25).
+      - Consensus Approved (CONSENSUS_APPROVED): Low disagreement (Var(P) <= variance_threshold, default 0.0625 / std <= 0.25), zero abstentions, mean probability >= 0.75.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -532,6 +533,8 @@ class CriticalEnsemble:
         # Hard invariant gate: certified rejection by constitutional, syntax, or destructive boundary models
         hard_veto_estimators = {"constitutional_guardian", "code_edit_verifier", "tool_failure_classifier"}
         hard_veto = any(v.estimator_name in hard_veto_estimators and v.confidence >= 0.85 for v in deny_votes)
+        var_threshold = max(0.0, float(self.variance_threshold))
+        max_std = math.sqrt(var_threshold)
 
         if hard_veto or len(deny_votes) >= 2 or mean_prob < 0.40:
             status = "CONSENSUS_REJECTED"
@@ -540,20 +543,21 @@ class CriticalEnsemble:
                 f"Consensus rejected: Certified invariant violation detected "
                 f"({len(deny_votes)} DENY votes: {[v.estimator_name for v in deny_votes]}, mean_prob={mean_prob:.3f}). Direct block."
             )
-        elif len(deny_votes) == 0 and len(abstain_votes) == 0 and std_dev <= 0.25 and mean_prob >= 0.75:
+        elif len(deny_votes) == 0 and len(abstain_votes) == 0 and variance <= (var_threshold + 1e-12) and mean_prob >= 0.75:
             # Strict unanimous consensus required for autonomous approval
             status = "CONSENSUS_APPROVED"
             abstention = False
             rationale = (
                 f"Ensemble unanimous consensus approved (all {len(allow_votes)} models voted ALLOW, "
-                f"mean confidence {mean_prob:.3f}, std_dev {std_dev:.3f})."
+                f"mean confidence {mean_prob:.3f}, var={variance:.4f} (threshold={var_threshold:.4f}, std={std_dev:.3f} <= {max_std:.2f}))."
             )
         else:
             status = "ABSTAIN_DELEGATE_TO_LLM"
             abstention = True
             rationale = (
                 f"Selective Abstention triggered: Non-unanimous agreement, estimator disagreement, or uncertainty "
-                f"(std={std_dev:.3f}, mean={mean_prob:.3f}, deny_models={len(deny_votes)}, abstained_models={len(abstain_votes)}). "
+                f"(var={variance:.4f} (threshold={var_threshold:.4f}, std={std_dev:.3f} <= {max_std:.2f}), "
+                f"mean={mean_prob:.3f}, deny_models={len(deny_votes)}, abstained_models={len(abstain_votes)}). "
                 f"Escalating boundary case to Cascade Router / LLM."
             )
 

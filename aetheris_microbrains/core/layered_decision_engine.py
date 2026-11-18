@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import logging
 import math
@@ -693,6 +694,49 @@ def _collect_ast_node_tags(tree: ast.AST) -> List[str]:
     return list(dict.fromkeys(ast_nodes))
 
 
+_TREE_SITTER_GRAMMARS: Dict[str, Tuple[str, str]] = {
+    ".js": ("tree_sitter_javascript", "language"),
+    ".jsx": ("tree_sitter_javascript", "language"),
+    ".ts": ("tree_sitter_typescript", "language_typescript"),
+    ".tsx": ("tree_sitter_typescript", "language_tsx"),
+    ".rs": ("tree_sitter_rust", "language"),
+    ".go": ("tree_sitter_go", "language"),
+    ".c": ("tree_sitter_c", "language"),
+    ".h": ("tree_sitter_c", "language"),
+    ".cpp": ("tree_sitter_cpp", "language"),
+    ".yaml": ("tree_sitter_yaml", "language"),
+    ".yml": ("tree_sitter_yaml", "language"),
+    ".html": ("tree_sitter_html", "language"),
+    ".css": ("tree_sitter_css", "language"),
+}
+
+
+def _parse_with_tree_sitter(ext: str, code: str) -> Tuple[bool, Optional[bool]]:
+    """Actually invoke tree-sitter Language/Parser when both core and grammar are installed.
+
+    Returns ``(parsed_successfully, syntax_valid_or_none)``. Never returns ``(True, ...)``
+    merely because ``import tree_sitter`` succeeded.
+    """
+    spec = _TREE_SITTER_GRAMMARS.get(ext)
+    if spec is None or not code.strip():
+        return False, None
+    mod_name, fn_name = spec
+    try:
+        ts_mod = importlib.import_module("tree_sitter")
+        Language = getattr(ts_mod, "Language")
+        Parser = getattr(ts_mod, "Parser")
+        grammar_mod = importlib.import_module(mod_name)
+        lang_fn = getattr(grammar_mod, fn_name)
+        lang = Language(lang_fn())
+        parser = Parser(lang)
+        tree = parser.parse(code.encode("utf-8"))
+        if tree is None or not hasattr(tree, "root_node"):
+            return False, None
+        return True, not bool(getattr(tree.root_node, "has_error", False))
+    except Exception:
+        return False, None
+
+
 def analyze_code_diff(
     file_path: Optional[str],
     diff_text: Optional[str],
@@ -806,19 +850,15 @@ def analyze_code_diff(
                 if re.search(r"!!python/(?:object|apply|module|name)\b", stripped):
                     non_py_findings.append("yaml_unsafe_deserialization_tag")
 
-        # Optional tree-sitter syntax verification when tree_sitter is installed
-        ts_verified = False
-        try:
-            import tree_sitter  # type: ignore  # noqa: F401
-            ts_verified = True
-        except ImportError:
-            pass
+        # Optional real tree-sitter parse only when both tree_sitter and grammar package succeed
+        ts_parsed, ts_syntax_ok = _parse_with_tree_sitter(ext, dedented)
 
         non_py_findings = list(dict.fromkeys(non_py_findings))
         is_doc_or_cfg = ext in {".md", ".txt", ".yaml", ".yml", ".toml", ".css", ".html"} and len(non_py_findings) == 0
+        syntax_valid = bool(ts_syntax_ok) if (ts_parsed and ts_syntax_ok is not None and not has_unified) else True
         return {
             "language": ext.lstrip(".") or "text",
-            "syntax_valid": True,
+            "syntax_valid": syntax_valid,
             "security_clean": len(non_py_findings) == 0,
             "findings": non_py_findings,
             "interface_hazards": [],
@@ -826,7 +866,8 @@ def analyze_code_diff(
             "ast_nodes": [],
             "cyclomatic_complexity": 0,
             "is_static_data_or_doc": is_doc_or_cfg,
-            "context_ast_parsed": ts_verified,
+            "context_ast_parsed": bool(ts_parsed),
+            "ast_parser_backend": "tree_sitter" if ts_parsed else "regex_heuristic",
             "patched_file_ast_verified": False,
         }
 
@@ -1049,7 +1090,7 @@ SAFE_GIT_SUBCOMMANDS: Set[str] = {"status", "log", "diff", "branch", "show", "re
 
 
 def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
-    """Detect unquoted/expandable shell substitution (`$(...)`, backticks) or output redirection."""
+    """Detect unquoted/expandable shell substitution (`$(...)` or backticks)."""
     in_single = False
     escaped = False
     i = 0
@@ -1074,27 +1115,148 @@ def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 return "shell_command_substitution"
         i += 1
+    return None
 
-    # Output redirection (`>` or `>>`) outside single or double quotes
+
+def _extract_shell_redirections(cmd: str) -> List[Dict[str, str]]:
+    """Extract unquoted output redirections (`>`, `>>`, `2>&1`, `>(...)`) from a shell string."""
+    redirs: List[Dict[str, str]] = []
     in_single = False
     in_double = False
     escaped = False
-    for ch in cmd:
+    i = 0
+    n = len(cmd)
+
+    while i < n:
+        ch = cmd[i]
         if escaped:
             escaped = False
+            i += 1
             continue
         if ch == "\\" and not in_single:
             escaped = True
+            i += 1
             continue
         if ch == "'" and not in_double:
             in_single = not in_single
+            i += 1
             continue
         if ch == '"' and not in_single:
             in_double = not in_double
+            i += 1
             continue
+
         if not in_single and not in_double and ch == ">":
-            return "shell_output_redirection"
-    return None
+            amp_prefix = i > 0 and cmd[i - 1] == "&"
+            j = i + 1
+            if j < n and cmd[j] in (">", "|"):
+                j += 1
+            elif j < n and cmd[j] == "(":
+                redirs.append({"kind": "process_substitution", "target": ""})
+                i = j + 1
+                continue
+
+            is_amp_after = False
+            if j < n and cmd[j] == "&":
+                is_amp_after = True
+                j += 1
+
+            while j < n and cmd[j] in (" ", "\t"):
+                j += 1
+
+            tok_chars: List[str] = []
+            t_sq = False
+            t_dq = False
+            t_esc = False
+            while j < n:
+                tc = cmd[j]
+                if t_esc:
+                    tok_chars.append(tc)
+                    t_esc = False
+                    j += 1
+                    continue
+                if tc == "\\" and not t_sq:
+                    t_esc = True
+                    j += 1
+                    continue
+                if tc == "'" and not t_dq:
+                    t_sq = not t_sq
+                    j += 1
+                    continue
+                if tc == '"' and not t_sq:
+                    t_dq = not t_dq
+                    j += 1
+                    continue
+                if not t_sq and not t_dq and (tc.isspace() or tc in ";|&<>()"):
+                    break
+                tok_chars.append(tc)
+                j += 1
+
+            target = "".join(tok_chars)
+            if is_amp_after and not amp_prefix and re.fullmatch(r"(?:\d+|-)", target):
+                redirs.append({"kind": "fd_dup", "target": target})
+            else:
+                redirs.append({"kind": "file", "target": target})
+            i = j
+            continue
+
+        i += 1
+    return redirs
+
+
+_PRIVILEGED_SYSTEM_PREFIXES: Tuple[str, ...] = (
+    "~/",
+    "/etc/",
+    "/bin/",
+    "/sbin/",
+    "/usr/",
+    "/var/",
+    "/root/",
+    "/boot/",
+    "/sys/",
+    "/proc/",
+    "/lib/",
+    "/opt/",
+    "c:/windows",
+    "c:/system32",
+    "c:/program files",
+)
+
+_PRIVILEGED_BASENAMES: Set[str] = {
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+    ".bash_profile",
+    ".zprofile",
+    "authorized_keys",
+    "passwd",
+    "shadow",
+    "sudoers",
+}
+
+
+def _is_privileged_or_unsafe_redirect_target(target: str) -> bool:
+    """Return True if an output redirection target must trigger a hard Layer 1 deny."""
+    t = str(target or "").strip()
+    if not t:
+        return True
+    if any(ch in t for ch in ("$", "`", "*", "?")):
+        return True
+    t_norm = t.replace("\\", "/")
+    t_low = t_norm.lower()
+    if t_low == "/dev/null":
+        return False
+    if t_low.startswith("/dev/") or t_low.startswith("//./") or t.startswith("\\\\.\\"):
+        return True
+    if t_low in {"/", "~", "~/", "/etc", "c:", "c:/"} or t_low.startswith(_PRIVILEGED_SYSTEM_PREFIXES):
+        return True
+    if ".." in [seg for seg in t_norm.split("/") if seg]:
+        return True
+    if os.path.basename(t_low) in _PRIVILEGED_BASENAMES:
+        return True
+    if is_protected_path(t):
+        return True
+    return False
 
 
 def _is_command_allowlisted(exe: str, args: List[str]) -> bool:
@@ -1155,6 +1317,22 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
     meta_finding = _has_unsafe_shell_metachar(cmd)
     if meta_finding:
         findings.append(meta_finding)
+
+    unprivileged_redirects: List[str] = []
+    for redir in _extract_shell_redirections(cmd):
+        kind = redir["kind"]
+        r_target = redir["target"]
+        if kind == "fd_dup":
+            continue
+        if kind == "process_substitution":
+            findings.append("shell_output_redirection")
+            continue
+        if r_target.strip().replace("\\", "/").lower() == "/dev/null":
+            continue
+        if _is_privileged_or_unsafe_redirect_target(r_target):
+            findings.append("shell_output_redirection")
+        else:
+            unprivileged_redirects.append(r_target)
 
     # First inspect pipe sequences for download-and-execute (`curl ... | sh`)
     if "|" in cmd and "||" not in cmd:
@@ -1246,9 +1424,20 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
                         findings.extend(f"unsafe_inline_python:{f}" for f in inline_res["findings"])
 
     is_safe = len(findings) == 0
-    allowlisted = bool(is_safe and parsed_cmds and len(unrecognized) == 0)
-    risk_class = "IRREVERSIBLE_DESTRUCTIVE" if not is_safe else (
-        "READ_ONLY" if allowlisted else "EXTERNAL_ACTION"
+    redirection_requires_escalation = bool(is_safe and unprivileged_redirects)
+    allowlisted = bool(is_safe and parsed_cmds and len(unrecognized) == 0 and not redirection_requires_escalation)
+    risk_class = (
+        "IRREVERSIBLE_DESTRUCTIVE"
+        if not is_safe
+        else (
+            "READ_ONLY"
+            if allowlisted
+            else (
+                "REVERSIBLE_WRITE"
+                if redirection_requires_escalation and not unrecognized
+                else "EXTERNAL_ACTION"
+            )
+        )
     )
     return {
         "is_safe": is_safe,
@@ -1257,6 +1446,8 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
         "findings": list(dict.fromkeys(findings)),
         "commands": parsed_cmds,
         "risk_class": risk_class,
+        "redirection_targets": unprivileged_redirects,
+        "redirection_requires_escalation": redirection_requires_escalation,
     }
 
 
@@ -1494,6 +1685,14 @@ def decide(
             sh_res = analyze_shell_command(cmd_str)
             if not sh_res["is_safe"]:
                 return _finish("deny", sh_res["findings"][0], ["deny"], "layer1_shell_parser_veto", 1)
+            if sh_res.get("redirection_requires_escalation"):
+                return _finish(
+                    "escalate",
+                    "shell_output_redirection",
+                    ["allow", "deny"],
+                    "layer1_shell_redirection_escalate",
+                    1,
+                )
             if not sh_res.get("allowlisted", False):
                 unrec = sh_res.get("unrecognized_commands", [])
                 return _finish(

@@ -512,7 +512,11 @@ class AnalyticalMicroTransformer:
         self.n_calibration_samples = n
         self.coverage_std_error = cov_std_err
         self.conformal_guarantee_valid = guarantee_valid
-        self.conformal_basis = "in_sample_auto" if in_sample else "held_out"
+        self.conformal_basis = (
+            str(data_origin)
+            if (in_sample and data_origin)
+            else ("in_sample_auto" if in_sample else "held_out")
+        )
         self.calibration_data_origin = resolved_origin
 
         return {

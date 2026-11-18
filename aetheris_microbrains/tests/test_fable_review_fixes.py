@@ -178,7 +178,9 @@ def test_fable_7_vsa_loads_with_allow_pickle_false():
         assert "weight_values" in raw.files
 
     loaded = WeightSpaceVSA.load(VSA_PATH)
-    assert len(loaded.domain_weight_vectors) == 42
+    live_metas = sorted(BRAINS_DIR.glob("*_meta.json"))
+    assert len(live_metas) >= 40
+    assert len(loaded.domain_weight_vectors) == len(live_metas)
     nearest = loaded.find_nearest_domains("tool_routing_v2", top_k=3)
     assert len(nearest) == 3
     assert all(item["similarity"] > 0.0 for item in nearest)
@@ -208,7 +210,8 @@ def test_fable_8_zero_numbered_placeholder_tokens_across_all_42_models():
     from collections import Counter
 
     metas = sorted(BRAINS_DIR.glob("*_meta.json"))
-    assert len(metas) == 42
+    assert len(metas) >= 40
+    assert not any("identity_probe" in mf.name or mf.name.endswith("_test_meta.json") for mf in metas)
     for mf in metas:
         data = json.loads(mf.read_text(encoding="utf-8"))
         vocab_keys = [k for k in data["vocab"] if not str(k).startswith("<")]
@@ -575,7 +578,7 @@ def test_fable_21_decision_journal_recalibration_and_decide_telemetry():
         moe.verified_errors = 0
         moe.calibration_alpha = 0.05
         moe.recalibrated_from_journal = False
-        moe.calibration_basis = "synthetic_self_consistency"
+        moe.calibration_basis = "synthetic_lexical_probes"
         moe.calibration_sample_id = None
 
         res = mb.decide("read file src/app.py")
@@ -640,7 +643,7 @@ def test_fable_23_expanded_calibration_and_external_drop_rate():
     import json
 
     meta_files = sorted((PKG_DIR / "memory" / "store" / "neuro_brains").glob("*_meta.json"))
-    assert len(meta_files) == 42
+    assert len(meta_files) >= 40
     for mf in meta_files:
         data = json.loads(mf.read_text(encoding="utf-8"))
         assert data.get("n_calibration_samples", 0) >= 100, f"{mf.name} n_cal={data.get('n_calibration_samples')}"
@@ -800,7 +803,7 @@ def test_fable_27_mondrian_per_class_cal_sizing():
     import json
 
     meta_files = sorted((PKG_DIR / "memory" / "store" / "neuro_brains").glob("*_meta.json"))
-    assert len(meta_files) == 42
+    assert len(meta_files) >= 40
     max_cal = 0
     for mf in meta_files:
         data = json.loads(mf.read_text(encoding="utf-8"))
@@ -1117,6 +1120,7 @@ def test_fable_39_praxis_hardening_journal_escalation_hunk_and_basis(tmp_path):
     assert l2_res["calibration_basis"] in {
         "measured_holdout",
         "recalibrated_journal",
+        "synthetic_lexical_probes",
         "synthetic_self_consistency",
         "uncalibrated_unknown",
         "default_fallback",
@@ -1141,7 +1145,8 @@ def test_fable_40_review_hardening_honest_bounds_consult_cl_hook_and_prefilter(t
     moe_rep = fresh_moe.calibration_report()
     assert moe_rep["upper_error_bound_95"] is None
     assert moe_rep["statistical_confidence_status"] == "unknown"
-    assert moe_rep["calibration_basis"] == "synthetic_self_consistency"
+    assert moe_rep["calibration_basis"] == "synthetic_lexical_probes"
+    assert moe_rep["conformal_basis"] == "synthetic_lexical_probes"
 
     # 2. microbrain_consult() top-level abstained & error propagation
     orig_loader = mb_tools._load_brain
@@ -1430,7 +1435,7 @@ def test_fable_41_critic_round2_fixes(tmp_path, monkeypatch, capsys):
     moe_s.verified_errors = 0
     moe_s.error_metric = "unmeasured"
     moe_s.calibration_alpha = 0.05
-    moe_s.calibration_basis = "synthetic_self_consistency"
+    moe_s.calibration_basis = "synthetic_lexical_probes"
     moe_s.recalibrated_from_journal = False
 
     # 5. microbrain_consult explicit domain, unknown domain, and error honesty
@@ -1531,6 +1536,202 @@ def test_fable_41_critic_round2_fixes(tmp_path, monkeypatch, capsys):
     assert full_row["recall_at_k_pct"] == 100.0
     assert sticky_row["cache_adjusted_net_saved_pct"] > per_turn_row["cache_adjusted_net_saved_pct"]
     assert mod8.run_patch_advisor_check()["expected_status_matched"] == 5
+
+
+def test_fable_42_audit_remediation_fixes(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    import sys
+    import types
+    from collections import Counter
+
+    from aetheris_microbrains.core import microbrain_server
+    from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
+    from aetheris_microbrains.core.brain_cellular_fission import BrainCellularFissionEngine
+    from aetheris_microbrains.core.brain_nursery import AutonomousBrainNursery
+    from aetheris_microbrains.core.counterfactual_simulation_pipeline import CounterfactualSimulationPipeline
+    from aetheris_microbrains.core.critical_ensemble_abstention import CriticalEnsemble
+    from aetheris_microbrains.core.layered_decision_engine import analyze_code_diff
+    from aetheris_microbrains.core.skill_lifecycle_manager import SkillLifecycleManager, SkillLifecycleState
+    from aetheris_microbrains.core.tool_routing_moe import ToolRoutingMoE
+    from aetheris_microbrains.core.weight_space_memory_synthesis import WeightSpaceMemorySynthesizer
+
+    # 1. Fission calibration honesty & store isolation
+    fission_store = tmp_path / "fission_store"
+    fission_store.mkdir()
+    monkeypatch.setattr(AutonomousBrainNursery, "_instance", None)
+    nursery = AutonomousBrainNursery(store_dir=fission_store)
+    parent = nursery.grow_brain_for_domain("fission_probe", d_model=32, n_heads=2, d_mlp=64)
+    for i in range(42):
+        parent.compile_logic_association(f"rule_tok_{i}", f"rule_out_{i % 6}", binding_gain=3.0)
+    nursery.active_brains[parent.name] = parent
+
+    fission = BrainCellularFissionEngine(store_dir=fission_store)
+    fission.nursery = nursery
+    fis_res = fission.evaluate_and_split_if_saturated("fission_probe", store_dir=fission_store)
+    assert fis_res["status"] == "fission_executed"
+    assert fis_res["daughter_calibration_basis"] == "fission_synthetic_anchors"
+    assert fis_res["requires_external_holdout_calibration"] is True
+
+    for d_name in (fis_res["daughter_a"], fis_res["daughter_b"]):
+        d_brain = AnalyticalMicroTransformer.load(d_name, fission_store, verify_checksum=True, strict_directory=True)
+        assert d_brain is not None
+        assert d_brain.conformal_basis == "fission_synthetic_anchors"
+        assert d_brain.conformal_guarantee_valid is False
+        d_inf = d_brain.infer_conformal([next(t for t in d_brain.vocab if not t.startswith("<"))])
+        assert d_inf["calibration_basis"] == "fission_synthetic_anchors"
+        assert d_inf["calibration_data_origin"] == "fission_synthetic_anchors"
+        assert d_inf["conformal_guarantee_valid"] is False
+        assert d_inf["field_exchangeability_certified"] is False
+        assert not (BRAINS_DIR / f"{d_name}_meta.json").exists()
+
+    # WeightSpaceMemorySynthesizer does not fabricate held_out provenance
+    wsm = WeightSpaceMemorySynthesizer(memory_dir=str(tmp_path / "wsm"))
+    wsm_init = json.loads((tmp_path / "wsm" / "neuro_weight_space_memory_meta.json").read_text(encoding="utf-8"))
+    assert wsm_init["conformal_basis"] == "uncalibrated"
+    assert wsm_init["conformal_quantile"] is None
+    assert wsm_init["calibration_q_hat"] is None
+
+    # 2. ToolRoutingMoE synthetic_lexical_probes & holdout_traces calibration
+    fresh_moe = ToolRoutingMoE(d_model=256)
+    rep_syn = fresh_moe.calibration_report()
+    assert rep_syn["conformal_basis"] == "synthetic_lexical_probes"
+    assert rep_syn["calibration_basis"] == "synthetic_lexical_probes"
+    assert rep_syn["field_exchangeability_certified"] is False
+    assert fresh_moe.route("read file src/app.py").to_dict()["conformal_basis"] == "synthetic_lexical_probes"
+
+    train_traces = [
+        {"query": "read repository source file app.py", "tool": "repo_read"},
+        {"query": "run pytest unit test suite", "tool": "run_tests"},
+        {"query": "check git branch status and diff", "tool": "git_status"},
+        {"query": "edit patch in server module", "tool": "edit_file"},
+    ] * 4
+    holdout_traces = [
+        {"query": "open and inspect python source file config.py", "tool": "repo_read"},
+        {"query": "execute pytest tests for module", "tool": "run_tests"},
+        {"query": "show git commit diff status", "tool": "git_status"},
+        {"query": "modify and patch function signature", "tool": "edit_file"},
+    ] * 6
+    fit_ho = fresh_moe.fit_from_traces(train_traces, holdout_traces=holdout_traces, alpha=0.05)
+    assert fit_ho["calibration_basis"] == "measured_holdout"
+    assert fit_ho["holdout_calibration"]["n_holdout"] == 24
+    rep_ho = fresh_moe.calibration_report()
+    assert rep_ho["conformal_basis"] == "measured_holdout"
+    assert rep_ho["field_exchangeability_certified"] is True
+    assert rep_ho["upper_error_bound_95"] is not None
+    assert fresh_moe.route("inspect config file").to_dict()["conformal_basis"] == "measured_holdout"
+
+    # 3. fleet_lifecycle_registry.json & SkillLifecycleManager unobserved nulls
+    reg_path = PKG_DIR / "memory" / "fleet_lifecycle_registry.json"
+    reg_data = json.loads(reg_path.read_text(encoding="utf-8"))
+    for entry in reg_data.values():
+        if entry.get("call_count", 0) == 0:
+            assert entry.get("conformal_coverage") is None
+            assert entry.get("mean_latency_ms") is None
+            assert entry.get("telemetry_status") == "unobserved"
+    assert reg_data["identity_probe_domain"]["state"] == SkillLifecycleState.RETIRED.value
+    assert reg_data["memory_distill_test"]["state"] == SkillLifecycleState.RETIRED.value
+
+    slm = SkillLifecycleManager(storage_dir=tmp_path / "slm")
+    sample_sk = next(iter(slm.skills.values()))
+    assert sample_sk.call_count == 0
+    assert sample_sk.conformal_coverage is None
+    assert sample_sk.mean_latency_ms is None
+    assert sample_sk.telemetry_status == "unobserved"
+    slm.record_call("custom_skill", success=True, latency_ms=2.5, conformal_passed=True)
+    obs = slm.skills["custom_skill"]
+    assert obs.telemetry_status == "observed"
+    assert obs.mean_latency_ms == pytest.approx(2.5)
+    assert obs.conformal_coverage == pytest.approx(1.0)
+
+    # 4. microbrain_server has no duplicate POST routes & exposes /microbrain/validate_code
+    post_paths = [
+        (r.path, frozenset(r.methods or ()))
+        for r in microbrain_server.app.routes
+        if hasattr(r, "methods") and "POST" in (r.methods or set())
+    ]
+    dup_routes = [k for k, cnt in Counter(post_paths).items() if cnt > 1]
+    assert not dup_routes, f"Duplicate POST routes detected: {dup_routes}"
+    route_paths = {path for path, _ in post_paths}
+    assert "/microbrain/validate" in route_paths
+    assert "/microbrain/validate_code" in route_paths
+    val_req = microbrain_server.ValidationRequest(code="def add(x: int) -> int:\n    return x\n")
+    val_resp = asyncio.run(microbrain_server.validate_code_endpoint(val_req))
+    assert val_resp.success is True
+
+    # 5. Honest tree-sitter detection (bare module without grammar stays False / regex_heuristic)
+    dummy_ts = types.ModuleType("tree_sitter")
+    monkeypatch.setitem(sys.modules, "tree_sitter", dummy_ts)
+    ts_diff = analyze_code_diff("src/app.ts", "export const x: number = 1;\n")
+    assert ts_diff["context_ast_parsed"] is False
+    assert ts_diff["ast_parser_backend"] == "regex_heuristic"
+
+    # 6. CriticalEnsemble variance_threshold actually gates approval & pipeline reflects it dynamically
+    ce = CriticalEnsemble(variance_threshold=0.0001)
+    allow_map = {
+        "neuro_constitutional_guardian": ("ancestral_law_honored", 0.95),
+        "neuro_code_edit_verifier": ("verifier_verdict_accept", 0.80),
+        "neuro_patch_quality_predictor": ("patch_quality_grade_a", 0.95),
+        "neuro_tool_failure_classifier": ("clean_success", 0.95),
+    }
+
+    class _AllowStub:
+        def __init__(self, tok: str, conf: float):
+            self._tok = tok
+            self._conf = conf
+            self.vocab = {}
+
+        def infer_conformal(self, _tokens, alpha=0.05):
+            return {
+                "abstained": False,
+                "predicted_token": self._tok,
+                "prediction_set": [self._tok],
+                "confidence": self._conf,
+            }
+
+    monkeypatch.setattr(ce, "_get_model", lambda name: _AllowStub(*allow_map[name]))
+    ens_res = ce.evaluate_critical_action("edit_file", "src/app.py", "+x = 1\n")
+    assert ens_res.estimator_variance > 0.0001
+    assert ens_res.status == "ABSTAIN_DELEGATE_TO_LLM"
+    assert ens_res.abstention_triggered is True
+
+    pipe = CounterfactualSimulationPipeline(repo_dir=tmp_path)
+    pipe.ensemble = ce
+    sim_out = pipe.simulate_edit_impact("src/app.py", "+x = 1\n")
+    assert sim_out.status == "ABSTAIN_ESCALATE_LLM"
+    assert any("0.0001" in m for m in sim_out.simulated_failure_modes)
+    assert all("0.30 threshold" not in m for m in sim_out.simulated_failure_modes)
+
+    # 7. Shell redirection semantics: unprivileged file -> escalate, privileged/unsafe -> deny, fd/null/quoted -> allow
+    r_esc = mb.decide({"tool": "execute_shell", "cmd": 'echo "test" > out.txt'})
+    assert r_esc["decision"] == "escalate"
+    assert r_esc["reason_code"] == "layer1_shell_redirection_escalate"
+
+    for deny_cmd in (
+        "echo pwn > /etc/passwd",
+        "echo secret > .env",
+        "echo hi > ../escape.txt",
+        "echo hi > $OUT",
+    ):
+        r_deny = mb.decide({"tool": "execute_shell", "cmd": deny_cmd})
+        assert r_deny["decision"] == "deny", f"Expected deny for {deny_cmd}, got {r_deny}"
+
+    for allow_cmd in (
+        "pytest -q 2>&1",
+        "ls -la 2>/dev/null",
+        "echo 'hello > quoted_is_safe'",
+    ):
+        r_allow = mb.decide({"tool": "execute_shell", "cmd": allow_cmd})
+        assert r_allow["decision"] == "allow", f"Expected allow for {allow_cmd}, got {r_allow}"
+
+    # 8. Store hygiene & VSA alignment
+    live_metas = sorted(BRAINS_DIR.glob("*_meta.json"))
+    assert len(live_metas) >= 40
+    assert not any("identity_probe" in p.name or p.name.endswith("_test_meta.json") for p in live_metas)
+    vsa_loaded = WeightSpaceVSA.load(VSA_PATH)
+    assert "neuro_identity_probe_domain" not in vsa_loaded.domain_weight_vectors
+    assert len(vsa_loaded.domain_weight_vectors) == len(live_metas)
+
 
 
 

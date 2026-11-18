@@ -1,27 +1,21 @@
-"""Counterfactual Simulation & Pre-Commit Edit Verification Pipeline.
+"""Counterfactual Simulation Advisory Pipeline (`simulate_edit_impact`).
 
-Closes the active autonomous cycle:
-  Prediction -> Simulation -> Constitutional Filter -> Verified Patch -> Metabolic Verification
+Evaluates proposed code patches in read-only advisory mode before host execution:
+  1. `CriticalEnsemble` consensus check (`evaluate_critical_action`), returning early
+     on constitutional/safety rejections or non-blast abstentions.
+  2. Layer 1 structural AST, secret-leak, interface-hazard, and complexity inspection
+     (`analyze_code_diff`) + diff scale blast-radius scoring.
+  3. Causal SCM `do`-intervention rollout (`CausalWorldModel.counterfactual_query`).
 
-Pipeline Stages:
-  1. `predict_edit_impact(file_path, diff)`:
-     Uses `patch_quality_predictor` and `code_edit_verifier` to calculate blast radius
-     and regression probabilities.
-  2. `counterfactual_simulate(blast_radius, cascade_3step)`:
-     Uses `counterfactual_reasoner` to simulate future failure modes up to 3 steps ahead.
-  3. `constitutional_gate(simulation)`:
-     Applies `constitutional_guardian` veto if blast radius infringes on Sacred Sites
-     or creates an integrity violation.
-  4. `apply_verified_patch()`:
-     Applies verified diff to working tree.
-  5. `post_apply_metabolic_verification()`:
-     Runs pre/post test suite; if regression detected, executes auto-rollback and
-     applies EWC plasticity feedback to prevent repeating the error class.
+Note: This module is purely advisory and does NOT apply patches to disk, run test
+suites, or mutate/rollback the working tree; execution and rollback remain the
+responsibility of the caller/host harness.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,7 +45,10 @@ class CounterfactualSimulationPipeline:
     """Orchestrates hypothetical forward-branch simulation before applying code patches."""
 
     def __init__(self, repo_dir: Optional[Path] = None):
-        self.repo_dir = repo_dir or Path(__file__).resolve().parents[2]
+        default_root = Path(__file__).resolve().parents[2]
+        self.repo_dir = Path(repo_dir) if repo_dir is not None else (
+            default_root if (default_root / "aetheris_microbrains").exists() else Path.cwd()
+        )
         self.ensemble = get_critical_ensemble()
         self.cascade_router = get_cascade_ensemble_router()
 
@@ -76,12 +73,23 @@ class CounterfactualSimulationPipeline:
         only_patch_blast_deny = (deny_names == {"patch_quality_predictor"} and not abstain_names)
 
         if consensus.abstention_triggered and not only_patch_blast_deny:
+            var_thresh = max(0.0, float(getattr(self.ensemble, "variance_threshold", 0.0625)))
+            abst_modes: List[str] = []
+            if abstain_names:
+                abst_modes.append(f"Estimator abstention: {', '.join(sorted(abstain_names))}")
+            if consensus.estimator_variance > var_thresh + 1e-12:
+                abst_modes.append(
+                    f"Estimator disagreement variance {consensus.estimator_variance:.4f} exceeds "
+                    f"{var_thresh:.4f} (std <= {math.sqrt(var_thresh):.2f}) threshold"
+                )
+            if not abst_modes:
+                abst_modes.append(consensus.rationale or "Critical ensemble abstention triggered")
             return SimulationOutcome(
                 allowed=False,
                 status="ABSTAIN_ESCALATE_LLM",
                 blast_radius_score=0.5,
                 regression_probability=0.5,
-                simulated_failure_modes=["Estimator disagreement exceeds 0.30 threshold"],
+                simulated_failure_modes=abst_modes,
                 veto_reason="Critical ensemble abstention triggered. Requires LLM verification.",
             )
 

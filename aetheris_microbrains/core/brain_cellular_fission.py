@@ -12,6 +12,7 @@ or its condition number degenerates (kappa > 50.0), this engine:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
@@ -26,8 +27,9 @@ class BrainCellularFissionEngine:
 
     _instance: Optional[BrainCellularFissionEngine] = None
 
-    def __init__(self, max_allowed_condition: float = 40.0):
+    def __init__(self, max_allowed_condition: float = 40.0, store_dir: Optional[Path] = None):
         self.max_condition = max_allowed_condition
+        self.store_dir = store_dir
         self.nursery = AutonomousBrainNursery.get_instance()
 
     @classmethod
@@ -36,7 +38,7 @@ class BrainCellularFissionEngine:
             cls._instance = cls()
         return cls._instance
 
-    def evaluate_and_split_if_saturated(self, domain_name: str) -> Dict[str, Any]:
+    def evaluate_and_split_if_saturated(self, domain_name: str, store_dir: Optional[Path] = None) -> Dict[str, Any]:
         """
         Evaluates condition number of a micro-brain's MLP weight matrices:
         If kappa > max_condition, triggers cellular fission.
@@ -148,8 +150,8 @@ class BrainCellularFissionEngine:
             for hk, hv in zip(brain.hopfield_keys[h_mid:], brain.hopfield_values[h_mid:]):
                 _assign_rule(daughter_b, hk, hv, b_rules)
 
-            # Ensure each daughter retains >= 12 Hopfield rules and held-out split-conformal calibration
-            # so cellular mitosis never emits uncalibrated models into the fleet store.
+            # Ensure each daughter retains >= 14 Hopfield rules and provisional in-sample synthetic anchor calibration
+            # (NOT held-out; external holdout verification is required before claiming a field conformal guarantee).
             fission_semantic_tags = (
                 "decompose_root_goal", "isolate_subtask_graph", "validate_step_contract",
                 "schedule_parallel_stage", "verify_precondition_edge", "resolve_dependency_order",
@@ -187,10 +189,20 @@ class BrainCellularFissionEngine:
                         (list(toks), tgt) if (i % 3 == 0) else ([f"cal_{suffix}_{fission_semantic_tags[i % len(fission_semantic_tags)]}", *toks], tgt)
                         for i, (toks, tgt) in enumerate(cal_anchors)
                     ]
-                    daughter.calibrate_conformal(cal_data, alpha=alpha, in_sample=False)
+                    daughter.calibrate_conformal(
+                        cal_data,
+                        alpha=alpha,
+                        in_sample=True,
+                        data_origin="fission_synthetic_anchors",
+                    )
 
-        daughter_a.save()
-        daughter_b.save()
+        target_dir = store_dir or self.store_dir or getattr(self.nursery, "store_dir", None)
+        if target_dir is not None:
+            daughter_a.save(target_dir)
+            daughter_b.save(target_dir)
+        else:
+            daughter_a.save()
+            daughter_b.save()
 
         self.nursery.active_brains[daughter_a_name] = daughter_a
         self.nursery.active_brains[daughter_b_name] = daughter_b
@@ -202,5 +214,7 @@ class BrainCellularFissionEngine:
             "daughter_a": daughter_a_name,
             "daughter_b": daughter_b_name,
             "vocab_split": [len(daughter_a.vocab), len(daughter_b.vocab)],
+            "daughter_calibration_basis": "fission_synthetic_anchors",
+            "requires_external_holdout_calibration": True,
         }
 

@@ -458,5 +458,21 @@
     "candidate_staged": true,
     "promoted": false,
     "status": "success"
+  },
+  {
+    "ts": "2026-11-18T23:09:51.189950+00:00",
+    "domain": "tool_failure_classifier",
+    "tokens_updated": [
+      "weekly_retrain",
+      "context_window_warning_80_pct",
+      "failure_recoverable_by_retry"
+    ],
+    "ewc_penalty": 2.9e-06,
+    "weights_delta_l2": 0.015,
+    "recalibrated_quantile": 0.0226,
+    "empirical_coverage": 1.0,
+    "candidate_staged": true,
+    "promoted": false,
+    "status": "success"
   }
 ]

@@ -1,7 +1,6 @@
 """Tool Routing v3: Mixture of Experts (MoE) with Dynamic Top-2 Gating.
 
-Implements an advanced SOTA MoE neural router for tool dispatch:
-- d_model = 256, max_seq_len = 64.
+Implements a deterministic pure-NumPy MoE router (`d_model = 256`) for tool dispatch:
 - 6 Specialized Functional Cluster Experts:
     1. ExpertFileOps (read, write, edit, list, patch, diff)
     2. ExpertExecution (shell, command, pytest, unit testing)
@@ -9,11 +8,16 @@ Implements an advanced SOTA MoE neural router for tool dispatch:
     4. ExpertGitGovernance (git status, commit, diff, branch, seal)
     5. ExpertMicrobrainMeta (consult, route, incubator, lab, vsa, telemetry)
     6. ExpertConstitutionalReview (sacred sites, kinship, review gate, safety)
-- Learned Dynamic Top-2 Gating:
+- Analytical Dynamic Top-2 Gating:
+    Default gating weights `W_gate` are analytically ridge-fitted on bilingual
+    keyword/stem tables (with optional real trajectory fitting via `fit_from_traces()`).
     Computes gating logits over experts, selects top-2 experts, and blends
-    expert output vectors via normalized gating weights:
+    candidate weights:
         Y = alpha_1 * Expert_top1(X) + alpha_2 * Expert_top2(X)
-- Per-Expert Conformal Calibration & Joint Coverage Guarantees (1 - alpha >= 95%).
+- Per-Expert Conformal Quantiles:
+    Default initialization uses synthetic lexical self-consistency probes
+    (`conformal_basis="synthetic_lexical_probes"`); genuine held-out calibration is
+    supported via `fit_from_traces(..., holdout_traces=...)` or `evaluate_topk_holdout()`.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ class MoERoutingDecision:
     conformal_passed: bool
     per_expert_conformal: Dict[str, float]
     routing_rationale: str
+    conformal_basis: str = "synthetic_lexical_probes"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -53,6 +58,7 @@ class MoERoutingDecision:
             "conformal_passed": self.conformal_passed,
             "per_expert_conformal": {k: round(v, 4) for k, v in self.per_expert_conformal.items()},
             "routing_rationale": self.routing_rationale,
+            "conformal_basis": self.conformal_basis,
         }
 
 
@@ -183,7 +189,7 @@ class ToolRoutingMoE:
         self.w_gate_fitted = True
 
         # Calibration provenance & measured error counters (no fabricated bounds without verified episodes)
-        self.calibration_basis: str = "synthetic_self_consistency"
+        self.calibration_basis: str = "synthetic_lexical_probes"
         self.verified_episodes: int = 0
         self.verified_errors: int = 0
         self.calibration_alpha: float = 0.05
@@ -196,6 +202,15 @@ class ToolRoutingMoE:
         self.per_expert_quantiles: Dict[str, float] = {}
         self.per_expert_coverage: Dict[str, float] = {}
         self._calibrate_expert_quantiles(alpha=0.05)
+
+    @property
+    def conformal_basis(self) -> str:
+        """Alias synchronized with `calibration_basis` for uniform inspection."""
+        return self.calibration_basis
+
+    @conformal_basis.setter
+    def conformal_basis(self, value: str) -> None:
+        self.calibration_basis = str(value)
 
     def calibration_report(self) -> Dict[str, Any]:
         """Return honest calibration provenance and Clopper-Pearson bounds (None unless verified)."""
@@ -219,8 +234,15 @@ class ToolRoutingMoE:
         if self.verified_episodes > 0 and err_metric == "unmeasured":
             err_metric = "top1_routing_mismatch"
 
+        field_certified = bool(
+            self.verified_episodes > 0
+            and self.calibration_basis in ("measured_holdout", "recalibrated_journal")
+        )
+
         rep: Dict[str, Any] = {
             "calibration_basis": self.calibration_basis,
+            "conformal_basis": self.calibration_basis,
+            "field_exchangeability_certified": field_certified,
             "recalibrated": bool(self.recalibrated_from_journal),
             "n_calibration_samples": len(self.per_expert_quantiles) * 22,
             "verified_episodes": int(self.verified_episodes),
@@ -265,26 +287,13 @@ class ToolRoutingMoE:
         W = np.linalg.solve(gram, X.T @ Y)
         return W.astype(np.float32)
 
-    def fit_from_traces(
+    def _parse_trace_rows(
         self,
         traces: Sequence[Dict[str, Any]],
-        l2_reg: float = 0.25,
-        blend_with_prior: float = 0.35,
-    ) -> Dict[str, Any]:
-        """Fit gating weights W_gate from real agent `(query, tool)` execution traces.
-
-        Solves closed-form L2 ridge regression on recorded agent trajectories and
-        re-calibrates per-expert split-conformal quantiles.
-        """
-        n_experts = len(self.EXPERTS)
-        tool_to_expert: Dict[str, int] = {}
-        for e_idx, expert_name in enumerate(self.EXPERTS):
-            for t_name in self.EXPERT_TOOLS.get(expert_name, ()):
-                tool_to_expert[t_name] = e_idx
-
-        rows: List[np.ndarray] = []
-        targets: List[np.ndarray] = []
-        experts_seen: set[str] = set()
+        tool_to_expert: Dict[str, int],
+    ) -> List[Tuple[List[str], int, np.ndarray]]:
+        """Parse `(query, tool/expert)` trace entries into tokenized vectors and expert indices."""
+        parsed: List[Tuple[List[str], int, np.ndarray]] = []
         for tr in traces:
             if not isinstance(tr, dict):
                 continue
@@ -298,14 +307,42 @@ class ToolRoutingMoE:
             toks = [t for t in re.findall(r"(?u)\b\w+\b", q.lower()) if len(t) > 1]
             if not toks:
                 continue
-            rows.append(self._embed_context(toks))
+            parsed.append((toks, int(e_idx), self._embed_context(toks)))
+        return parsed
+
+    def fit_from_traces(
+        self,
+        traces: Sequence[Dict[str, Any]],
+        l2_reg: float = 0.25,
+        blend_with_prior: float = 0.35,
+        holdout_traces: Optional[Sequence[Dict[str, Any]]] = None,
+        alpha: float = 0.05,
+    ) -> Dict[str, Any]:
+        """Fit gating weights W_gate from real agent `(query, tool)` execution traces.
+
+        Solves closed-form L2 ridge regression on recorded agent trajectories and
+        calibrates per-expert conformal quantiles from `holdout_traces` when supplied
+        (otherwise falls back to `synthetic_lexical_probes`).
+        """
+        n_experts = len(self.EXPERTS)
+        tool_to_expert: Dict[str, int] = {}
+        for e_idx, expert_name in enumerate(self.EXPERTS):
+            for t_name in self.EXPERT_TOOLS.get(expert_name, ()):
+                tool_to_expert[t_name] = e_idx
+
+        parsed_train = self._parse_trace_rows(traces, tool_to_expert)
+        if not parsed_train:
+            return {"n_traces": 0, "experts_updated": [], "train_top1_acc": 0.0}
+
+        rows: List[np.ndarray] = []
+        targets: List[np.ndarray] = []
+        experts_seen: set[str] = set()
+        for _toks, e_idx, ctx_vec in parsed_train:
+            rows.append(ctx_vec)
             y_vec = np.zeros(n_experts, dtype=np.float64)
             y_vec[e_idx] = 1.0
             targets.append(y_vec)
             experts_seen.add(self.EXPERTS[e_idx])
-
-        if not rows:
-            return {"n_traces": 0, "experts_updated": [], "train_top1_acc": 0.0}
 
         X = np.stack(rows, axis=0).astype(np.float64)
         Y = np.stack(targets, axis=0).astype(np.float64)
@@ -313,16 +350,67 @@ class ToolRoutingMoE:
         W_traces = np.linalg.solve(gram, X.T @ Y).astype(np.float32)
         blend = max(0.0, min(1.0, float(blend_with_prior)))
         self.W_gate = ((1.0 - blend) * W_traces + blend * self.W_gate).astype(np.float32)
-        self._calibrate_expert_quantiles(alpha=0.05)
+
+        # Initialize baseline quantiles at caller alpha before optional held-out override
+        self._calibrate_expert_quantiles(alpha=alpha)
+        holdout_summary: Optional[Dict[str, Any]] = None
+        if holdout_traces is not None:
+            parsed_ho = self._parse_trace_rows(holdout_traces, tool_to_expert)
+            per_expert_scores: Dict[str, List[float]] = {}
+            holdout_n = 0
+            holdout_errors = 0
+            for toks, e_idx, ctx_vec in parsed_ho:
+                logits, _ = self._compute_raw_gate_logits(toks, ctx_vec)
+                exp_l = np.exp(logits - np.max(logits))
+                probs = exp_l / np.sum(exp_l)
+                exp_name = self.EXPERTS[e_idx]
+                per_expert_scores.setdefault(exp_name, []).append(float(1.0 - probs[e_idx]))
+                holdout_n += 1
+                if int(np.argmax(probs)) != e_idx:
+                    holdout_errors += 1
+            if holdout_n > 0:
+                for exp_name, scores in per_expert_scores.items():
+                    n_e = len(scores)
+                    q_level = min(1.0, math.ceil((n_e + 1) * (1.0 - float(alpha))) / float(n_e))
+                    q_hat = float(np.quantile(scores, q_level))
+                    self.per_expert_quantiles[exp_name] = round(q_hat, 4)
+                    covered = sum(1 for sc in scores if sc <= q_hat + 1e-7)
+                    self.per_expert_coverage[exp_name] = round(covered / float(n_e), 4)
+                self.verified_episodes = holdout_n
+                self.verified_errors = holdout_errors
+                self.calibration_alpha = float(alpha)
+                self.error_metric = "holdout_expert_routing_mismatch"
+                self.calibration_sample_id = f"holdout_traces_{holdout_n}"
+                self.calibration_basis = "measured_holdout" if holdout_n >= 19 else "partial_holdout_traces"
+                holdout_summary = {
+                    "n_holdout": holdout_n,
+                    "errors": holdout_errors,
+                    "experts_calibrated": sorted(per_expert_scores.keys()),
+                    "calibration_basis": self.calibration_basis,
+                }
+            else:
+                self.calibration_basis = "synthetic_lexical_probes"
+                holdout_summary = {
+                    "n_holdout": 0,
+                    "errors": 0,
+                    "experts_calibrated": [],
+                    "calibration_basis": self.calibration_basis,
+                }
+        else:
+            self.calibration_basis = "synthetic_lexical_probes"
 
         preds = np.argmax(X @ self.W_gate, axis=1)
         truth = np.argmax(Y, axis=1)
         acc = float(np.mean(preds == truth))
-        return {
+        out: Dict[str, Any] = {
             "n_traces": len(rows),
             "experts_updated": sorted(experts_seen),
             "train_top1_acc": round(acc, 4),
+            "calibration_basis": self.calibration_basis,
         }
+        if holdout_summary is not None:
+            out["holdout_calibration"] = holdout_summary
+        return out
 
     def _compute_raw_gate_logits(self, tokens: List[str], ctx_vec: np.ndarray) -> Tuple[np.ndarray, int]:
         """Shared deterministic gating logits computation used by calibration and inference."""
@@ -502,6 +590,7 @@ class ToolRoutingMoE:
                     exp2: self.per_expert_quantiles[exp2],
                 },
                 routing_rationale="No registered tools in live agent catalog; escalating.",
+                conformal_basis=self.calibration_basis,
             )
 
         # Compute analytical ridge-fitted gating + trigram prototype logits
@@ -566,6 +655,7 @@ class ToolRoutingMoE:
             conformal_passed=conformal_passed,
             per_expert_conformal={expert_1: q1, expert_2: q2},
             routing_rationale=rationale,
+            conformal_basis=self.calibration_basis,
         )
 
     route_LockFree = route

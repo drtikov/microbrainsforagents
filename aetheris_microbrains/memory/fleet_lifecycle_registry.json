@@ -4,582 +4,635 @@
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "architectural_breeding": {
     "name": "architectural_breeding",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "code_mutation_predictor": {
     "name": "code_mutation_predictor",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "skill_lifecycle_manager": {
     "name": "skill_lifecycle_manager",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "causal_world_model": {
     "name": "causal_world_model",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "concept_synthesizer": {
     "name": "concept_synthesizer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "speculative_tool_drafter": {
     "name": "speculative_tool_drafter",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "counterfactual_reasoner": {
     "name": "counterfactual_reasoner",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "intent_persistence_tracker": {
     "name": "intent_persistence_tracker",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "metacognitive_calibrator": {
     "name": "metacognitive_calibrator",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "eggroll_evolutionary_strategies": {
     "name": "eggroll_evolutionary_strategies",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Dormant research domain retired during metabolic cleanup",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "dark_matter_halo_modeling": {
     "name": "dark_matter_halo_modeling",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Dormant research domain retired during metabolic cleanup",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "communication_complexity": {
     "name": "communication_complexity",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Dormant research domain retired during metabolic cleanup",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "cosmological_redshift_drift": {
     "name": "cosmological_redshift_drift",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Dormant research domain retired during metabolic cleanup",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "communication_complexity_shortcut_set": {
     "name": "communication_complexity_shortcut_set",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "eggroll_es_domain": {
     "name": "eggroll_es_domain",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "eggroll_test": {
     "name": "eggroll_test",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "weight_space_memory": {
     "name": "weight_space_memory",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "astrophysics": {
     "name": "astrophysics",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "biochemistry": {
     "name": "biochemistry",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "dns_domain": {
     "name": "dns_domain",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "consensusconstrained_dualfederated_optim": {
     "name": "consensusconstrained_dualfederated_optim",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "minimal_oversight_uncertaintyaware_gover": {
     "name": "minimal_oversight_uncertaintyaware_gover",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "provable_circuitlevel_thresholds_nonabel": {
     "name": "provable_circuitlevel_thresholds_nonabel",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "test_time_scaling_code": {
     "name": "test_time_scaling_code",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "understanding_inside_state_mechanistic": {
     "name": "understanding_inside_state_mechanistic",
     "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": "Archived during Step 2 fleet hygiene",
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "self_continuity_guardian": {
     "name": "self_continuity_guardian",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "constitutional_guardian": {
     "name": "constitutional_guardian",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "ontology_evolution_miner": {
     "name": "ontology_evolution_miner",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "general_domain": {
     "name": "general_domain",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "identity_probe_domain": {
     "name": "identity_probe_domain",
-    "state": "active_core",
+    "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
-    "quarantine_reason": null,
-    "version": 1
+    "quarantine_reason": "Test/probe artifact isolated from active production fleet",
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "drift_detector": {
     "name": "drift_detector",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "tool_failure_classifier": {
     "name": "tool_failure_classifier",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "reflection_quality_scorer": {
     "name": "reflection_quality_scorer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "budget_forecaster": {
     "name": "budget_forecaster",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "tool_routing_v2": {
     "name": "tool_routing_v2",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "memory_distill_test": {
     "name": "memory_distill_test",
-    "state": "active_core",
+    "state": "retired",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
-    "quarantine_reason": null,
-    "version": 1
+    "quarantine_reason": "Test/probe artifact isolated from active production fleet",
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "code_edit_verifier": {
     "name": "code_edit_verifier",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "architecture_critic": {
     "name": "architecture_critic",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "memory_consolidator": {
     "name": "memory_consolidator",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "patch_quality_predictor": {
     "name": "patch_quality_predictor",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "context_relevance_scorer": {
     "name": "context_relevance_scorer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "identity_coherence_checker": {
     "name": "identity_coherence_checker",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "tool_chain_planner": {
     "name": "tool_chain_planner",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "semantic_deduplicator": {
     "name": "semantic_deduplicator",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "patch_risk_scorer": {
     "name": "patch_risk_scorer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "context_compaction_optimizer": {
     "name": "context_compaction_optimizer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "dialogue_era_classifier": {
     "name": "dialogue_era_classifier",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "format_crossref_record": {
     "name": "format_crossref_record",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "task_decomposer": {
     "name": "task_decomposer",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "context_section_ranker": {
     "name": "context_section_ranker",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "provider_failure_predictor": {
     "name": "provider_failure_predictor",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   },
   "git_conflict_resolver": {
     "name": "git_conflict_resolver",
     "state": "active_core",
     "call_count": 0,
     "error_count": 0,
-    "conformal_coverage": 0.9,
-    "mean_latency_ms": 12.0,
+    "conformal_coverage": null,
+    "mean_latency_ms": null,
     "last_called_iso": null,
     "quarantine_reason": null,
-    "version": 1
+    "version": 1,
+    "telemetry_status": "unobserved"
   }
 }

@@ -291,7 +291,9 @@ class TestPipelineFixedSurfacesStayHonest:
             assert 'BRAINS_DIR.glob("*_meta.json")' in src
             status = microbrain_status()
             assert status["success"] is True
-            assert len(status["brains"]) == status["count"] == 42
+            expected_count = len(list((ROOT / "memory/store/neuro_brains").glob("*_meta.json")))
+            assert expected_count >= 40
+            assert len(status["brains"]) == status["count"] == expected_count
 
     def test_autotelic_scans_npz_not_only_npy(self):
         src = (ROOT / "core/autotelic_void_explorer.py").read_text(encoding="utf-8")

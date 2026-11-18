@@ -67,20 +67,23 @@ class SkillTelemetry:
     state: SkillLifecycleState
     call_count: int = 0
     error_count: int = 0
-    conformal_coverage: float = 0.90  # 1 - alpha
-    mean_latency_ms: float = 12.0
+    conformal_coverage: Optional[float] = None  # Observed (1 - alpha); None until measured
+    mean_latency_ms: Optional[float] = None
+    telemetry_status: str = "unobserved"
     last_called_iso: Optional[str] = None
     quarantine_reason: Optional[str] = None
     version: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
+        status = "observed" if self.call_count > 0 else "unobserved"
         return {
             "name": self.name,
             "state": self.state.value,
             "call_count": self.call_count,
             "error_count": self.error_count,
-            "conformal_coverage": round(self.conformal_coverage, 3),
-            "mean_latency_ms": round(self.mean_latency_ms, 2),
+            "conformal_coverage": round(self.conformal_coverage, 3) if self.conformal_coverage is not None else None,
+            "mean_latency_ms": round(self.mean_latency_ms, 2) if self.mean_latency_ms is not None else None,
+            "telemetry_status": status,
             "last_called_iso": self.last_called_iso,
             "quarantine_reason": self.quarantine_reason,
             "version": self.version,
@@ -88,16 +91,29 @@ class SkillTelemetry:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SkillTelemetry:
+        call_count = int(data.get("call_count", 0) or 0)
+        last_called = data.get("last_called_iso")
+        if call_count == 0 and last_called is None:
+            conformal_coverage: Optional[float] = None
+            mean_latency_ms: Optional[float] = None
+            telemetry_status = "unobserved"
+        else:
+            raw_cov = data.get("conformal_coverage")
+            raw_lat = data.get("mean_latency_ms")
+            conformal_coverage = float(raw_cov) if raw_cov is not None else None
+            mean_latency_ms = float(raw_lat) if raw_lat is not None else None
+            telemetry_status = str(data.get("telemetry_status") or "observed")
         return cls(
             name=data["name"],
             state=SkillLifecycleState(data.get("state", "incubating")),
-            call_count=data.get("call_count", 0),
-            error_count=data.get("error_count", 0),
-            conformal_coverage=data.get("conformal_coverage", 0.90),
-            mean_latency_ms=data.get("mean_latency_ms", 12.0),
-            last_called_iso=data.get("last_called_iso"),
+            call_count=call_count,
+            error_count=int(data.get("error_count", 0) or 0),
+            conformal_coverage=conformal_coverage,
+            mean_latency_ms=mean_latency_ms,
+            telemetry_status=telemetry_status,
+            last_called_iso=last_called,
             quarantine_reason=data.get("quarantine_reason"),
-            version=data.get("version", 1),
+            version=int(data.get("version", 1) or 1),
         )
 
 
@@ -137,13 +153,15 @@ class SkillLifecycleManager:
             except Exception as exc:
                 log.warning("Failed to load skill lifecycle registry: %s", exc)
 
-        # Initialize defaults
+        # Initialize defaults without fabricated telemetry counts or bounds
         for dom in PROTECTED_CORE_DOMAINS:
             self.skills[dom] = SkillTelemetry(
                 name=dom,
                 state=SkillLifecycleState.ACTIVE_CORE,
-                call_count=10,
-                conformal_coverage=0.92,
+                call_count=0,
+                conformal_coverage=None,
+                mean_latency_ms=None,
+                telemetry_status="unobserved",
             )
 
         for dom in KNOWN_DORMANT_LEGACY_DOMAINS:
@@ -151,6 +169,9 @@ class SkillLifecycleManager:
                 name=dom,
                 state=SkillLifecycleState.RETIRED,
                 call_count=0,
+                conformal_coverage=None,
+                mean_latency_ms=None,
+                telemetry_status="unobserved",
                 quarantine_reason="Dormant research domain retired during metabolic cleanup",
             )
 
@@ -163,7 +184,13 @@ class SkillLifecycleManager:
         except Exception as exc:
             log.warning("Failed to save skill lifecycle registry: %s", exc)
 
-    def record_call(self, skill_name: str, success: bool, latency_ms: float = 10.0) -> None:
+    def record_call(
+        self,
+        skill_name: str,
+        success: bool,
+        latency_ms: float = 10.0,
+        conformal_passed: Optional[bool] = None,
+    ) -> None:
         """Update telemetry when a skill is invoked."""
         from datetime import datetime, timezone
 
@@ -178,7 +205,17 @@ class SkillLifecycleManager:
         sk.call_count += 1
         if not success:
             sk.error_count += 1
-        sk.mean_latency_ms = 0.8 * sk.mean_latency_ms + 0.2 * latency_ms
+        sk.telemetry_status = "observed"
+        if sk.mean_latency_ms is None:
+            sk.mean_latency_ms = float(latency_ms)
+        else:
+            sk.mean_latency_ms = 0.8 * sk.mean_latency_ms + 0.2 * float(latency_ms)
+        if conformal_passed is not None:
+            obs = 1.0 if conformal_passed else 0.0
+            if sk.conformal_coverage is None:
+                sk.conformal_coverage = obs
+            else:
+                sk.conformal_coverage = 0.8 * sk.conformal_coverage + 0.2 * obs
         sk.last_called_iso = datetime.now(timezone.utc).isoformat()
 
         # Check for degradation

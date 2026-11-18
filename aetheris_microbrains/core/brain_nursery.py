@@ -30,10 +30,15 @@ class AutonomousBrainNursery:
 
     _instance: Optional[AutonomousBrainNursery] = None
 
-    def __init__(self):
+    def __init__(self, store_dir: Optional[Path] = None):
+        self._custom_store_dir: Optional[Path] = Path(store_dir) if store_dir is not None else None
         self.active_brains: Dict[str, AnalyticalMicroTransformer] = {}
-        STORE_DIR.mkdir(parents=True, exist_ok=True)
+        self.store_dir.mkdir(parents=True, exist_ok=True)
         self._load_existing_brains()
+
+    @property
+    def store_dir(self) -> Path:
+        return self._custom_store_dir if self._custom_store_dir is not None else STORE_DIR
 
     @classmethod
     def get_instance(cls) -> AutonomousBrainNursery:
@@ -43,11 +48,11 @@ class AutonomousBrainNursery:
 
     def _load_existing_brains(self):
         try:
-            for meta_file in STORE_DIR.glob("*_meta.json"):
+            for meta_file in self.store_dir.glob("*_meta.json"):
                 name = meta_file.name.replace("_meta.json", "")
                 if "_bitnet" in name:
                     continue
-                brain = AnalyticalMicroTransformer.load(name, STORE_DIR)
+                brain = AnalyticalMicroTransformer.load(name, self.store_dir, strict_directory=(self._custom_store_dir is not None))
                 if brain:
                     self.active_brains[name] = brain
         except Exception as e:
@@ -62,7 +67,7 @@ class AutonomousBrainNursery:
         brain_name = self._normalize_brain_name(domain_name)
         if brain_name in self.active_brains:
             return self.active_brains[brain_name]
-        loaded = AnalyticalMicroTransformer.load(brain_name, STORE_DIR)
+        loaded = AnalyticalMicroTransformer.load(brain_name, self.store_dir, strict_directory=(self._custom_store_dir is not None))
         if loaded is not None:
             self.active_brains[brain_name] = loaded
             return loaded
@@ -89,7 +94,7 @@ class AutonomousBrainNursery:
         if brain_name in self.active_brains:
             brain = self.active_brains[brain_name]
         else:
-            loaded = AnalyticalMicroTransformer.load(brain_name, STORE_DIR)
+            loaded = AnalyticalMicroTransformer.load(brain_name, self.store_dir, strict_directory=(self._custom_store_dir is not None))
             if (
                 loaded is not None
                 and loaded.d_model == d_model
@@ -114,7 +119,7 @@ class AutonomousBrainNursery:
             for trigger, output in rules.items():
                 brain.compile_logic_association(trigger, output, binding_gain=3.0)
 
-        brain.save(STORE_DIR)
+        brain.save(self.store_dir)
         self.active_brains[brain_name] = brain
         return brain
 
@@ -125,11 +130,11 @@ class AutonomousBrainNursery:
 
     def list_grown_brains(self) -> List[Dict[str, Any]]:
         try:
-            for meta_file in STORE_DIR.glob("*_meta.json"):
+            for meta_file in self.store_dir.glob("*_meta.json"):
                 name = meta_file.name.replace("_meta.json", "")
                 if "_bitnet" in name or name in self.active_brains:
                     continue
-                loaded = AnalyticalMicroTransformer.load(name, STORE_DIR)
+                loaded = AnalyticalMicroTransformer.load(name, self.store_dir, strict_directory=(self._custom_store_dir is not None))
                 if loaded is not None:
                     self.active_brains[name] = loaded
         except Exception:
@@ -198,7 +203,7 @@ class AutonomousBrainNursery:
         best_w = report.pop("best_ternary_weights")
         if hasattr(brain, "W_mlp") and isinstance(brain.W_mlp, np.ndarray) and brain.W_mlp.shape == best_w.shape:
             brain.W_mlp = best_w.astype(np.float32)
-            brain.save(STORE_DIR)
+            brain.save(self.store_dir)
         report["brain_name"] = brain_name
         return report
 
@@ -248,7 +253,7 @@ class AutonomousBrainNursery:
             step_res["weights_substituted"] = True
         else:
             brain.W_mlp = step_res["updated_weights"]
-            brain.save(STORE_DIR)
+            brain.save(self.store_dir)
         step_res["brain_name"] = brain_name
         return step_res
 
@@ -307,7 +312,7 @@ class AutonomousBrainNursery:
         )
         if not identity_fallback and "updated_weights" in es_res:
             brain.W_mlp = es_res["updated_weights"]
-            brain.save(STORE_DIR)
+            brain.save(self.store_dir)
         return {
             "status": "dns_evolved",
             "brain_name": brain_name,
@@ -329,7 +334,7 @@ class AutonomousBrainNursery:
         """Calibrates split-conformal prediction sets on the domain's micro-brain."""
         brain = self._get_or_load_or_grow(domain_name)
         cal = brain.calibrate_conformal(calibration_data, alpha=alpha)
-        brain.save(STORE_DIR)
+        brain.save(self.store_dir)
         return cal
 
     def infer_brain_conformal(

@@ -39,9 +39,9 @@ class WeightSpaceMemorySynthesizer:
                 "d_model": self.latent_dim,
                 "vocab_size": self.latent_dim,
                 "stored_patterns": 0,
-                "conformal_basis": "held_out",
-                "calibration_q_hat": 0.05,
-                "conformal_quantile": 0.05,
+                "conformal_basis": "uncalibrated",
+                "calibration_q_hat": None,
+                "conformal_quantile": None,
                 "domain_name": "weight_space_memory",
                 "is_vsa": True,
                 "health": "healthy",
@@ -114,9 +114,9 @@ class WeightSpaceMemorySynthesizer:
         data["d_model"] = self.latent_dim
         data["latent_dim"] = self.latent_dim
         data["vocab_size"] = len(patterns) or self.latent_dim
-        data["conformal_basis"] = "held_out"
-        data["calibration_q_hat"] = 0.05
-        data["conformal_quantile"] = 0.05
+        data["conformal_basis"] = "uncalibrated"
+        data["calibration_q_hat"] = None
+        data["conformal_quantile"] = None
         data["domain_name"] = "weight_space_memory"
         data["is_vsa"] = True
         data["health"] = "healthy"

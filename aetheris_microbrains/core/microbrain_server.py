@@ -138,10 +138,6 @@ class HealthResponse(BaseModel):
 # --- Server State ---
 
 _start_time = time.time()
-_accelerator: Optional[Any] = None
-_nursery: Optional[Any] = None
-_brain_cache: Dict[str, Any] = {}
-_available_brains: Dict[str, Any] = {}
 
 
 # --- Lifecycle ---
@@ -725,9 +721,9 @@ async def prefilter_candidates(req: PrefilterRequest):
         )
 
 
-@app.post("/microbrain/validate", response_model=ValidationResponse)
+@app.post("/microbrain/validate_code", response_model=ValidationResponse)
 async def validate_code_endpoint(req: ValidationRequest):
-    """Alias for /microbrain/validate with different path."""
+    """Alias for /microbrain/validate at /microbrain/validate_code."""
     return await validate_code(req)
 
 

@@ -12,7 +12,7 @@ def main():
 
     # Check fleet status
     status = mb.microbrain_status()
-    print(f"Active microbrains in fleet: {status.get('count', 42)}")
+    print(f"Active microbrains in fleet: {status.get('count', 0)}")
 
     # Consult microbrains for a query
     query = "syntax error in AST parser during code edit"
