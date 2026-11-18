@@ -75,13 +75,14 @@ Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destruct
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
 Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.3`)
+### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.4`)
 - **Safe Timeout Contracts:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission.
 - **Zero-Fabrication Error Bounds & Calibration Provenance:** `decide()`, `calibrate_conformal()`, and `infer_conformal()` emit `upper_error_bound_95: null` and `upper_error_bound_rule_of_3: null` (`statistical_confidence_status: "unknown"`) unless measured on an explicit labeled evaluation set. Fission-derived models honestly declare `conformal_basis: "fission_synthetic_anchors"` with `conformal_guarantee_valid = False` until calibrated on genuine holdouts; `ToolRoutingMoE` explicitly marks synthetic anchors as `"synthetic_lexical_probes"`.
 - **Nuanced Shell & AST Inspection:** Differentiates dangerous redirects (`> /etc/passwd`, `> .env`, `> ../escaped`) which are strictly denied from unprivileged redirects (`echo "ok" > out.txt`) which escalate for confirmation, while allowing standard descriptor piping (`2>&1`, `> /dev/null`). Real optional Tree-sitter grammars are dynamically verified before reporting AST validation.
 - **Decoupled Advisors & Cache-Safe Sessions:** Standalone non-authorizing entrypoints `diagnose_patch()` (patch diagnostics) and `rank_tools()` / `SessionToolSurface` (sticky per-session Top-K narrowing that avoids LLM prompt-cache invalidation across turns), plus `evaluate_topk_holdout()` for real Top-K recall audits.
 - **Clean Fleet Registry & Dynamic Variance:** Fleet lifecycle registry reports `null` and `"unobserved"` for models without runtime telemetry instead of placeholder defaults. Counterfactual simulations dynamically track empirical variance thresholds. Test probe models are safely isolated in `_archive/` leaving 41 pure production models.
 - **Atomic Versioned Storage & Live Telemetry:** `AnalyticalMicroTransformer.save()` commits immutable `_versions/{name}/{rev_id}/` snapshots via a single atomic `.manifest.json` pointer swap; `/dashboard` renders live `MicrobrainTelemetry` (with illustrative preview isolated on `/demo/dashboard`), and `decision_journal.jsonl` redacts secrets and surfaces `journal_written` / `journal_error`.
+- **Shadow Error Observability & Isolated Journals:** `--shadow` mode uses a pure stdlib logger to append structured, redacted `event_type: "hook_error"` entries to `decision_journal.jsonl` upon empty payloads, malformed JSON, non-object payloads, or engine/import failures (supported via `--journal-path` / `AETHERIS_JOURNAL_PATH`), so shadow errors are never indistinguishable from unchecked operations.
 - **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows whether it inspected complete file context.
 
 ---
@@ -311,7 +312,7 @@ print("Selected within surface:", res.selected_tool) # -> "edit_file"
 narrowed = mb.narrow_tool_surface("fix bug and write repository patch", top_k=4)
 print(narrowed["mode"], narrowed["candidate_tools"], narrowed["reduction_ratio"])
 
-# Decoupled non-authorizing advisors & cache-safe sticky session narrowing (v0.7.3)
+# Decoupled non-authorizing advisors & cache-safe sticky session narrowing (v0.7.4)
 ranked = mb.rank_tools("inspect source file settings.py", available_tools=["repo_read", "edit_file", "run_tests"], top_k=2)
 patch_diag = mb.diagnose_patch("src/app.py", "def ok():\n    return 1\n")
 session = mb.SessionToolSurface(["repo_read", "edit_file", "run_tests", "git_status", "docker_ps"], top_k=3)
@@ -377,7 +378,7 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.3`: 254 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.4`: 254 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips in `test_robotics_stack.py` when `nir` or `onnx` are not installed):
 
@@ -423,7 +424,7 @@ python examples/05_reproducible_25step_benchmark.py
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Unfiltered 32-Tool Agent | 64,800 | 0.0% | — (runs unfiltered) | 0 | — (not measured) |
 | Naive Keyword Baseline | 64,800 | 0.0% | 8 | 4 | 0.002 ms |
-| **Aetheris Microbrains v0.7.3** | **12,312** | **81.0%** | **0** | **0** | **1.977 ms** |
+| **Aetheris Microbrains v0.7.4** | **12,312** | **81.0%** | **0** | **0** | **1.977 ms** |
 
 ### 3. External SWE-bench Lite (300 Real GitHub Issues) Zero-LLM Gate Benchmark (`examples/07_swebench_lite_gate_benchmark.py`)
 Evaluates `decide()` and `narrow_tool_surface(top_k=4)` against all **300 real issues and gold patches** in `princeton-nlp/SWE-bench_Lite`:
@@ -450,7 +451,7 @@ python examples/07_swebench_lite_gate_benchmark.py
 | Coarse SWE core retention across all 300 prompts vs. Pre-Frozen Keyword smoke | **297 / 300** vs. **286 / 300** (`36.7%` schema tokens saved, `p95 = 14.487 ms`) |
 | Coarse SWE core retention within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127** (`edit_file` / `repo_read`: **103 / 127**) |
 
-### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI & HTTP Endpoints (`v0.7.0`–`v0.7.3`)
+### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI & HTTP Endpoints (`v0.7.0`–`v0.7.4`)
 Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` omits unsupported `"ask"` on escalations, returning `host_action: "defer_to_host_policy"` with exit `0` and empty `stdout` so Codex applies its configured approval policy—which does **not** force a prompt under auto-approve modes unless `--codex-escalate-deny` is enabled), while fatal denials and non-shadow invalid/non-object payloads write redacted reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
