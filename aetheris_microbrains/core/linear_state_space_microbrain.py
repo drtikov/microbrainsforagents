@@ -113,7 +113,7 @@ class LinearStateSpaceMicroBrain:
         self, sequence: Union[List[List[float]], np.ndarray], force_gpu: bool = False
     ) -> Dict[str, Any]:
         """
-        Proposal 6: Work-Efficient Blelloch / Hillis-Steele Parallel Associative Scan
+        Work-Efficient Blelloch / Hillis-Steele Parallel Associative Scan
         in GPU __local SRAM (`O(log2 N)` depth instead of `O(N)` sequential steps).
         """
         from .opencl_microbrain_accelerator import get_opencl_accelerator

@@ -18,19 +18,32 @@ from typing import Any, Dict, List, Optional, Set
 
 log = logging.getLogger(__name__)
 
-_WORD_RE = re.compile(r"[a-z0-9_]{3,}")
+_WORD_RE = re.compile(r"(?u)\b\w{3,}\b")
 
 
 def _extract_keywords(text: str) -> Set[str]:
-    """Extract lowercase semantic keywords from text, excluding common stopwords."""
+    """Extract lowercase bilingual semantic keywords (RU/EN), excluding common stopwords."""
     stop_words = {
         "the", "and", "for", "with", "this", "that", "from", "are", "was",
         "were", "will", "would", "could", "should", "have", "has", "had",
         "file", "repo", "tool", "call", "step", "task", "done", "test",
         "into", "over", "under", "after", "before", "about",
+        "для", "что", "как", "при", "или", "это", "все", "его", "она",
+        "они", "быть", "через", "после", "перед", "файл", "репо", "шаг", "тест",
     }
     words = set(_WORD_RE.findall(str(text or "").lower()))
     return words - stop_words
+
+
+def _stem_overlap(root_terms: Set[str], current_terms: Set[str]) -> Set[str]:
+    """Compute keyword overlap with 4-char morphological prefix matching for bilingual inflections."""
+    matched: Set[str] = set()
+    for rt in root_terms:
+        if rt in current_terms:
+            matched.add(rt)
+        elif len(rt) >= 5 and any(len(ct) >= 5 and ct[:4] == rt[:4] for ct in current_terms):
+            matched.add(rt)
+    return matched
 
 
 @dataclass
@@ -99,7 +112,7 @@ class IntentPersistenceTracker:
         self.action_history.append(action_summary[:120])
 
         current_terms = _extract_keywords(combined_current)
-        overlap = self.root_terms.intersection(current_terms)
+        overlap = _stem_overlap(self.root_terms, current_terms)
 
         # Baseline Semantic Distance (1.0 - Jaccard overlap on root keywords)
         if self.root_terms:
@@ -125,14 +138,32 @@ class IntentPersistenceTracker:
         avg_recent = sum(self.history_scores[-3:]) / len(self.history_scores[-3:])
         weighted_drift = 0.7 * instant_drift + 0.3 * avg_recent
 
-        # Trigger conditions: absolute drift threshold OR rapid drift acceleration
-        is_drifting = (weighted_drift >= self.drift_threshold) or (
+        # Consult Neural Intent Persistence Tracker using in-vocabulary structural vectors
+        pre_drift = (weighted_drift >= self.drift_threshold) or (
             velocity >= self.velocity_threshold and weighted_drift >= 0.50
+        )
+        neural_sig: Optional[str] = None
+        try:
+            tokens = (
+                ["action_vector_orthogonal", "distraction_filter_engaged"]
+                if pre_drift
+                else ["action_vector_concordant", "context_amnesia_prevented"]
+            )
+            from .brain_moe_orchestrator import consult_microbrain
+
+            res = consult_microbrain("intent_persistence_tracker", tokens)
+            if isinstance(res, dict) and not res.get("abstained", False):
+                neural_sig = res.get("prediction")
+        except Exception as exc:
+            log.debug("Intent neural consultation skipped: %s", exc)
+
+        # Trigger conditions: absolute drift threshold, rapid acceleration, or neural veto
+        is_drifting = pre_drift or (
+            neural_sig is not None and any(w in str(neural_sig).lower() for w in ("abort", "alarm", "diverged"))
         )
 
         alarm_msg: Optional[str] = None
         reanchor_directive: Optional[str] = None
-        neural_sig: Optional[str] = None
 
         if is_drifting:
             self.drift_warnings_count += 1
@@ -146,16 +177,6 @@ class IntentPersistenceTracker:
                 f"2. Divergent Behavior: Currently chasing '{action_summary[:80]}'.\n"
                 f"3. Corrective Action: Abandon secondary rabbits. Re-center immediately on primary goal."
             )
-
-        # Consult Neural Intent Persistence Tracker
-        try:
-            token = "target_forgotten" if is_drifting else "root_goal_aligned"
-            from .brain_moe_orchestrator import consult_microbrain
-            res = consult_microbrain("intent_persistence_tracker", [token])
-            if isinstance(res, dict):
-                neural_sig = res.get("prediction")
-        except Exception as exc:
-            log.debug("Intent neural consultation skipped: %s", exc)
 
         return IntentDriftAssessment(
             root_goal=self.root_goal,

@@ -2,11 +2,11 @@
 Evolution Attempt Pre-Filter Surrogate & Resident HDC Experience Memory
 ========================================================================
 Wave-3 Measured GT 710 Co-Processor Proposals 4 & 6:
-1. Proposal 4: Fast on-device evolution surrogate pre-filter trained on real historical
+1. Fast on-device evolution surrogate pre-filter trained on real historical
    outcomes from `memory/store/journal.jsonl` and `memory/store/death_database.json`.
    Enforces a strict chronological 80/20 train/test split with held-out ROC-AUC evaluation.
    Honesty Gate: Only advises when held_out_auc > 0.55; otherwise abstains as 'unmeasured'.
-2. Proposal 6: Large-scale resident Hyperdimensional Computing (HDC / VSA) experience memory
+2. Large-scale resident Hyperdimensional Computing (HDC / VSA) experience memory
    kept stationary in GT 710 VRAM for sub-millisecond near-duplicate goal detection and
    nearest-failure post-mortem retrieval.
 """

@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -86,6 +87,16 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "totem",
     "integrity_seal.json",
     "integrity_manifest",
+    # Universal SWE security-critical asset paths
+    ".env",
+    ".git/config",
+    ".git/hooks",
+    ".ssh/",
+    "id_rsa",
+    "id_ed25519",
+    "credentials.json",
+    "secrets.yaml",
+    "secrets.json",
 )
 
 
@@ -103,15 +114,24 @@ DEFAULT_POLICY = PolicyConfig()
 
 
 def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
-    """Return True if path points to a constitutional or protected system asset.
+    """Return True if path points to a constitutional, credential, or security-critical asset.
 
-    Explicitly avoids false positives on generic code/math paths like `src/math/axioms.py`.
+    Protects both custom constitutional patterns and standard SWE secrets/hooks (`.env`,
+    `.git/hooks`, `.ssh/id_rsa`, `credentials.json`) while avoiding false positives on
+    generic code/math paths like `src/math/axioms.py` or `src/env_loader.py`.
     """
     if not path_str:
         return False
     cfg = policy or DEFAULT_POLICY
     normalized = str(path_str).replace("\\", "/").strip().lower()
-    return any(pat in normalized for pat in cfg.protected_patterns)
+    basename = Path(normalized).name
+    for pat in cfg.protected_patterns:
+        if pat == ".env":
+            if basename == ".env" or basename.startswith(".env."):
+                return True
+        elif pat in normalized:
+            return True
+    return False
 
 
 def evaluate_layer0_policy(
@@ -656,6 +676,8 @@ def analyze_code_diff(
             "interface_hazards": [],
             "line_count": 0,
             "ast_nodes": [],
+            "cyclomatic_complexity": 0,
+            "is_static_data_or_doc": True,
             "context_ast_parsed": False,
             "patched_file_ast_verified": False,
         }
@@ -717,6 +739,8 @@ def analyze_code_diff(
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
+            "cyclomatic_complexity": 0,
+            "is_static_data_or_doc": bool(json_ok and len(secret_findings) == 0),
             "context_ast_parsed": False,
             "patched_file_ast_verified": False,
         }
@@ -730,6 +754,7 @@ def analyze_code_diff(
             if re.search(r"\beval\s*\(", stripped) and ext in {".js", ".ts", ".jsx", ".tsx"}:
                 non_py_findings.append("js_eval_call")
         non_py_findings = list(dict.fromkeys(non_py_findings))
+        is_doc_or_cfg = ext in {".md", ".txt", ".yaml", ".yml", ".toml", ".css", ".html"} and len(non_py_findings) == 0
         return {
             "language": ext.lstrip(".") or "text",
             "syntax_valid": True,
@@ -738,6 +763,8 @@ def analyze_code_diff(
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
+            "cyclomatic_complexity": 0,
+            "is_static_data_or_doc": is_doc_or_cfg,
             "context_ast_parsed": False,
             "patched_file_ast_verified": False,
         }
@@ -770,6 +797,8 @@ def analyze_code_diff(
                 "interface_hazards": [],
                 "line_count": line_count,
                 "ast_nodes": [],
+                "cyclomatic_complexity": 0,
+                "is_static_data_or_doc": False,
                 "context_ast_parsed": True,
                 "patched_file_ast_verified": True,
             }
@@ -796,6 +825,8 @@ def analyze_code_diff(
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
+            "cyclomatic_complexity": 0,
+            "is_static_data_or_doc": False,
             "context_ast_parsed": context_ast_parsed,
             "patched_file_ast_verified": patched_file_ast_verified,
         }
@@ -839,16 +870,35 @@ def analyze_code_diff(
         if orig_tries > new_tries and any("try:" in l for l in raw_lines if l.startswith("-")) and "exception_guard_removed" not in interface_hazards:
             interface_hazards.append("exception_guard_removed")
 
-    ast_nodes = _collect_ast_node_tags(tree if tree is not None else analysis_tree)
+    complexity_tree = tree if tree is not None else analysis_tree
+    cyclomatic_complexity = sum(
+        1 for n in ast.walk(complexity_tree)
+        if isinstance(n, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.ExceptHandler, ast.With, ast.AsyncWith, ast.BoolOp))
+    )
+    executable_stmt_count = sum(
+        1 for n in ast.walk(complexity_tree)
+        if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name != "_hunk_ctx")
+        or isinstance(n, (ast.Call, ast.Return, ast.Raise, ast.Import, ast.ImportFrom))
+    )
+    clean_hazards = list(dict.fromkeys(interface_hazards))
+    is_static_data_or_doc = bool(
+        len(all_findings) == 0
+        and len(clean_hazards) == 0
+        and cyclomatic_complexity <= 2
+        and executable_stmt_count <= 2
+    )
+    ast_nodes = _collect_ast_node_tags(complexity_tree)
 
     return {
         "language": "python",
         "syntax_valid": True,
         "security_clean": len(all_findings) == 0,
         "findings": all_findings,
-        "interface_hazards": list(dict.fromkeys(interface_hazards)),
+        "interface_hazards": clean_hazards,
         "line_count": line_count,
         "ast_nodes": ast_nodes,
+        "cyclomatic_complexity": cyclomatic_complexity,
+        "is_static_data_or_doc": is_static_data_or_doc,
         "context_ast_parsed": context_ast_parsed,
         "patched_file_ast_verified": patched_file_ast_verified,
     }
@@ -1157,6 +1207,14 @@ def decide(
 
     def _finish(decision: str, label: str, pred_set: List[str], reason_code: str, layer: int) -> Dict[str, Any]:
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
+        recent = list(_DECISION_RING_BUFFER)[-12:]
+        ood_hits = sum(1 for item in recent if item.get("reason_code") == "layer2_conformal_abstention_ood")
+        if reason_code == "layer2_conformal_abstention_ood":
+            ood_hits += 1
+        denom = max(1, len(recent) + 1)
+        drift_detected = bool(denom >= 10 and (ood_hits / float(denom)) > 0.60)
+        upper_error_bound_95 = round(1.0 - (0.05 ** (1.0 / 22.0)), 4)
+
         out: Dict[str, Any] = {
             "decision": decision,
             "label": label,
@@ -1168,6 +1226,8 @@ def decide(
             "latency_ms": latency_ms,
             "input_sha256": input_sha256,
             "shadow_mode": shadow_mode,
+            "upper_error_bound_95": upper_error_bound_95,
+            "drift_detected": drift_detected,
         }
         if shadow_mode:
             out["shadow_decision"] = decision
@@ -1257,3 +1317,95 @@ def decide(
 
     # --- Layer 3: Fallback Escalation ---
     return _finish("escalate", "ambiguous", [], "layer3_default_escalation", 3)
+
+
+def recalibrate_from_decision_journal(
+    journal_entries: Optional[Sequence[Dict[str, Any]]] = None,
+    alpha: float = 0.05,
+    journal_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Consume logged decision episodes to compute operational telemetry, failure bounds,
+    and updated split-conformal quantiles when labeled nonconformity feedback is present.
+    """
+    entries: List[Dict[str, Any]] = []
+    if journal_entries is not None:
+        entries = [dict(e) for e in journal_entries if isinstance(e, dict)]
+    else:
+        target = journal_path or DEFAULT_JOURNAL_PATH
+        if _DECISION_RING_BUFFER:
+            entries = list(_DECISION_RING_BUFFER)
+        elif target.is_file():
+            try:
+                for ln in target.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if ln.strip():
+                        entries.append(json.loads(ln))
+            except Exception:
+                entries = []
+
+    decision_counts = {"allow": 0, "deny": 0, "escalate": 0}
+    layer_counts: Dict[int, int] = {}
+    latencies: List[float] = []
+    nonconf_scores: List[float] = []
+    verified_total = 0
+    verified_errors = 0
+
+    for item in entries:
+        dec = str(item.get("decision", "escalate"))
+        decision_counts[dec] = decision_counts.get(dec, 0) + 1
+        lyr = int(item.get("layer", 0))
+        layer_counts[lyr] = layer_counts.get(lyr, 0) + 1
+        if "latency_ms" in item:
+            latencies.append(float(item["latency_ms"]))
+        if "verified_correct" in item:
+            verified_total += 1
+            if not bool(item["verified_correct"]):
+                verified_errors += 1
+        if "nonconformity_score" in item:
+            nonconf_scores.append(float(item["nonconformity_score"]))
+
+    n_total = len(entries)
+    sorted_lat = sorted(latencies)
+    mean_lat = round(sum(latencies) / float(len(latencies)), 4) if latencies else 0.0
+    p95_lat = round(sorted_lat[int(len(sorted_lat) * 0.95)], 4) if sorted_lat else 0.0
+    escalation_rate = round(decision_counts.get("escalate", 0) / float(max(1, n_total)), 4) if n_total else 0.0
+
+    from .analytical_micro_transformer import AnalyticalMicroTransformer
+
+    bound_n = verified_total if verified_total > 0 else n_total
+    upper_bound = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
+        verified_errors if verified_total > 0 else 0,
+        max(1, bound_n),
+        alpha=float(alpha),
+    )
+
+    recalibrated_q_hat: Optional[float] = None
+    router_updated = False
+    if len(nonconf_scores) >= 19:
+        sorted_scores = sorted(nonconf_scores)
+        q_idx = min(len(sorted_scores) - 1, max(0, math.ceil((len(sorted_scores) + 1) * (1.0 - float(alpha))) - 1))
+        recalibrated_q_hat = round(float(sorted_scores[q_idx]), 4)
+        try:
+            from .tool_routing_moe import get_tool_routing_moe
+
+            moe = get_tool_routing_moe()
+            bounded_q = max(0.05, min(0.85, float(recalibrated_q_hat)))
+            for exp_name in moe.per_expert_quantiles:
+                moe.per_expert_quantiles[exp_name] = round(0.5 * float(moe.per_expert_quantiles[exp_name]) + 0.5 * bounded_q, 4)
+            router_updated = True
+        except Exception:
+            router_updated = False
+
+    return {
+        "n_episodes": n_total,
+        "decision_counts": decision_counts,
+        "layer_counts": layer_counts,
+        "escalation_rate": escalation_rate,
+        "mean_latency_ms": mean_lat,
+        "p95_latency_ms": p95_lat,
+        "verified_episodes": verified_total,
+        "verified_errors": verified_errors,
+        "upper_error_bound_95": upper_bound,
+        "recalibrated_q_hat": recalibrated_q_hat,
+        "router_updated": router_updated,
+        "alpha": float(alpha),
+    }

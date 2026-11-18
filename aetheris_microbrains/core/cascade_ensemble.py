@@ -15,16 +15,23 @@ Aggregation:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .analytical_micro_transformer import AnalyticalMicroTransformer, STORE_DIR
+from .critical_ensemble_abstention import (
+    CLASSIFIER_DENY_TOKENS,
+    CriticalEnsemble,
+    GUARDIAN_DENY_TOKENS,
+)
 from .layered_decision_engine import (
     analyze_code_diff,
     analyze_shell_command,
     is_protected_path,
 )
+from .tool_routing_moe import ToolRoutingMoE, get_tool_routing_moe
 
 log = logging.getLogger(__name__)
 
@@ -52,9 +59,10 @@ class CascadeEnsembleVerdict:
     cumulative_confidence: float
     tier_results: List[CascadeTierResult] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
+    escalation_payload: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "authorized": self.authorized,
             "verdict": self.verdict,
             "primary_intent": self.primary_intent,
@@ -72,6 +80,9 @@ class CascadeEnsembleVerdict:
             ],
             "reasons": self.reasons,
         }
+        if self.escalation_payload is not None:
+            out["escalation_payload"] = self.escalation_payload
+        return out
 
 
 class CascadeEnsembleRouter:
@@ -97,74 +108,95 @@ class CascadeEnsembleRouter:
         tool_args: Optional[Dict[str, Any]] = None,
         context_tags: Optional[List[str]] = None,
     ) -> CascadeEnsembleVerdict:
-        """Run complete 4-tier cascading evaluation."""
+        """Run complete 4-tier cascading evaluation backed by conformal & structural signals."""
         tool_args = tool_args or {}
         context_tags = context_tags or []
         tiers: List[CascadeTierResult] = []
         reasons: List[str] = []
-        cum_conf = 1.0
+        feature_builder = CriticalEnsemble(store_dir=self.store_dir)
 
-        # --- Tier 1: Intent Triage ---
+        standard_cli_tools = {
+            "ls", "echo", "pwd", "git", "clang-format", "cat", "head", "tail", "wc",
+            "grep", "rg", "find", "black", "ruff", "mypy", "pytest", "apply_patch", "delete_file",
+        }
+        known_moe_tools = {t for ts in ToolRoutingMoE.EXPERT_TOOLS.values() for t in ts}
+        known_tools = known_moe_tools | standard_cli_tools
+        clean_tool = str(target_tool or "").strip().lower()
+        tool_head = clean_tool.split()[0] if clean_tool else ""
+
+        cmd = str(tool_args.get("cmd") or tool_args.get("command") or tool_args.get("CommandLine") or "")
+        if not cmd and target_tool and any(ch in target_tool for ch in (" ", "/", "|", ";")):
+            cmd = target_tool
+
+        # --- Tier 1: Intent Triage (No synthetic ["read"] substitution on OOD) ---
         fast_intent = self._get_brain("neuro_fast_intent_classifier")
-        intent_decision = "execute"
-        intent_conf = 0.95
+        prompt_tokens = re.findall(r"(?u)\b\w{2,}\b", str(task_prompt or "").lower())
+        known_prompt_tokens = [t for t in prompt_tokens if fast_intent and t in fast_intent.vocab]
+        inf1: Dict[str, Any] = {}
         tier1_details: Dict[str, Any] = {"model_invoked": False}
-        if fast_intent:
-            prompt_tokens = [t.lower().strip(".,:;()[]") for t in task_prompt.split() if len(t) > 2]
-            known_prompt_tokens = [t for t in prompt_tokens if t in fast_intent.vocab]
-            probe_tokens = known_prompt_tokens if known_prompt_tokens else ["read"]
-            inf1 = fast_intent.infer_conformal(probe_tokens, alpha=0.05)
+        if fast_intent is not None:
+            inf1 = fast_intent.infer_conformal(prompt_tokens or ["<pad>"], alpha=0.05)
             tier1_details = {
                 "model_invoked": True,
                 "predicted_token": inf1.get("predicted_token"),
                 "prediction_set": inf1.get("prediction_set", []),
                 "abstained": inf1.get("abstained"),
             }
-            if known_prompt_tokens and not inf1.get("abstained") and inf1.get("predicted_token") not in ("<abstain>", "<unk>", "<eos>"):
-                intent_decision = str(inf1["predicted_token"])
-                intent_conf = max(0.85, float(inf1.get("confidence", 0.92)))
-            elif any(w in prompt_tokens for w in ["fix", "error", "bug"]):
-                intent_decision = "debug"
-            elif any(w in prompt_tokens for w in ["write", "patch", "edit"]):
-                intent_decision = "repo_write"
 
-        cum_conf *= intent_conf
+        moe_decision = get_tool_routing_moe().route(task_prompt, context_tags=context_tags)
+        if known_prompt_tokens and not inf1.get("abstained") and inf1.get("predicted_token") not in ("<abstain>", "<unk>", "<eos>"):
+            intent_decision = str(inf1["predicted_token"])
+            intent_conf = float(inf1.get("confidence", 0.90))
+            tier1_passed = intent_conf >= 0.70
+        elif moe_decision.conformal_passed:
+            intent_decision = moe_decision.selected_tool
+            intent_conf = max(0.85, float(moe_decision.confidence))
+            tier1_passed = True
+        elif tool_head in known_tools:
+            intent_decision = "execute"
+            intent_conf = 0.88
+            tier1_passed = True
+        else:
+            intent_decision = "<abstain>"
+            intent_conf = 0.55
+            tier1_passed = False
+            reasons.append("Tier 1 intent triage abstained on OOD prompt with unrecognized tool")
+
         tiers.append(CascadeTierResult(
             tier_name="Tier1_IntentTriage",
             brain_used="neuro_fast_intent_classifier",
             decision=intent_decision,
             confidence=intent_conf,
-            passed=True,
+            passed=tier1_passed,
             details=tier1_details,
         ))
 
-        # --- Tier 2: Tool Routing Validation ---
+        # --- Tier 2: Tool Routing Validation (No synthetic ["tool_repo_read"] substitution) ---
         routing_brain = self._get_brain("neuro_tool_routing_v2")
-        routing_conf = 0.96
-        routing_match = True
-        tool_tok = f"tool_{target_tool}"
-        standard_cli_tools = {
-            "ls", "echo", "pwd", "git", "clang-format", "read_file", "write_file",
-            "repo_read", "repo_write", "edit_file", "run_command", "execute_shell",
-        }
+        tool_tok = f"tool_{clean_tool}"
         tier2_details: Dict[str, Any] = {"model_invoked": False}
-        if routing_brain:
-            route_toks = [tool_tok] if tool_tok in routing_brain.vocab else ["tool_repo_read"]
-            inf2 = routing_brain.infer_conformal(route_toks, alpha=0.05)
+        inf2: Dict[str, Any] = {}
+        if routing_brain is not None:
+            inf2 = routing_brain.infer_conformal([tool_tok], alpha=0.05)
             tier2_details = {
                 "model_invoked": True,
                 "predicted_token": inf2.get("predicted_token"),
                 "prediction_set": inf2.get("prediction_set", []),
                 "abstained": inf2.get("abstained"),
             }
-        if routing_brain and tool_tok in routing_brain.vocab:
-            routing_conf = max(0.90, 1.0 - getattr(routing_brain, "conformal_quantile", 0.05))
-        elif target_tool and target_tool.lower().split()[0] in standard_cli_tools:
-            routing_conf = 0.92
-        elif routing_brain:
-            routing_conf = 0.90
 
-        cum_conf *= routing_conf
+        shell_pre = analyze_shell_command(cmd) if cmd else None
+        if routing_brain is not None and tool_tok in routing_brain.vocab:
+            routing_conf = max(0.85, float(inf2.get("confidence", 0.92))) if not inf2.get("abstained") else float(inf2.get("confidence", 0.60))
+            routing_match = (not bool(inf2.get("abstained", False))) or routing_conf >= 0.80
+        elif clean_tool in known_tools or tool_head in known_tools or (shell_pre is not None and shell_pre.get("allowlisted", False)):
+            routing_match = True
+            routing_conf = 0.92
+        else:
+            routing_match = False
+            routing_conf = 0.55
+            reasons.append(f"Tier 2 tool routing failed: '{target_tool}' is unregistered/unknown")
+
         tiers.append(CascadeTierResult(
             tier_name="Tier2_ToolRouting",
             brain_used="neuro_tool_routing_v2",
@@ -176,30 +208,44 @@ class CascadeEnsembleRouter:
 
         # --- Tier 3: Constitutional & Protected Path Guard ---
         const_brain = self._get_brain("neuro_constitutional_guardian")
-        const_passed = True
-        const_conf = 0.98
-        const_decision = "verdict_pass"
-
         target_path_str = str(tool_args.get("path") or tool_args.get("file_path") or "")
         is_sacred = is_protected_path(target_path_str)
-        is_write_op = target_tool in ["write_file", "edit_file", "repo_write", "apply_patch", "delete_file"]
+        is_write_op = clean_tool in {"write_file", "edit_file", "repo_write", "apply_patch", "delete_file", "str_replace_editor"} or not clean_tool
         tier3_details: Dict[str, Any] = {"is_sacred": is_sacred, "model_invoked": False}
-        if const_brain:
-            g_probe = ["sacred_site_aboriginal_core", "action_repo_write_checked"] if (is_sacred and is_write_op) else ["boundary_containment_active", "ancestral_law_honored"]
+
+        const_passed = True
+        const_conf = 0.95
+        const_decision = "verdict_pass"
+        if const_brain is not None:
+            g_probe = feature_builder._build_guardian_tokens(target_path_str, clean_tool, is_sacred)
             inf3 = const_brain.infer_conformal(g_probe, alpha=0.05)
+            pred3 = str(inf3.get("predicted_token") or "")
+            const_conf = float(inf3.get("confidence", 0.95))
             tier3_details.update({
                 "model_invoked": True,
-                "predicted_token": inf3.get("predicted_token"),
+                "tokens": g_probe,
+                "predicted_token": pred3,
                 "prediction_set": inf3.get("prediction_set", []),
                 "abstained": inf3.get("abstained"),
             })
-        if is_sacred and is_write_op:
+            if (is_sacred and is_write_op) or (not inf3.get("abstained") and pred3 in GUARDIAN_DENY_TOKENS):
+                const_passed = False
+                const_decision = pred3 or "verdict_block"
+                const_conf = max(0.95, const_conf)
+                reasons.append(f"Sacred Site / Constitutional block: '{target_path_str}' triggers protected boundary guard")
+            elif inf3.get("abstained"):
+                const_passed = False
+                const_decision = "<abstain>"
+                const_conf = min(const_conf, 0.60)
+                reasons.append("Tier 3 constitutional guardian abstained on boundary probe")
+            else:
+                const_decision = pred3 or "verdict_pass"
+        elif is_sacred and is_write_op:
             const_passed = False
             const_decision = "verdict_block"
             const_conf = 0.99
-            reasons.append(f"Constitutional block: '{target_path_str}' is a protected constitutional boundary / Sacred Site")
+            reasons.append(f"Sacred Site / Constitutional block: '{target_path_str}' is a protected asset path")
 
-        cum_conf *= const_conf
         tiers.append(CascadeTierResult(
             tier_name="Tier3_ConstitutionalGate",
             brain_used="neuro_constitutional_guardian",
@@ -209,16 +255,14 @@ class CascadeEnsembleRouter:
             details=tier3_details,
         ))
 
-        # --- Tier 4: Speculative Suki Failure Check (Layer 1 Shell & Diff Parsers) ---
+        # --- Tier 4: Speculative Failure Check (Layer 1 Shell & AST Complexity Parsers) ---
         suki_brain = self._get_brain("neuro_tool_failure_classifier")
         suki_passed = True
         suki_conf = 0.95
         suki_class = "clean_success"
 
-        cmd = str(tool_args.get("cmd") or tool_args.get("command") or tool_args.get("CommandLine") or "")
-        if not cmd and target_tool and any(ch in target_tool for ch in (" ", "/", "|", ";")):
-            cmd = target_tool
-        if target_tool in ["execute_shell", "run_command"] or cmd:
+        shell_res: Optional[Dict[str, Any]] = None
+        if clean_tool in {"execute_shell", "run_command"} or cmd:
             shell_res = analyze_shell_command(cmd)
             if not shell_res["is_safe"]:
                 suki_passed = False
@@ -234,9 +278,13 @@ class CascadeEnsembleRouter:
                 )
 
         diff_payload = tool_args.get("diff") or tool_args.get("payload_diff")
+        syntax_clean = True
+        security_clean = True
         if suki_passed and diff_payload:
             diff_res = analyze_code_diff(target_path_str, diff_payload)
-            if not diff_res["syntax_valid"] or not diff_res["security_clean"]:
+            syntax_clean = bool(diff_res["syntax_valid"])
+            security_clean = bool(diff_res["security_clean"])
+            if not syntax_clean or not security_clean:
                 suki_passed = False
                 suki_class = "suki_class_ast_violation"
                 reasons.append(
@@ -248,7 +296,7 @@ class CascadeEnsembleRouter:
                 reasons.append(
                     f"AST interface diff detected breaking change ({', '.join(diff_res['interface_hazards'])})"
                 )
-            elif diff_res.get("line_count", 0) > 480:
+            elif diff_res.get("line_count", 0) > 480 and not diff_res.get("is_static_data_or_doc", False):
                 suki_conf = 0.60
                 suki_class = "suki_high_blast_radius"
                 reasons.append(
@@ -256,17 +304,35 @@ class CascadeEnsembleRouter:
                 )
 
         tier4_details: Dict[str, Any] = {"model_invoked": False}
-        if suki_brain:
-            s_probe = ["suki_class_boundary", "failure_fatal_circuit_breaker"] if not suki_passed else ["failure_severity_benign", "action_inspect_stack_trace"]
+        if suki_brain is not None:
+            s_probe = feature_builder._build_classifier_tokens(
+                shell_res=shell_res,
+                payload_diff=diff_payload,
+                syntax_clean=syntax_clean,
+                security_clean=security_clean,
+            )
             inf4 = suki_brain.infer_conformal(s_probe, alpha=0.05)
+            pred4 = str(inf4.get("predicted_token") or "")
+            conf4 = float(inf4.get("confidence", 0.95))
             tier4_details = {
                 "model_invoked": True,
-                "predicted_token": inf4.get("predicted_token"),
+                "tokens": s_probe,
+                "predicted_token": pred4,
                 "prediction_set": inf4.get("prediction_set", []),
                 "abstained": inf4.get("abstained"),
             }
+            if not suki_passed or (not inf4.get("abstained") and pred4 in CLASSIFIER_DENY_TOKENS):
+                suki_passed = False
+                suki_conf = max(0.85, conf4)
+                if suki_class == "clean_success":
+                    suki_class = pred4 or "failure_fatal_circuit_breaker"
+            elif inf4.get("abstained"):
+                suki_passed = False
+                suki_conf = min(suki_conf, 0.60)
+                suki_class = "<abstain>"
+            else:
+                suki_conf = min(suki_conf, conf4)
 
-        cum_conf *= suki_conf
         tiers.append(CascadeTierResult(
             tier_name="Tier4_SukiFailureCheck",
             brain_used="neuro_tool_failure_classifier",
@@ -276,33 +342,32 @@ class CascadeEnsembleRouter:
             details=tier4_details,
         ))
 
-        # Proposal 3: Bottleneck Reliability (Weakest-Link Analysis)
-        # Instead of naively multiplying 4 constants (0.95 * 0.96 * 0.98 * 0.95 = 0.849),
-        # where an unregistered tool drops cumulative confidence to 0.696 < 0.70 before inspecting the action,
-        # we evaluate tier reliability by the weakest active verification tier:
+        # Evaluate weakest active verification tier confidence across pipeline stages
         active_confs = [t.confidence for t in tiers]
         bottleneck_conf = min(active_confs) if active_confs else 0.50
-        cum_conf = bottleneck_conf
 
         # Final Aggregation
         all_passed = all(t.passed for t in tiers)
-        escalation_payload = None
+        escalation_payload: Optional[Dict[str, Any]] = None
         if not const_passed:
             verdict_str = "BLOCKED_CONSTITUTIONAL"
         elif not suki_passed:
             verdict_str = "BLOCKED_PRECONDITION_SUKI"
-        elif bottleneck_conf < 0.70:
+        elif (not all_passed) or bottleneck_conf < 0.70:
             verdict_str = "DEGRADED_FALLBACK"
             all_passed = False
-            reasons.append(f"Weakest-link tier confidence {bottleneck_conf:.3f} below gate threshold 0.70")
-            # Proposal 4: Structured Escalation Payload (No dead-end deferral)
+            if bottleneck_conf < 0.70:
+                reasons.append(f"Weakest-link tier confidence {bottleneck_conf:.3f} below gate threshold 0.70")
+            else:
+                failed_tiers = [t.tier_name for t in tiers if not t.passed]
+                reasons.append(f"Cascade tier verification failed: {failed_tiers}")
             escalation_payload = {
                 "target_tool": target_tool,
                 "tool_args": tool_args,
                 "task_prompt": task_prompt,
                 "bottleneck_tier": min(tiers, key=lambda t: t.confidence).tier_name,
                 "bottleneck_confidence": bottleneck_conf,
-                "reasons": reasons,
+                "reasons": list(reasons),
                 "delegate_to": "LLM_CASCADE_ROUTER",
             }
         else:
@@ -313,9 +378,10 @@ class CascadeEnsembleRouter:
             verdict=verdict_str,
             primary_intent=intent_decision,
             target_tool=target_tool,
-            cumulative_confidence=cum_conf,
+            cumulative_confidence=bottleneck_conf,
             tier_results=tiers,
             reasons=reasons,
+            escalation_payload=escalation_payload,
         )
 
 

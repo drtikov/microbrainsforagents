@@ -190,6 +190,8 @@ class CriticalEnsemble:
             feats.append("sacred_site_integrity_seal")
         if "constitution" in norm or "aboriginal" in norm:
             feats.append("sacred_site_aboriginal_core")
+        if any(s in norm for s in (".env", ".git/hooks", ".git/config", ".ssh", "id_rsa", "id_ed25519", "credentials", "secrets")):
+            feats.extend(["protected_charter_path", "unauthorized_seal_edit"])
         if is_sacred or "kinship" in norm or "totem" in norm:
             feats.append("sacred_site_aboriginal_core")
         feats.append(
@@ -239,24 +241,30 @@ class CriticalEnsemble:
         interface_hazards: List[str],
     ) -> List[str]:
         syntax_valid = bool(diff_analysis.get("syntax_valid", True))
+        security_clean = bool(diff_analysis.get("security_clean", True))
+        is_static_data = bool(diff_analysis.get("is_static_data_or_doc", False))
+        cyclomatic = int(diff_analysis.get("cyclomatic_complexity", 0) or 0)
         norm = path_str.lower()
         feats: List[str] = [
             "ast_syntax_verified_clean" if syntax_valid else "ast_syntax_malformed",
             "touches_tests_only" if "test" in norm else ("touches_documentation_only" if norm.endswith(".md") else "touches_tools_only"),
             "ast_signature_break" if interface_hazards else "ast_interface_stable",
         ]
-        if diff_lines > 500:
+        if is_static_data and diff_lines <= 480 and not interface_hazards and security_clean:
+            feats.extend(["data_table_static_values", "diff_lines_sub_two_hundred", "regression_probability_low"])
+            anchor = "backward_compatibility_preserved"
+        elif cyclomatic >= 25:
+            feats.extend(["cyclomatic_delta_severe", "regression_probability_high"])
+            anchor = "breaking_change_signature_detected"
+        elif diff_lines > 500:
             feats.extend(["diff_lines_massive_five_hundred", "regression_probability_high"])
+            anchor = "breaking_change_signature_detected"
         elif diff_lines > 50:
             feats.extend(["diff_lines_sub_two_hundred", "regression_probability_low"])
+            anchor = "breaking_change_signature_detected" if interface_hazards else "backward_compatibility_preserved"
         else:
             feats.extend(["diff_lines_sub_ten", "atomic_hunk_isolated", "regression_probability_low"])
-
-        anchor = (
-            "breaking_change_signature_detected"
-            if (diff_lines > 500 or interface_hazards)
-            else "backward_compatibility_preserved"
-        )
+            anchor = "breaking_change_signature_detected" if interface_hazards else "backward_compatibility_preserved"
         return self._unique_tokens(feats, anchor)
 
     def _build_classifier_tokens(
@@ -533,7 +541,7 @@ class CriticalEnsemble:
                 f"({len(deny_votes)} DENY votes: {[v.estimator_name for v in deny_votes]}, mean_prob={mean_prob:.3f}). Direct block."
             )
         elif len(deny_votes) == 0 and len(abstain_votes) == 0 and std_dev <= 0.25 and mean_prob >= 0.75:
-            # Proposal 5: Strict unanimous consensus required for autonomous approval
+            # Strict unanimous consensus required for autonomous approval
             status = "CONSENSUS_APPROVED"
             abstention = False
             rationale = (

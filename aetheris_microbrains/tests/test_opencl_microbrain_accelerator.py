@@ -1,10 +1,10 @@
 """
 Tests for the 11-Proposal GT 710 OpenCL Micro-Brain Co-Processor Suite:
-1. Proposal 1: EGGROLL Low-Rank Neuroevolution in Resident VRAM (`eggroll_evolve_population` & `AutonomousBrainNursery.evolve_population_eggroll`)
-2. Proposal 2: Closed-Form Continuous-Time (CfC) Liquid Reservoir (`cfc_step` & `LiquidStateReservoir.step_cfc_continuous`)
-3. Proposal 3: Hyperdimensional Computing (VSA) 10,240-Bit Associative Memory (`hdc_search` & `MicroMoEOrchestrator.route_query_hdc`)
-4. Proposal 4: TTT-Linear Test-Time Training Fast Weights (`ttt_linear_step` & `MicroBrainHypernetwork.adapt_test_time_ttt`)
-5. Proposal 5: Hybrid CPU/OpenCL Dispatch (`hardware_router.recommended_microbrain_dispatch` & `BitLinearLayer.forward`)
+1. EGGROLL Low-Rank Neuroevolution in Resident VRAM (`eggroll_evolve_population` & `AutonomousBrainNursery.evolve_population_eggroll`)
+2. Closed-Form Continuous-Time (CfC) Liquid Reservoir (`cfc_step` & `LiquidStateReservoir.step_cfc_continuous`)
+3. Hyperdimensional Computing (VSA) 10,240-Bit Associative Memory (`hdc_search` & `MicroMoEOrchestrator.route_query_hdc`)
+4. TTT-Linear Test-Time Training Fast Weights (`ttt_linear_step` & `MicroBrainHypernetwork.adapt_test_time_ttt`)
+5. Hybrid CPU/OpenCL Dispatch (`hardware_router.recommended_microbrain_dispatch` & `BitLinearLayer.forward`)
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from core.opencl_microbrain_accelerator import OpenCLMicroBrainAccelerator
 
 
 def test_hardware_router_and_opencl_detection():
-    """Proposal 5: Verify OpenCL GPU detection and batch-size crossover routing."""
+    """Verify OpenCL GPU detection and batch-size crossover routing."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
     status = accel.status()
     assert "available" in status
@@ -53,7 +53,7 @@ def test_hardware_router_and_opencl_detection():
 
 
 def test_proposal_5_bitnet_hybrid_cpu_and_opencl_parity():
-    """Proposal 5: BitLinearLayer dispatches using empirical crossover table (default CPU for B=64, GPU when forced or large)."""
+    """BitLinearLayer dispatches using empirical crossover table (default CPU for B=64, GPU when forced or large)."""
     rng = np.random.default_rng(42)
     in_features, out_features = 64, 48
     weights = rng.standard_normal((out_features, in_features)).astype(np.float32)
@@ -86,7 +86,7 @@ def test_proposal_5_bitnet_hybrid_cpu_and_opencl_parity():
 
 
 def test_proposal_1_eggroll_low_rank_neuroevolution_rollout(tmp_path, monkeypatch):
-    """Proposal 1: EGGROLL low-rank population neuroevolution evaluates 256 daughter brains in parallel on GPU."""
+    """EGGROLL low-rank population neuroevolution evaluates 256 daughter brains in parallel on GPU."""
     import core.brain_nursery as nursery_mod
 
     monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
@@ -128,7 +128,7 @@ def test_proposal_1_eggroll_low_rank_neuroevolution_rollout(tmp_path, monkeypatc
 
 
 def test_proposal_2_cfc_liquid_state_reservoir_continuous_step():
-    """Proposal 2: Closed-Form Continuous-Time (CfC) liquid reservoir step with variable delta_t on GPU."""
+    """Closed-Form Continuous-Time (CfC) liquid reservoir step with variable delta_t on GPU."""
     reservoir = LiquidStateReservoir(reservoir_dim=128, input_dim=16, spectral_radius=0.92, leak_rate=0.3)
     rng = np.random.default_rng(101)
 
@@ -150,7 +150,7 @@ def test_proposal_2_cfc_liquid_state_reservoir_continuous_step():
 
 
 def test_proposal_3_hdc_10240_bit_associative_memory_and_moe_router(tmp_path, monkeypatch):
-    """Proposal 3: 10,240-bit Hyperdimensional Computing (VSA) bitwise XOR + popcount search and MoE routing."""
+    """10,240-bit Hyperdimensional Computing (VSA) bitwise XOR + popcount search and MoE routing."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
 
     # Create 512 distinct memory hypervectors in the 10,240-bit space (320 x uint32)
@@ -193,7 +193,7 @@ def test_proposal_3_hdc_10240_bit_associative_memory_and_moe_router(tmp_path, mo
 
 
 def test_proposal_4_ttt_linear_fast_weight_adaptation():
-    """Proposal 4: TTT-Linear online self-supervised gradient descent reduces reconstruction loss in VRAM."""
+    """TTT-Linear online self-supervised gradient descent reduces reconstruction loss in VRAM."""
     hypernet = MicroBrainHypernetwork(latent_dim=64, hidden_dim=32)
 
     context = "causal manifold surgical repair AST localization"
@@ -219,7 +219,7 @@ def test_proposal_4_ttt_linear_fast_weight_adaptation():
 
 
 def test_proposal_6_blelloch_parallel_associative_scan_mamba_ssm():
-    """Proposal 6: Blelloch / Hillis-Steele O(log N) parallel associative scan matches sequential SSM step-by-step."""
+    """Blelloch / Hillis-Steele O(log N) parallel associative scan matches sequential SSM step-by-step."""
     from core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
 
     rng = np.random.default_rng(606)
@@ -248,7 +248,7 @@ def test_proposal_6_blelloch_parallel_associative_scan_mamba_ssm():
 
 
 def test_proposal_7_difflogic_bitplane_logic_gate_tree():
-    """Proposal 7: Bitplane Differentiable Logic Gate Tree evaluates 64 samples in 2 uint32 words on GPU."""
+    """Bitplane Differentiable Logic Gate Tree evaluates 64 samples in 2 uint32 words on GPU."""
     from core.mixture_of_depths_router import MixtureOfDepthsRouter
 
     router = MixtureOfDepthsRouter(latent_dim=64, exit_threshold=0.5)
@@ -278,7 +278,7 @@ def test_proposal_7_difflogic_bitplane_logic_gate_tree():
 
 
 def test_proposal_8_kuramoto_hopfield_micro_transformer():
-    """Proposal 8: Kuramoto oscillatory phase synchronization + collision-free Modern Hopfield associative MLP."""
+    """Kuramoto oscillatory phase synchronization + collision-free Modern Hopfield associative MLP."""
     from core.analytical_micro_transformer import AnalyticalMicroTransformer
 
     brain = AnalyticalMicroTransformer(name="kuramoto_hopfield_test", d_model=32, n_heads=2, d_mlp=8)
@@ -303,7 +303,7 @@ def test_proposal_8_kuramoto_hopfield_micro_transformer():
 
 
 def test_proposal_9_predictive_coding_sram_variational_relaxation():
-    """Proposal 9: Iterative Variational Free-Energy Relaxation in GPU SRAM reduces free energy F."""
+    """Iterative Variational Free-Energy Relaxation in GPU SRAM reduces free energy F."""
     from core.predictive_coding_engine import HierarchicalPredictiveCodingEngine
 
     pc = HierarchicalPredictiveCodingEngine(layer_dims=[32, 24, 16])
@@ -322,7 +322,7 @@ def test_proposal_9_predictive_coding_sram_variational_relaxation():
 
 
 def test_proposal_10_active_inference_monte_carlo_efe_rollout():
-    """Proposal 10: 1,024-particle multi-step Expected Free Energy (EFE) rollout on GT 710 GPU."""
+    """1,024-particle multi-step Expected Free Energy (EFE) rollout on GT 710 GPU."""
     from core.active_inference import ActiveInferenceCluster
 
     cluster = ActiveInferenceCluster()
@@ -350,7 +350,7 @@ def test_proposal_10_active_inference_monte_carlo_efe_rollout():
 
 
 def test_proposal_11_multiscale_vietoris_rips_geodesic_slerp():
-    """Proposal 11: Multi-scale Vietoris-Rips persistence filtration (16 x 32 = 512 graphs) on GPU."""
+    """Multi-scale Vietoris-Rips persistence filtration (16 x 32 = 512 graphs) on GPU."""
     from core.topological_persistence_merger import TopologicalPersistenceMerger
 
     merger = TopologicalPersistenceMerger()
@@ -377,7 +377,7 @@ def test_proposal_11_multiscale_vietoris_rips_geodesic_slerp():
 
 
 def test_wave3_proposal_1_autotuned_crossover_dispatch():
-    """Wave-3 Proposal 1: Per-kernel crossover autotuner; honest bootstrap keeps small batches on CPU."""
+    """Per-kernel crossover autotuner; honest bootstrap keeps small batches on CPU."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
     crossover = accel.get_crossover("bitnet_batch_gemm")
     assert crossover >= 1024  # Honest bootstrap: BitNet GPU measured 5-8x slower at batch 32-4096
@@ -397,7 +397,7 @@ def test_wave3_proposal_1_autotuned_crossover_dispatch():
 
 
 def test_wave3_proposal_2_resident_vram_codebooks_and_weights():
-    """Wave-3 Proposal 2: Persistent VRAM buffers eliminate repeated PCIe 2.0 uploads."""
+    """Persistent VRAM buffers eliminate repeated PCIe 2.0 uploads."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
 
     # 1. Resident HDC codebook
@@ -432,7 +432,7 @@ def test_wave3_proposal_2_resident_vram_codebooks_and_weights():
 
 
 def test_wave3_proposal_3_true_eggroll_es_step_on_device_rng(tmp_path, monkeypatch):
-    """Wave-3 Proposal 3: True EGGROLL on-device counter RNG rank-r ES gradient step in VRAM."""
+    """True EGGROLL on-device counter RNG rank-r ES gradient step in VRAM."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
     rng = np.random.default_rng(303)
     dim = 32
@@ -479,7 +479,7 @@ def test_wave3_proposal_3_true_eggroll_es_step_on_device_rng(tmp_path, monkeypat
 
 
 def test_wave3_proposal_4_evolution_surrogate_prefilter():
-    """Wave-3 Proposal 4: Chronological 80/20 train/test split and honesty gate on evolution surrogate."""
+    """Chronological 80/20 train/test split and honesty gate on evolution surrogate."""
     from core.evolution_surrogate_prefilter import EvolutionSurrogatePrefilter, ResidentHDCExperienceMemory
 
     mem = ResidentHDCExperienceMemory.get_instance()
@@ -503,7 +503,7 @@ def test_wave3_proposal_4_evolution_surrogate_prefilter():
 
 
 def test_wave3_proposal_5_split_conformal_calibration_and_calibrated_abstention():
-    """Wave-3 Proposal 5: Split-conformal calibration with guaranteed singleton coverage & OOD abstention."""
+    """Split-conformal calibration with guaranteed singleton coverage & OOD abstention."""
     from core.analytical_micro_transformer import AnalyticalMicroTransformer
 
     brain = AnalyticalMicroTransformer(name="conformal_brain_test", d_model=32, n_heads=2)
@@ -532,7 +532,7 @@ def test_wave3_proposal_5_split_conformal_calibration_and_calibrated_abstention(
 
 
 def test_wave3_proposal_6_resident_hdc_experience_memory():
-    """Wave-3 Proposal 6: Large-scale resident HDC memory for near-duplicate and nearest-failure lookup."""
+    """Large-scale resident HDC memory for near-duplicate and nearest-failure lookup."""
     from core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
 
     mem = ResidentHDCExperienceMemory.get_instance()
@@ -548,7 +548,7 @@ def test_wave3_proposal_6_resident_hdc_experience_memory():
 
 
 def test_wave3_proposal_7_dominated_novelty_search_quality_diversity(tmp_path, monkeypatch):
-    """Wave-3 Proposal 7: Dominated Novelty Search (DNS, 2025 SOTA) GPU Pareto quality-diversity."""
+    """Dominated Novelty Search (DNS, 2025 SOTA) GPU Pareto quality-diversity."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
     rng = np.random.default_rng(707)
 
@@ -585,7 +585,7 @@ def test_wave3_proposal_7_dominated_novelty_search_quality_diversity(tmp_path, m
 
 
 def test_wave3_proposal_8_dirichlet_epistemic_info_gain():
-    """Wave-3 Proposal 8: Dirichlet/Beta expected KL divergence discriminates uncertain vs explored beliefs."""
+    """Dirichlet/Beta expected KL divergence discriminates uncertain vs explored beliefs."""
     accel = OpenCLMicroBrainAccelerator.get_instance()
     init_drives = np.array([0.5, 0.5, 0.5, 0.7], dtype=np.float32)
     shifts = np.zeros((2, 4), dtype=np.float32)

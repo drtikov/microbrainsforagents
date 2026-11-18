@@ -248,7 +248,7 @@ def test_fable_10_examples_01_to_05_run_cleanly_and_no_syntaxerror_hack():
         text=True,
         check=True,
     )
-    assert "Aetheris Microbrains v0.6.2 Reproducible 25-Step Agent Benchmark" in proc.stdout
+    assert "Aetheris Microbrains v0.6.3 Reproducible 25-Step Agent Benchmark" in proc.stdout
     assert "Token Reduction" in proc.stdout
 
     # Also verify structured return contract of benchmark helper
@@ -445,6 +445,128 @@ def test_fable_16_clopper_pearson_bound_and_nonconformity_drift_monitor():
     assert last["abstained"] is True
     assert last["drift_detected"] is True
     assert last["rolling_abstention_rate"] >= 0.80
+
+
+def test_fable_17_cascade_ensemble_no_fake_tokens_and_real_routing_match():
+    from aetheris_microbrains.core.cascade_ensemble import CascadeEnsembleRouter
+
+    router = CascadeEnsembleRouter()
+    ood_verdict = router.evaluate_action_pipeline(
+        task_prompt="frobnicate quantumFlux capacitor orthogonally",
+        target_tool="custom_unregistered_gizmo",
+    )
+    assert ood_verdict.authorized is False
+    assert ood_verdict.verdict == "DEGRADED_FALLBACK"
+    assert ood_verdict.escalation_payload is not None
+    tier2 = next(t for t in ood_verdict.tier_results if t.tier_name == "Tier2_ToolRouting")
+    assert tier2.passed is False
+
+    safe_verdict = router.evaluate_action_pipeline(
+        task_prompt="list files in directory",
+        target_tool="ls",
+        tool_args={"cmd": "ls -la"},
+    )
+    assert safe_verdict.authorized is True
+    assert safe_verdict.verdict == "AUTHORIZED"
+
+    bad_verdict = router.evaluate_action_pipeline(
+        task_prompt="wipe disk",
+        target_tool="execute_shell",
+        tool_args={"cmd": "rm -rf /"},
+    )
+    assert bad_verdict.authorized is False
+    assert bad_verdict.verdict == "BLOCKED_PRECONDITION_SUKI"
+
+
+def test_fable_18_bilingual_intent_persistence_and_grounded_metacognitive_calibrator():
+    from aetheris_microbrains.core.intent_persistence_tracker import IntentPersistenceTracker
+    from aetheris_microbrains.core.metacognitive_calibrator import calibrate_action_confidence
+
+    tracker = IntentPersistenceTracker("исправь ошибку маршрутизатора сообщений")
+    assert len(tracker.root_terms) >= 3
+    aligned = tracker.register_step("отладка маршрутизатора", "анализ сообщений")
+    assert len(aligned.overlapping_terms) >= 1
+    for _ in range(3):
+        drifted = tracker.register_step("покупка авиабилетов и прогноз погоды", "отвлеченная задача")
+    assert drifted.is_drifting is True
+    assert drifted.neural_signal == "reanchoring_triggered"
+
+    cal_unc = calibrate_action_confidence("git_operations", raw_confidence=0.80, context_familiarity=0.40)
+    assert cal_unc.neural_signal == "entropy_floor_enforced"
+    cal_high = calibrate_action_confidence("file_inspection", raw_confidence=0.95, context_familiarity=0.90)
+    assert cal_high.neural_signal == "calibration_audit_passed"
+    assert cal_high.should_proceed is True
+
+
+def test_fable_19_universal_swe_protected_paths():
+    from aetheris_microbrains.core.layered_decision_engine import is_protected_path
+
+    for sensitive in (".env", "config/.env.production", ".git/hooks/pre-commit", ".git/config", ".ssh/id_rsa", "credentials.json"):
+        assert is_protected_path(sensitive) is True
+        dec = mb.decide({"tool": "edit_file", "path": sensitive, "diff": "+SECRET=1\n"})
+        assert dec["decision"] == "deny"
+        assert dec["layer"] == 0
+        ens = CriticalEnsemble().evaluate_critical_action("edit_file", sensitive, "+x=1")
+        assert ens.status == "CONSENSUS_REJECTED"
+
+    for harmless in ("src/env_loader.py", "tests/test_env.py", "src/math/axioms.py"):
+        assert is_protected_path(harmless) is False
+
+
+def test_fable_20_static_data_table_vs_cyclomatic_complexity_blast_radius():
+    from aetheris_microbrains.core.counterfactual_simulation_pipeline import CounterfactualSimulationPipeline
+
+    rows = "\n".join(f'    {{"id": {i}, "label": "item_{i}"}},' for i in range(250))
+    static_code = f"STATIC_TABLE = [\n{rows}\n]\n"
+    diff_res = analyze_code_diff("src/data_table.py", static_code)
+    assert diff_res["syntax_valid"] is True
+    assert diff_res["security_clean"] is True
+    assert diff_res["cyclomatic_complexity"] == 0
+    assert diff_res["is_static_data_or_doc"] is True
+
+    pipe = CounterfactualSimulationPipeline()
+    out_static = pipe.simulate_edit_impact("src/data_table.py", static_code)
+    assert out_static.allowed is True
+    assert out_static.status == "APPROVED_FOR_PATCH"
+
+    branches = "\n".join(f"    if x == {i}:\n        y += {i}" for i in range(30))
+    complex_code = f"def dispatch(x):\n    y = 0\n{branches}\n    return y\n"
+    complex_res = analyze_code_diff("src/complex_flow.py", complex_code)
+    assert complex_res["cyclomatic_complexity"] >= 30
+    assert complex_res["is_static_data_or_doc"] is False
+
+
+def test_fable_21_decision_journal_recalibration_and_decide_telemetry():
+    from aetheris_microbrains.core.layered_decision_engine import recalibrate_from_decision_journal
+
+    res = mb.decide("read file src/app.py")
+    assert "upper_error_bound_95" in res
+    assert 0.0 < res["upper_error_bound_95"] < 0.5
+    assert isinstance(res["drift_detected"], bool)
+
+    synthetic_journal = [
+        {"decision": "allow", "layer": 2, "latency_ms": 0.4, "verified_correct": True, "nonconformity_score": 0.03}
+        for _ in range(22)
+    ]
+    cal_summary = recalibrate_from_decision_journal(synthetic_journal, alpha=0.05)
+    assert cal_summary["n_episodes"] == 22
+    assert cal_summary["verified_episodes"] == 22
+    assert cal_summary["verified_errors"] == 0
+    assert cal_summary["recalibrated_q_hat"] is not None
+    assert cal_summary["router_updated"] is True
+    assert 0.12 <= cal_summary["upper_error_bound_95"] <= 0.14
+
+
+def test_fable_22_zero_proposal_n_comments_in_codebase():
+    import re
+
+    offenders = []
+    for pyf in sorted(PKG_DIR.rglob("*.py")):
+        text = pyf.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"\bProposal\s+\d+", text):
+            offenders.append(str(pyf.relative_to(PKG_DIR)))
+    assert not offenders, f"Found residual Proposal references in: {offenders}"
+
 
 
 

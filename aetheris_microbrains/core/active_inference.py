@@ -283,7 +283,7 @@ class ActiveInferenceCluster:
         force_gpu: bool = False,
     ) -> Dict[str, Any]:
         """
-        Proposal 10: Parallel 1,024-Particle Monte-Carlo Tree Rollout of Expected Free Energy
+        Parallel 1,024-Particle Monte-Carlo Tree Rollout of Expected Free Energy
         G(pi) on the GT 710 OpenCL GPU (`4 personas x 256 particles x 8 horizon steps`).
         Computes Pragmatic Risk, Epistemic Information Gain (particle dispersion), and CVaR_0.10 tail risk.
         """

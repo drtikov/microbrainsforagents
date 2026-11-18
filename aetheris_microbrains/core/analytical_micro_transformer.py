@@ -89,11 +89,11 @@ class AnalyticalMicroTransformer:
         self._init_orthogonal_embeddings()
         self.W_embed_anchor = self.W_embed.copy()
 
-        # 4. Proposal 8: Collision-Free Modern Hopfield Associative Memory & Kuramoto Phase Bank
+        # 4. Collision-Free Modern Hopfield Associative Memory & Kuramoto Phase Bank
         self.hopfield_keys: List[np.ndarray] = []
         self.hopfield_values: List[np.ndarray] = []
 
-        # 5. Proposal 5: Split-Conformal & Mondrian Prediction, Statistical Bounds, and Checksums
+        # 5. Split-Conformal & Mondrian Prediction, Statistical Bounds, and Checksums
         self.conformal_quantile: Optional[float] = None
         self.per_class_quantiles: Dict[str, float] = {}
         self.per_class_counts: Dict[str, int] = {}
@@ -221,7 +221,7 @@ class AnalyticalMicroTransformer:
         # Output target embedding vector with strong gain
         self.W_down[neuron_idx, :] = v_vec * binding_gain
 
-        # Proposal 8: Also store in collision-free Modern Hopfield memory bank (deduplicating identical keys)
+        # Also store in collision-free Modern Hopfield memory bank (deduplicating identical keys)
         k_norm = float(np.linalg.norm(k_vec)) + 1e-12
         existing_idx: Optional[int] = None
         for idx, hk in enumerate(self.hopfield_keys):
@@ -336,7 +336,7 @@ class AnalyticalMicroTransformer:
         force_gpu: bool = False,
     ) -> Dict[str, Any]:
         """
-        Proposal 8: Kuramoto Oscillatory Phase-Synchronized Attention (AKOrN / KoPE)
+        Kuramoto Oscillatory Phase-Synchronized Attention (AKOrN / KoPE)
         + Modern Hopfield LogSumExp Dense Associative Memory on the GT 710 OpenCL GPU.
         Eliminates modulo `k_idx % d_mlp` rule collisions and binds multi-token context via phase locking.
         """

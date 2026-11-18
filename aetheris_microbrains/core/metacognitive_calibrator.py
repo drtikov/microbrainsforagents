@@ -108,8 +108,8 @@ def calibrate_action_confidence(
     # Epistemic uncertainty scales with context unfamiliarity (0.0=familiar, 1.0=completely novel)
     epistemic = max(0.02, min(0.95, (1.0 - float(context_familiarity)) * 0.70))
 
-    # Proposal 1: Log-Odds Platt Scaling with Reachability Guarantee
-    # Shifts prior belief and epistemic penalty inside logit space so range [0, 1] is preserved.
+    # Log-Odds Platt Scaling with full [0, 1] reachability preservation:
+    # Shifts prior belief and epistemic penalty inside logit space so range (0, 1) is preserved.
     # logit(calibrated) = logit(raw)/temp + logit(prior) - gamma * epistemic
     prior_clamped = max(0.05, min(0.95, prior))
     logit_prior = math.log(prior_clamped / (1.0 - prior_clamped))
@@ -120,10 +120,8 @@ def calibrate_action_confidence(
     # Sigmoidal reconstruction guarantees calibrated in (0, 1) and full reachability to 1.0 as raw -> 1.0
     calibrated = 1.0 / (1.0 + math.exp(-logit_adj))
     calibrated = max(0.01, min(0.99, calibrated))
-    discount = max(0.0, raw - calibrated)
 
-    # Proposal 2: Empirical Conformal Quantile Lookup from Model Metadata
-    # Rather than hardcoding q_hat = 1 - alpha, query trained brain metadata or conformal collector
+    # Empirical Conformal Quantile Lookup from Model Metadata
     q_hat = None
     try:
         from .analytical_micro_transformer import AnalyticalMicroTransformer
@@ -136,6 +134,33 @@ def calibrate_action_confidence(
     if q_hat is None or q_hat <= 0.0 or q_hat >= 1.0:
         # Calibrated empirical fallback from validation distribution (not arbitrary 1 - alpha)
         q_hat = 0.15  # Empirical held-out nonconformity threshold at alpha=0.10
+
+    # Consult Neural Microbrain using in-vocabulary structural uncertainty features BEFORE finalizing conformal set
+    neural_sig: Optional[str] = None
+    try:
+        if epistemic >= 0.35 or aleatoric >= 0.25:
+            cal_tokens = ["aleatoric_uncertainty_dominant", "brier_score_degraded", "decision_boundary_diffuse"]
+        elif raw >= 0.80 and float(context_familiarity) >= 0.70:
+            cal_tokens = ["brier_score_optimal", "decision_boundary_sharp"]
+        else:
+            cal_tokens = ["platt_scaling_factor_applied"]
+
+        from .brain_moe_orchestrator import consult_microbrain
+
+        res = consult_microbrain("metacognitive_calibrator", cal_tokens)
+        if res and res.get("success", True) and not res.get("abstained", False):
+            neural_sig = res.get("prediction") or "module_no_prediction"
+        elif res and res.get("abstained", False):
+            neural_sig = "<abstain>"
+        else:
+            neural_sig = "module_unavailable"
+    except Exception as exc:
+        log.debug("Metacognitive microbrain consultation skipped: %s", exc)
+        neural_sig = "module_unavailable"
+
+    if neural_sig == "entropy_floor_enforced" and calibrated > threshold:
+        calibrated = max(0.01, calibrated - 0.03)
+    discount = max(0.0, raw - calibrated)
 
     # Build Conformal Prediction Set: C_alpha = {decision : 1 - P(decision) <= q_hat}
     conformal_set: List[str] = []
@@ -165,24 +190,6 @@ def calibrate_action_confidence(
             f"High uncertainty / out-of-distribution action (cal_conf={calibrated:.2f} < threshold {threshold:.2f}). "
             "Defer action to active Cascade Router / Supervisor review."
         )
-
-    # Consult Neural Microbrain using structural input uncertainty features
-    neural_sig: Optional[str] = None
-    try:
-        cal_tokens = [
-            f"domain_{clean_domain}",
-            "low_familiarity" if float(context_familiarity) < 0.5 else "high_familiarity",
-            "elevated_epistemic" if epistemic >= 0.35 else "low_epistemic",
-        ]
-        from .brain_moe_orchestrator import consult_microbrain
-        res = consult_microbrain("metacognitive_calibrator", cal_tokens)
-        if res and res.get("success", True):
-            neural_sig = res.get("prediction") or "module_no_prediction"
-        else:
-            neural_sig = "module_unavailable"
-    except Exception as exc:
-        log.debug("Metacognitive microbrain consultation skipped: %s", exc)
-        neural_sig = "module_unavailable"
 
     return CalibratedConfidence(
         domain=clean_domain,

@@ -117,7 +117,7 @@ class HierarchicalPredictiveCodingEngine:
         force_gpu: bool = False,
     ) -> Dict[str, Any]:
         """
-        Proposal 9: Predictive Forward-Forward (PFF) & Iterative Variational Free-Energy
+        Predictive Forward-Forward (PFF) & Iterative Variational Free-Energy
         Relaxation in GT 710 GPU SRAM/Registers (`predictive_coding_sram_relax`).
         Relaxes hierarchical latent states (32 <-> 24 <-> 16) for `relax_steps` iterations
         before performing contrastive positive/negative local Hebbian updates.

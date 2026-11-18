@@ -165,13 +165,13 @@ def main() -> None:
     report = run_25step_benchmark(trials=5)
     mb_m = report["aetheris_microbrains"]
     kw_m = report["keyword_baseline"]
-    print("=== Aetheris Microbrains v0.6.2 Reproducible 25-Step Agent Benchmark ===\n")
+    print("=== Aetheris Microbrains v0.6.3 Reproducible 25-Step Agent Benchmark ===\n")
     print("| Architecture | 25-Step Schema Tokens | Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |")
     print("| --- | ---: | ---: | ---: | ---: | ---: |")
     print(f"| Unfiltered 32-Tool Agent | {report['unfiltered_25step_schema_tokens']:,} | 0.0% | — (runs unfiltered) | 0 | — (cloud RTT) |")
     print(f"| Naive Keyword Baseline | {kw_m['25step_schema_tokens']:,} | 0.0% | {kw_m['dangerous_missed_fn']} | {kw_m['benign_false_positive_fp']} | {kw_m['mean_latency_ms']:.3f} ms |")
     print(
-        f"| Aetheris Microbrains v0.6.2 | {mb_m['25step_schema_tokens']:,} | "
+        f"| Aetheris Microbrains v0.6.3 | {mb_m['25step_schema_tokens']:,} | "
         f"{mb_m['token_reduction_pct']}% | {mb_m['dangerous_missed_fn']} | "
         f"{mb_m['benign_false_positive_fp']} | {mb_m['p95_latency_ms']:.3f} ms |"
     )

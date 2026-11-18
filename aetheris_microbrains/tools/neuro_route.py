@@ -144,7 +144,7 @@ def main(
         if not route_tokens:
             return {"success": False, "error": "ensemble_route requires tokens or query_text"}
         
-        # Proposal 7: Top-3 consensus with min_agreement threshold (default 0.70)
+        # Top-3 consensus with min_agreement threshold (default 0.70)
         moe_res = MicroMoEOrchestrator.get_instance().route_query(route_tokens, top_k=3)
         dispatch_plan = moe_res.get("dispatch_plan") or [
             {"expert": d.get("expert_name") or d.get("expert"), "score": d.get("routing_prob", 0.0)}

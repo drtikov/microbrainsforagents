@@ -331,7 +331,7 @@ class TestAdversarialSafetySuite:
         assert blocked_res["llm_invoked"] is False
 
     def test_unicode_and_ood_coverage_gating(self):
-        """Verifies Unicode tokenization (Proposal 2) and Conformal OOD coverage gating (Proposal 3)."""
+        """Verifies Unicode tokenization and Conformal OOD coverage gating."""
         from tools.microbrain import _tokenize
         from core.analytical_micro_transformer import AnalyticalMicroTransformer
 

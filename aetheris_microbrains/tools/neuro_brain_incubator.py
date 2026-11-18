@@ -246,7 +246,7 @@ def run(
         )
         if fused is None:
             return {"success": False, "error": f"source brains not found in nursery: {brain_name_a}, {brain_name_b}"}
-        # Proposal 4: Register fused model weights in WeightSpaceVSA
+        # Register fused model weights in WeightSpaceVSA
         # Register fused model weights in WeightSpaceVSA
         try:
             from ..core.weight_space_vsa import get_weight_space_vsa
@@ -270,7 +270,7 @@ def run(
         fused = NeuroBrainMerger.get_instance().merge_brains_ties(brain_names, fused_brain_name)
         if fused is None:
             return {"success": False, "error": f"source brains not found in nursery: {brain_names}"}
-        # Proposal 4: Register fused model weights in WeightSpaceVSA
+        # Register fused model weights in WeightSpaceVSA
         # Register fused model weights in WeightSpaceVSA
         try:
             from ..core.weight_space_vsa import get_weight_space_vsa

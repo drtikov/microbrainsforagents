@@ -109,17 +109,26 @@ class CounterfactualSimulationPipeline:
             else:
                 failure_modes.append(f"Step 1: Security risk detected in AST ({', '.join(diff_analysis['findings'])})")
 
-        # Step 2: AST Interface/Signature Diff & Import Propagation Blast Radius
+        # Step 2: AST Complexity, Interface/Signature Diff & Blast Radius
         line_count = len(diff_text.splitlines())
         interface_hazards = list(diff_analysis.get("interface_hazards", []))
-        blast_score = min(1.0, (line_count / 600.0) + 0.45 * len(interface_hazards))
+        cyclomatic = int(diff_analysis.get("cyclomatic_complexity", 0) or 0)
+        is_static_data = bool(diff_analysis.get("is_static_data_or_doc", False))
+        if is_static_data and line_count <= 480 and not interface_hazards and diff_analysis.get("security_clean", True):
+            blast_score = min(0.35, line_count / 1200.0)
+        else:
+            blast_score = min(1.0, (line_count / 600.0) + 0.45 * len(interface_hazards))
+            if cyclomatic >= 25:
+                blast_score = min(1.0, blast_score + min(0.65, cyclomatic * 0.02))
         step_2_ok = (blast_score < 0.80) and (len(interface_hazards) == 0)
         step_predictions.append(
-            f"Step 2 (Interface Cascade): {'PASS' if step_2_ok else ('WARN_BREAKING_INTERFACE' if interface_hazards else 'WARN_HIGH_BLAST')}"
+            f"Step 2 (Interface & Complexity [cc={cyclomatic}]): {'PASS' if step_2_ok else ('WARN_BREAKING_INTERFACE' if interface_hazards else 'WARN_HIGH_BLAST')}"
         )
         if not step_2_ok:
             if interface_hazards:
                 failure_modes.append(f"Step 2: Breaking API/interface change ({', '.join(interface_hazards)})")
+            elif cyclomatic >= 25:
+                failure_modes.append(f"Step 2: High cyclomatic complexity delta ({cyclomatic} branches) risks regression")
             else:
                 failure_modes.append(f"Step 2: Massive diff blast radius ({line_count} lines) risks regression")
 

@@ -191,7 +191,7 @@ class TopologicalPersistenceMerger:
         force_gpu: bool = False,
     ) -> Dict[str, Any]:
         """
-        Proposal 11: Multi-Scale Vietoris-Rips Persistence Barcode & Geodesic SLERP Search
+        Multi-Scale Vietoris-Rips Persistence Barcode & Geodesic SLERP Search
         on the GT 710 OpenCL GPU (`n_t x n_eps = 512` parallel filtration graphs).
         Automatically selects the optimal geodesic interpolation parameter t* that minimizes
         the L1 Wasserstein discrepancy to the parent Betti-0/Betti-1 persistence barcodes.

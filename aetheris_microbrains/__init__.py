@@ -19,6 +19,7 @@ from .core.layered_decision_engine import (
     evaluate_layer0_policy,
     get_recent_decision_journal,
     is_protected_path,
+    recalibrate_from_decision_journal,
     record_decision_journal,
 )
 from .core.opencl_microbrain_accelerator import (
@@ -146,6 +147,7 @@ __all__ = [
     "evaluate_layer0_policy",
     "get_recent_decision_journal",
     "is_protected_path",
+    "recalibrate_from_decision_journal",
     "record_decision_journal",
     "narrow_tool_surface",
     "OpenCLMicroBrainAccelerator",

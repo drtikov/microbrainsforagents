@@ -182,7 +182,7 @@ class MicroMoEOrchestrator:
 
     def route_query_hdc(self, query_tokens: List[str], top_k: int = 1) -> Dict[str, Any]:
         """
-        Proposal 3: Hyperdimensional Computing (VSA) 10,240-Bit Associative Memory Router.
+        Hyperdimensional Computing (VSA) 10,240-Bit Associative Memory Router.
         Encodes each expert's domain + vocabulary tokens into a 10,240-bit bundled
         hypervector (`320 x uint32`) and dispatches hardware bitwise XOR + popcount
         Hamming similarity search on the GT 710 OpenCL GPU.

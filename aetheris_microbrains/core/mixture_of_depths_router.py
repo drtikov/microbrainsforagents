@@ -41,7 +41,7 @@ class MixtureOfDepthsRouter:
             for _ in range(3)
         ]
 
-        # Proposal 7: Differentiable Logic Gate Network (DiffLogic / LUT-Net) parameters
+        # Differentiable Logic Gate Network (DiffLogic / LUT-Net) parameters
         self.n_logic_gates = latent_dim
         self.conn_a = rng.randint(0, latent_dim, size=self.n_logic_gates).astype(np.int32)
         self.conn_b = ((self.conn_a + rng.randint(1, latent_dim, size=self.n_logic_gates)) % latent_dim).astype(np.int32)
@@ -111,7 +111,7 @@ class MixtureOfDepthsRouter:
         self, batch_inputs: Union[List[List[float]], np.ndarray], force_gpu: bool = False
     ) -> Dict[str, Any]:
         """
-        Proposal 7: Bitplane Differentiable Logic Gate Tree Evaluation on GT 710 OpenCL GPU.
+        Bitplane Differentiable Logic Gate Tree Evaluation on GT 710 OpenCL GPU.
         Packs batches of 32 binary feature vectors into single uint32 words so each GPU
         instruction evaluates 32 parallel samples across the 16 Boolean logic gates.
         """
