@@ -182,10 +182,51 @@ class ToolRoutingMoE:
         self.W_gate = self._fit_ridge_gate(l2_reg=0.25)
         self.w_gate_fitted = True
 
-        # Empirical held-out per-expert split-conformal calibration (n >= 20 per expert, alpha = 0.05)
+        # Calibration provenance & measured error counters (no fabricated bounds without verified episodes)
+        self.calibration_basis: str = "synthetic_self_consistency"
+        self.verified_episodes: int = 0
+        self.verified_errors: int = 0
+        self.calibration_alpha: float = 0.05
+        self.recalibrated_from_journal: bool = False
+        self.calibration_sample_id: Optional[str] = None
+
+        # Synthetic per-expert self-consistency probes (n = 22 per expert, derived from keywords/stems)
         self.per_expert_quantiles: Dict[str, float] = {}
         self.per_expert_coverage: Dict[str, float] = {}
         self._calibrate_expert_quantiles(alpha=0.05)
+
+    def calibration_report(self) -> Dict[str, Any]:
+        """Return honest calibration provenance and Clopper-Pearson bounds (None unless verified)."""
+        upper_bound: Optional[float] = None
+        upper_bound_95: Optional[float] = None
+        if self.verified_episodes > 0:
+            from .analytical_micro_transformer import AnalyticalMicroTransformer
+
+            upper_bound = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
+                self.verified_errors,
+                self.verified_episodes,
+                alpha=float(self.calibration_alpha),
+            )
+            upper_bound_95 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
+                self.verified_errors,
+                self.verified_episodes,
+                alpha=0.05,
+            )
+
+        return {
+            "calibration_basis": self.calibration_basis,
+            "recalibrated": bool(self.recalibrated_from_journal),
+            "n_calibration_samples": len(self.per_expert_quantiles) * 22,
+            "verified_episodes": int(self.verified_episodes),
+            "verified_errors": int(self.verified_errors),
+            "error_metric": "top1_routing_mismatch" if self.verified_episodes > 0 else "unmeasured",
+            "confidence_level": round(1.0 - float(self.calibration_alpha), 4),
+            "alpha": float(self.calibration_alpha),
+            "sample_id": self.calibration_sample_id,
+            "upper_error_bound": upper_bound,
+            "upper_error_bound_95": upper_bound_95,
+            "statistical_confidence_status": "verified" if self.verified_episodes > 0 else "unknown",
+        }
 
     def _fit_ridge_gate(self, l2_reg: float = 0.25) -> np.ndarray:
         """Fit gating projection W_gate analytically via L2-regularized ridge regression."""
@@ -293,7 +334,12 @@ class ToolRoutingMoE:
         return logits, signal_hits
 
     def _calibrate_expert_quantiles(self, alpha: float = 0.05) -> None:
-        """Calibrate per-expert split-conformal quantiles on held-out multi-token probes (n = 22 >= 19)."""
+        """Compute per-expert synthetic self-consistency quantiles on 22 keyword/stem probes.
+
+        Note: these probes are synthesized from `EXPERT_KEYWORDS` and `EXPERT_STEMS`,
+        NOT held-out field data; `per_expert_coverage` measures in-probe consistency only
+        and does not certify external generalization or field exchangeability.
+        """
         wrappers = (
             ("please", "now"), ("check", "target"), ("agent", "step"),
             ("нужно", "сделать"), ("быстро", "проверка"), ("task", "context"),

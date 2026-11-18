@@ -285,8 +285,10 @@ def run_live_llm_ab(
             tool_calls = resp.choices[0].message.tool_calls or []
             chosen = tool_calls[0].function.name if tool_calls else ""
 
-            if narrowed and chosen != task["expected_tool"] and task["expected_tool"] not in [s["function"]["name"] for s in active_schemas]:
-                # Retry with full 32-tool schema when Top-K dropped the needed tool
+            active_names = {s["function"]["name"] for s in active_schemas}
+            if narrowed and (not chosen or chosen not in active_names):
+                # Retry with full 32-tool schema only on observable runtime failure (missing/invalid tool call),
+                # never peeking at ground-truth task labels.
                 retries += 1
                 resp2 = client.chat.completions.create(
                     model=model,
@@ -409,20 +411,27 @@ def evaluate_baselines_comparison(
     def _mb_select(q: str) -> List[str]:
         return mb.narrow_tool_surface(q, available_tools=all_names, top_k=top_k, tool_descriptions=descriptions)["candidate_tools"]
 
-    # Match full-catalog escalation budget of Microbrains on the Naive Keyword baseline
+    # Match full-catalog escalation budget of Microbrains via a numeric (margin, top_score) cutoff,
+    # and score every query INSIDE _kw_matched_select so latency comparison is apples-to-apples.
     mb_escalated_queries = sum(1 for t in tasks if len(_mb_select(t["query"])) >= len(all_names))
     kw_margins = []
-    for idx, t in enumerate(tasks):
+    for t in tasks:
         sc = _kw_scored(t["query"])
         margin = sc[0][0] - sc[min(top_k, len(sc) - 1)][0]
-        kw_margins.append((margin, sc[0][0], idx, t["query"]))
-    kw_margins.sort(key=lambda x: (x[0], x[1], x[2]))
-    matched_esc_queries = {x[3] for x in kw_margins[:mb_escalated_queries]}
+        kw_margins.append((margin, sc[0][0]))
+    kw_margins.sort()
+    if mb_escalated_queries > 0 and kw_margins:
+        cutoff_idx = min(len(kw_margins) - 1, mb_escalated_queries - 1)
+        margin_thresh, top_score_thresh = kw_margins[cutoff_idx]
+    else:
+        margin_thresh, top_score_thresh = (-1, -1)
 
     def _kw_matched_select(q: str) -> List[str]:
-        if q in matched_esc_queries:
+        sc = _kw_scored(q)
+        margin = sc[0][0] - sc[min(top_k, len(sc) - 1)][0]
+        if (margin, sc[0][0]) <= (margin_thresh, top_score_thresh):
             return list(all_names)
-        return _kw_select(q)
+        return [n for _, n in sc[:top_k]]
 
     return [
         _run_selector("Naive Keyword Top-4", _kw_select),

@@ -1,10 +1,18 @@
 """
 Colony SWE Shadow Benchmark (120 Synthetic Queries: 60 RU + 60 EN).
 
-Rigorous 3-way ablation study comparing:
+Rigorous ablation study comparing:
 1. Pure Keyword / Regex Baseline (static heuristic rules)
-2. Pure Neural Microbrain (Analytical Micro-Transformer forward pass over real trained weights)
+1b. Pure Rules Baseline (Matched Synonym Bank — controls for `_RIDGE_SYNONYM_BANK`)
+2. Pure Neural Microbrain (Analytical Micro-Transformer forward pass + Ridge trigram head)
 3. Microbrain Hybrid Architecture (Neural forward pass + Conformal OOD Coverage Gate + Invariant Escalation)
+
+Note on statistical interpretation:
+- `local_classification_rate_per_100` (also aliased `saved_calls_per_100`) measures the fraction of
+  queries classified locally rather than escalated, not end-to-end agent API token savings.
+- Exact Clopper-Pearson 95% upper failure bounds (e.g. `0/50 -> <=5.82%`, `0/6 -> <=39.3%`)
+  apply strictly to independent draws from this synthetic probe set and do NOT transfer directly
+  as field exchangeability guarantees.
 
 Enforces STRICT EXACT MATCHING (no soft fallback sets):
 `decision == item["target"]`
@@ -235,6 +243,34 @@ class PureKeywordBaseline:
 
         latency_us = (time.perf_counter_ns() - t0) / 1000.0
         return {"decision": "escalate", "latency_us": latency_us}
+
+
+class PureKeywordMatchedVocabBaseline(PureKeywordBaseline):
+    """Rule baseline given access to the exact same `_RIDGE_SYNONYM_BANK` tokens as PureNeuralMicrobrain.
+
+    Isolates the contribution of ridge/neural scoring vs. having extra synonym vocabulary.
+    """
+
+    def classify(self, query: str) -> Dict[str, Any]:
+        t0 = time.perf_counter_ns()
+        q_lower = query.lower()
+        for kw in self.CRITICAL_KEYWORDS:
+            if kw in q_lower:
+                return {"decision": "escalate", "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
+
+        tok_set = set(_tokenize(query))
+        best_action: Optional[str] = None
+        best_hits = 0
+        for action in sorted(set(SWE_INTENT_MAP.keys()) | set(_RIDGE_SYNONYM_BANK.keys())):
+            combined = set(SWE_INTENT_MAP.get(action, ())) | set(_RIDGE_SYNONYM_BANK.get(action, ()))
+            hits = len(tok_set & combined)
+            if hits > best_hits:
+                best_hits = hits
+                best_action = action
+
+        if best_action is not None and best_hits > 0:
+            return {"decision": best_action, "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
+        return {"decision": "escalate", "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
 
 
 _STOPWORDS = {
@@ -530,6 +566,7 @@ def run_3way_ablation_benchmark() -> Dict[str, Any]:
 
     models = {
         "1. Pure Rules Baseline": PureKeywordBaseline(),
+        "1b. Pure Rules Baseline (Matched Synonym Bank)": PureKeywordMatchedVocabBaseline(),
         "2. Pure Neural Microbrain (Weights Only)": PureNeuralMicrobrain(),
         "3. Microbrain Hybrid (Weights + Conformal Gate)": HybridMicrobrainWithConformalGate(),
     }
@@ -542,15 +579,20 @@ def run_3way_ablation_benchmark() -> Dict[str, Any]:
 
         sorted_lat = sorted(latencies)
         p95_lat = sorted_lat[int(len(sorted_lat) * 0.95)]
-        saved_calls_per_100 = round((120 - escalations_count) / 120.0 * 100, 1)
+        local_cls_rate = round((120 - escalations_count) / 120.0 * 100, 1)
+        cp95_50 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(missed_escalations, 50, alpha=0.05)
+        cp95_6 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(ho_missed, 6, alpha=0.05)
 
         results[name] = {
             "strict_accuracy": f"{correct}/120 ({round(correct / 120.0 * 100, 1)}%)",
             "strict_accuracy_ru": f"{correct_ru}/60 ({round(correct_ru / 60.0 * 100, 1)}%)",
             "missed_escalations": f"{missed_escalations}/50",
+            "missed_escalations_cp95_upper_pct": round(cp95_50 * 100.0, 2),
             "held_out_paraphrased_accuracy": f"{ho_correct}/{len(HELD_OUT_PARAPHRASED_QUERIES)} ({round(ho_correct / float(len(HELD_OUT_PARAPHRASED_QUERIES)) * 100, 1)}%)",
             "held_out_missed_escalations": f"{ho_missed}/6",
-            "saved_calls_per_100": saved_calls_per_100,
+            "held_out_missed_escalations_cp95_upper_pct": round(cp95_6 * 100.0, 2),
+            "local_classification_rate_per_100": local_cls_rate,
+            "saved_calls_per_100": local_cls_rate,
             "p95_latency_us": round(p95_lat, 2),
             "total_evaluations": len(latencies),
         }

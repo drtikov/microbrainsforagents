@@ -113,6 +113,8 @@ class PrefilterResponse(BaseModel):
     results: List[PrefilterResult] = []
     filtered_count: int
     total_count: int
+    status: str = "ok"
+    error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -575,18 +577,21 @@ async def prefilter_candidates(req: PrefilterRequest):
             total_count=len(results),
         )
     except Exception as e:
-        log.warning(f"Prefilter fallback: {e}")
+        log.warning(f"Prefilter failed: {e}")
+        results = []
         for i, cand in enumerate(req.candidates):
             results.append(PrefilterResult(
                 candidate_id=cand.get("id", f"cand_{i}"),
-                score=0.6,
-                passed=True,
-                reason="fallback_heuristic",
+                score=0.0,
+                passed=False,
+                reason=f"prefilter_error_uncertain:{type(e).__name__}",
             ))
         return PrefilterResponse(
             results=results,
-            filtered_count=len(results),
+            filtered_count=0,
             total_count=len(results),
+            status="error",
+            error=f"{type(e).__name__}: {e}",
         )
 
 

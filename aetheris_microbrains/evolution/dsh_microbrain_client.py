@@ -301,7 +301,7 @@ class DSHMicrobrainIntegration:
     
     def prefilter_evolution_candidates(self, candidates: List[Dict[str, Any]], threshold: float = 0.5) -> List[Dict[str, Any]]:
         """Filter evolution candidates using microbrain surrogate model."""
-        response = self.client.prefilter_candidates(candidates, threshold=0.5)
+        response = self.client.prefilter_candidates(candidates, threshold=threshold)
         # Return only passed candidates
         return [cand for cand in response.results if cand["passed"]]
     

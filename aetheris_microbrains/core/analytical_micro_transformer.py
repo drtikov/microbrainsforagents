@@ -102,6 +102,9 @@ class AnalyticalMicroTransformer:
         self.n_calibration_samples: int = 0
         self.coverage_std_error: float = 0.0
         self.conformal_guarantee_valid: bool = False
+        self.eval_samples: int = 0
+        self.eval_errors: int = 0
+        self.eval_sample_id: Optional[str] = None
         self.weights_sha256: Optional[str] = None
         # How the current conformal_quantile was obtained — honest provenance
         # for the quantile, which otherwise looks calibrated no matter what.
@@ -481,7 +484,17 @@ class AnalyticalMicroTransformer:
         guarantee_valid = (not in_sample) and (n >= min_required)
         cov_std_err = round(math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(n + 2)), 4)
         upper_bound_rule3 = round(3.0 / float(max(1, n)), 4)
-        upper_bound_cp95 = self.compute_clopper_pearson_upper_bound(0, n, float(alpha))
+
+        eval_n = int(getattr(self, "eval_samples", 0) or 0)
+        eval_k = int(getattr(self, "eval_errors", 0) or 0)
+        if eval_n > 0:
+            upper_bound = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, float(alpha))
+            upper_bound_95 = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, 0.05)
+            bound_status = "measured_eval"
+        else:
+            upper_bound = None
+            upper_bound_95 = None
+            bound_status = "unknown_no_eval_set"
 
         self.conformal_quantile = q_hat
         self.per_class_quantiles = per_class_quantiles
@@ -500,15 +513,79 @@ class AnalyticalMicroTransformer:
             "min_required_samples": min_required,
             "conformal_guarantee_valid": guarantee_valid,
             "alpha": float(alpha),
+            "confidence_level": round(1.0 - float(alpha), 4),
             "target_coverage": 1.0 - float(alpha),
             "quantile_q_hat": round(q_hat, 4),
             "per_class_quantiles": per_class_quantiles,
             "coverage_std_error": cov_std_err,
             "upper_error_bound_rule_of_3": upper_bound_rule3,
-            "upper_error_bound_95": upper_bound_cp95,
+            "upper_error_bound": upper_bound,
+            "upper_error_bound_95": upper_bound_95,
+            "eval_samples": eval_n,
+            "eval_errors": eval_k,
+            "eval_sample_id": getattr(self, "eval_sample_id", None),
+            "error_bound_status": bound_status,
+            "error_metric": "conformal_miscoverage",
             "mean_nonconformity": round(float(np.mean(scores)), 4),
             "basis": self.conformal_basis,
         }
+
+    def record_evaluation_metrics(
+        self,
+        n_samples: int,
+        n_errors: int,
+        sample_id: Optional[str] = None,
+        alpha: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record genuinely observed held-out evaluation error counts on this model."""
+        n = int(n_samples)
+        k = int(n_errors)
+        if n < 0 or k < 0 or k > n:
+            raise ValueError(f"Invalid evaluation counts: n_samples={n}, n_errors={k}")
+        eff_alpha = float(alpha) if alpha is not None else float(self.conformal_alpha or 0.05)
+        self.eval_samples = n
+        self.eval_errors = k
+        self.eval_sample_id = sample_id
+        if n > 0:
+            ub = self.compute_clopper_pearson_upper_bound(k, n, eff_alpha)
+            ub95 = self.compute_clopper_pearson_upper_bound(k, n, 0.05)
+            status = "measured_eval"
+        else:
+            ub = None
+            ub95 = None
+            status = "unknown_no_eval_set"
+        return {
+            "eval_samples": n,
+            "eval_errors": k,
+            "eval_sample_id": sample_id,
+            "alpha": eff_alpha,
+            "confidence_level": round(1.0 - eff_alpha, 4),
+            "upper_error_bound": ub,
+            "upper_error_bound_95": ub95,
+            "error_bound_status": status,
+            "error_metric": "conformal_miscoverage",
+        }
+
+    def evaluate_conformal_holdout(
+        self,
+        eval_data: List[Tuple[List[str], str]],
+        alpha: Optional[float] = None,
+        sample_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Measure actual conformal miscoverage errors on an evaluation split and record bounds."""
+        eff_alpha = float(alpha) if alpha is not None else float(self.conformal_alpha or 0.05)
+        if not eval_data:
+            bounds = self.record_evaluation_metrics(0, 0, sample_id=sample_id, alpha=eff_alpha)
+            return {"empirical_coverage": 0.0, **bounds}
+        eval_errors = 0
+        for inp, target in eval_data:
+            res = self.infer_conformal(inp, alpha=eff_alpha)
+            if target not in res.get("prediction_set", []):
+                eval_errors += 1
+        n_eval = len(eval_data)
+        empirical_cov = round((n_eval - eval_errors) / float(n_eval), 4)
+        bounds = self.record_evaluation_metrics(n_eval, eval_errors, sample_id=sample_id, alpha=eff_alpha)
+        return {"empirical_coverage": empirical_cov, **bounds}
 
     def infer_conformal(
         self,
@@ -612,7 +689,16 @@ class AnalyticalMicroTransformer:
         self._live_nonconformity_window.append(1.0 - float(top_p))
         self._live_abstention_window.append(bool(abstained))
         drift_info = self.get_drift_status()
-        upper_bound_cp95 = self.compute_clopper_pearson_upper_bound(0, n_cal, effective_alpha)
+        eval_n = int(getattr(self, "eval_samples", 0) or 0)
+        eval_k = int(getattr(self, "eval_errors", 0) or 0)
+        if eval_n > 0:
+            upper_bound = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, effective_alpha)
+            upper_bound_95 = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, 0.05)
+            bound_status = "measured_eval"
+        else:
+            upper_bound = None
+            upper_bound_95 = None
+            bound_status = "unknown_no_eval_set"
 
         return {
             "prediction_set": prediction_set,
@@ -627,7 +713,14 @@ class AnalyticalMicroTransformer:
             "conformal_quantile": round(float(q_hat), 4),
             "per_class_quantiles": dict(mondrian_map),
             "coverage_std_error": cov_std,
-            "upper_error_bound_95": upper_bound_cp95,
+            "upper_error_bound": upper_bound,
+            "upper_error_bound_95": upper_bound_95,
+            "confidence_level": round(1.0 - float(effective_alpha), 4),
+            "eval_samples": eval_n,
+            "eval_errors": eval_k,
+            "eval_sample_id": getattr(self, "eval_sample_id", None),
+            "error_bound_status": bound_status,
+            "error_metric": "conformal_miscoverage",
             "rolling_abstention_rate": drift_info["rolling_abstention_rate"],
             "drift_detected": drift_info["drift_detected"],
             "calibrated": not uncalibrated,
@@ -646,8 +739,10 @@ class AnalyticalMicroTransformer:
         target_dir.mkdir(parents=True, exist_ok=True)
         weights_file = target_dir / f"{self.name}_weights.npz"
         meta_file = target_dir / f"{self.name}_meta.json"
+        manifest_file = target_dir / f"{self.name}.manifest.json"
         tmp_weights = target_dir / f"tmp_{self.name}_weights.npz"
         tmp_meta = target_dir / f"tmp_{self.name}_meta.json"
+        tmp_manifest = target_dir / f"tmp_{self.name}.manifest.json"
 
         arrays = {
             "W_Q": self.W_Q, "W_K": self.W_K, "W_V": self.W_V, "W_O": self.W_O,
@@ -661,10 +756,9 @@ class AnalyticalMicroTransformer:
             arrays["hopfield_keys"] = np.stack(self.hopfield_keys, axis=0)
             arrays["hopfield_values"] = np.stack(self.hopfield_values, axis=0)
 
-        # Atomic NPZ write + SHA-256 integrity digest
+        # Stage both tmp files and compute SHA-256 digests before touching live artifacts
         np.savez_compressed(tmp_weights, **arrays)
-        tmp_weights.replace(weights_file)
-        weights_sha256 = hashlib.sha256(weights_file.read_bytes()).hexdigest()
+        weights_sha256 = hashlib.sha256(tmp_weights.read_bytes()).hexdigest()
         self.weights_sha256 = weights_sha256
 
         n_cal = getattr(self, "n_calibration_samples", len(self.conformal_scores))
@@ -673,6 +767,7 @@ class AnalyticalMicroTransformer:
             or (math.sqrt(max(0.0, self.conformal_alpha * (1.0 - self.conformal_alpha)) / float(max(1, n_cal + 2))) if n_cal > 0 else 0.0),
             4,
         )
+        updated_at = time.time()
 
         meta = {
             "name": self.name,
@@ -691,16 +786,34 @@ class AnalyticalMicroTransformer:
             "coverage_std_error": cov_std,
             "conformal_guarantee_valid": getattr(self, "conformal_guarantee_valid", False),
             "conformal_basis": self.conformal_basis,
+            "eval_samples": int(getattr(self, "eval_samples", 0) or 0),
+            "eval_errors": int(getattr(self, "eval_errors", 0) or 0),
+            "eval_sample_id": getattr(self, "eval_sample_id", None),
             "weights_sha256": weights_sha256,
             "hopfield_rules_count": len(self.hopfield_keys),
             "induction_heads": list(getattr(self, "induction_heads", [])),
-            "updated_at": time.time(),
+            "updated_at": updated_at,
         }
 
-        # Atomic JSON write
         with open(tmp_meta, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
+        meta_sha256 = hashlib.sha256(tmp_meta.read_bytes()).hexdigest()
+
+        manifest = {
+            "name": self.name,
+            "weights_file": weights_file.name,
+            "meta_file": meta_file.name,
+            "weights_sha256": weights_sha256,
+            "meta_sha256": meta_sha256,
+            "updated_at": updated_at,
+        }
+        with open(tmp_manifest, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        # Promote staged artifacts together and commit via companion .manifest.json
+        tmp_weights.replace(weights_file)
         tmp_meta.replace(meta_file)
+        tmp_manifest.replace(manifest_file)
 
         # Mirror only to other canonical roots that ALREADY exist on disk (never mkdir inside arbitrary CWD)
         if directory is None:
@@ -710,6 +823,7 @@ class AnalyticalMicroTransformer:
                     try:
                         shutil.copy2(weights_file, alt_dir / weights_file.name)
                         shutil.copy2(meta_file, alt_dir / meta_file.name)
+                        shutil.copy2(manifest_file, alt_dir / manifest_file.name)
                     except Exception:
                         pass
 
@@ -719,37 +833,60 @@ class AnalyticalMicroTransformer:
         name: str,
         directory: Optional[Path] = None,
         verify_checksum: bool = True,
+        strict_directory: bool = False,
     ) -> Optional[AnalyticalMicroTransformer]:
-        search_dirs = [directory] if directory else []
-        search_dirs.extend([STORE_DIR] + CANONICAL_STORE_DIRS)
+        if strict_directory:
+            if directory is None:
+                return None
+            search_dirs = [directory]
+        else:
+            search_dirs = [directory] if directory else []
+            search_dirs.extend([STORE_DIR] + CANONICAL_STORE_DIRS)
 
         weights_file = None
         meta_file = None
+        chosen_dir: Optional[Path] = None
         for d in search_dirs:
             if d is None:
                 continue
-            wf = Path(d) / f"{name}_weights.npz"
-            mf = Path(d) / f"{name}_meta.json"
+            dp = Path(d)
+            wf = dp / f"{name}_weights.npz"
+            mf = dp / f"{name}_meta.json"
             if wf.exists() and mf.exists():
                 weights_file = wf
                 meta_file = mf
+                chosen_dir = dp
                 break
 
-        if not weights_file or not meta_file:
+        if not weights_file or not meta_file or chosen_dir is None:
             return None
 
         try:
-            with open(meta_file, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-            expected_sha = meta.get("weights_sha256")
+            meta_bytes = meta_file.read_bytes()
+            meta = json.loads(meta_bytes.decode("utf-8"))
             actual_sha = hashlib.sha256(weights_file.read_bytes()).hexdigest()
-            if verify_checksum and expected_sha and actual_sha != expected_sha:
-                log.warning(
-                    "Checksum mismatch for microbrain '%s' (%s): expected %s, got %s",
-                    name, weights_file, expected_sha[:12], actual_sha[:12],
-                )
-                return None
+            actual_meta_sha = hashlib.sha256(meta_bytes).hexdigest()
+
+            if verify_checksum:
+                expected_sha = meta.get("weights_sha256")
+                if expected_sha and actual_sha != expected_sha:
+                    log.warning(
+                        "Checksum mismatch for microbrain '%s' (%s): expected %s, got %s",
+                        name, weights_file, expected_sha[:12], actual_sha[:12],
+                    )
+                    return None
+                manifest_file = chosen_dir / f"{name}.manifest.json"
+                if manifest_file.exists():
+                    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                    if (
+                        manifest.get("weights_sha256") != actual_sha
+                        or manifest.get("meta_sha256") != actual_meta_sha
+                    ):
+                        log.warning(
+                            "Manifest pair mismatch for microbrain '%s' in %s",
+                            name, chosen_dir,
+                        )
+                        return None
 
             obj = cls(
                 name=meta["name"],
@@ -789,6 +926,9 @@ class AnalyticalMicroTransformer:
             obj.n_calibration_samples = int(meta.get("n_calibration_samples", len(obj.conformal_scores)))
             obj.coverage_std_error = float(meta.get("coverage_std_error", 0.0))
             obj.conformal_basis = str(meta.get("conformal_basis", "uncalibrated"))
+            obj.eval_samples = int(meta.get("eval_samples", 0) or 0)
+            obj.eval_errors = int(meta.get("eval_errors", 0) or 0)
+            obj.eval_sample_id = meta.get("eval_sample_id")
             min_req = max(1, math.ceil(1.0 / max(1e-6, obj.conformal_alpha)) - 1)
             obj.conformal_guarantee_valid = bool(meta.get("conformal_guarantee_valid", obj.conformal_basis == "held_out" and obj.n_calibration_samples >= min_req))
             obj.weights_sha256 = actual_sha

@@ -250,35 +250,47 @@ def microbrain_consult(text: str = "", tokens: Optional[List[str]] = None,
         fwd = brain.forward(seq)
     except Exception as e:
         return {"success": False, "error": f"forward pass failed: {e}"}
+
+    conf: Dict[str, Any] = {}
+    conformal_error: Optional[str] = None
     try:
         conf = brain.infer_conformal(seq)
-    except Exception:
-        conf = {}
+        conformal_abstained = bool(conf.get("abstained", True))
+        conformal_reason = str(conf.get("reason") or "uncalibrated")
+    except Exception as exc:
+        conformal_error = f"{type(exc).__name__}:{exc}"
+        conformal_abstained = True
+        conformal_reason = f"conformal_inference_error:{type(exc).__name__}"
 
     calibrated_conf = round(float(conf.get("confidence") or fwd.get("confidence") or 0.0), 4)
-    pred_set = list(conf.get("prediction_set", []))
+    pred_set = list(conf.get("prediction_set", [])) if not conformal_error else []
+    selected_prediction = "<abstain>" if conformal_abstained else (conf.get("predicted_token") or fwd.get("predicted_token"))
     result = {
         "success": True,
-        "abstained": False,
+        "abstained": bool(conformal_abstained),
+        "router_abstained": False,
         "domain": name[len(NAME_PREFIX):] if name.startswith(NAME_PREFIX) else name,
         "selected_brain": name,
         "calibrated_confidence": calibrated_conf,
         "overlap": route.get("overlap"),
-        "predicted_token": fwd.get("predicted_token"),
+        "predicted_token": selected_prediction,
+        "raw_forward_token": fwd.get("predicted_token"),
         "confidence": fwd.get("confidence"),
         "prediction_set": pred_set,
         "set_size": len(pred_set),
-        "reason_code": str(conf.get("reason") or "ok"),
-        "conformal_abstained": bool(conf.get("abstained")),
-        "conformal_reason": str(conf.get("reason") or ""),
-        "conformal_basis": str(meta.get("conformal_basis") or "uncalibrated"),
+        "reason_code": conformal_reason,
+        "conformal_abstained": conformal_abstained,
+        "conformal_reason": conformal_reason,
+        "conformal_basis": str(conf.get("calibration_basis") or meta.get("conformal_basis") or "uncalibrated"),
         "n_calibration_samples": int(conf.get("n_calibration_samples", len(meta.get("conformal_scores", [])))),
-        "conformal_set_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))),
+        "conformal_set_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))) and (conformal_error is None),
         "coverage_target": round(1.0 - float(meta.get("conformal_alpha", 0.05) or 0.05), 4),
         "upper_error_bound_95": conf.get("upper_error_bound_95"),
-        "conformal_guarantee_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))),
+        "conformal_guarantee_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))) and (conformal_error is None),
         "model": name,
     }
+    if conformal_error is not None:
+        result["conformal_error"] = conformal_error
     log.debug(
         "microbrain_consult domain=%s selected_brain=%s predicted=%r conf=%.3f overlap=%.2f conformal_abstained=%s",
         result["domain"],

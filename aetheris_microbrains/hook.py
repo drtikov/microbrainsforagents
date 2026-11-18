@@ -94,9 +94,15 @@ def evaluate_hook_payload(
     file_content: Optional[str] = None,
     log_decisions: bool = False,
     shadow_mode: bool = False,
+    host: str = "claude",
+    codex_escalate_deny: bool = False,
 ) -> Dict[str, Any]:
-    """Evaluate a PreToolUse hook payload and return normalized verdict + exit_code."""
+    """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide = _load_decision_engine()
+    resolved_host = str(host or "claude").strip().lower()
+    if resolved_host not in {"claude", "codex", "generic"}:
+        resolved_host = "claude"
+
     norm = _normalize_hook_payload(payload)
     policy = PolicyConfig(strict_ast_allowlist=strict_ast)
     ctx: Dict[str, Any] = {}
@@ -108,17 +114,55 @@ def evaluate_hook_payload(
         ctx["shadow_mode"] = True
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
-    perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
-    exit_code = 2 if dec == "deny" else 0
     reason = f"{verdict['reason_code']}: {verdict['label']}"
-    hook_specific = {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": perm,
-        "permissionDecisionReason": reason,
-    }
+
+    perm: Optional[str]
+    if resolved_host == "codex":
+        if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
+            perm = "deny"
+            exit_code = 2
+            host_action = "deny"
+            hook_specific: Optional[Dict[str, Any]] = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        elif dec == "allow":
+            perm = "allow"
+            exit_code = 0
+            host_action = "allow"
+            hook_specific = {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": reason,
+            }
+        else:
+            # Codex PreToolUse does not accept permissionDecision="ask"; defer silently to host flow
+            perm = None
+            exit_code = 0
+            host_action = "defer_to_host_approval"
+            hook_specific = {"hookEventName": "PreToolUse"}
+    elif resolved_host == "generic":
+        perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
+        exit_code = 2 if dec == "deny" else 0
+        host_action = dec
+        hook_specific = None
+    else:
+        perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
+        exit_code = 2 if dec == "deny" else 0
+        host_action = perm
+        hook_specific = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": perm,
+            "permissionDecisionReason": reason,
+        }
+
     out: Dict[str, Any] = {
         "hookSpecificOutput": hook_specific,
+        "host": resolved_host,
+        "host_action": host_action,
         "decision": dec,
+        "decision_kind": verdict.get("decision_kind"),
         "permissionDecision": perm,
         "reason": reason,
         "label": verdict["label"],
@@ -127,6 +171,12 @@ def evaluate_hook_payload(
         "latency_ms": verdict["latency_ms"],
         "exit_code": exit_code,
     }
+    if "escalation_contract" in verdict:
+        out["escalation_contract"] = verdict["escalation_contract"]
+    if "journal_written" in verdict:
+        out["journal_written"] = verdict["journal_written"]
+    if "journal_error" in verdict:
+        out["journal_error"] = verdict["journal_error"]
     if shadow_mode:
         out["shadow_decision"] = verdict.get("shadow_decision", dec)
         out["shadow_reason_code"] = verdict.get("shadow_reason_code", verdict["reason_code"])
@@ -138,6 +188,10 @@ def _format_hook_stdout(hook_specific: Dict[str, Any]) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
+    host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
+    if host not in {"claude", "codex", "generic"}:
+        host = "claude"
     try:
         parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
         parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
@@ -150,15 +204,48 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.add_argument(
             "--shadow",
             action="store_true",
-            help="Audit/shadow mode: log what Microbrains would deny/ask to the decision journal without blocking",
+            help="Audit/shadow mode: log what Microbrains would deny/ask to the decision journal without blocking (passive even on errors)",
+        )
+        parser.add_argument(
+            "--host",
+            choices=["claude", "codex", "generic"],
+            default=host,
+            help="Host PreToolUse contract format (claude emits allow/ask/deny; codex omits unsupported 'ask')",
+        )
+        parser.add_argument(
+            "--codex-escalate-deny",
+            action="store_true",
+            help="With --host codex, treat escalated actions as deny (exit 2) instead of deferring to Codex approval",
         )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
         shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
+        host = str(args.host)
+        codex_escalate_deny = bool(args.codex_escalate_deny)
 
         raw = sys.stdin.read().strip()
         if not raw:
+            if shadow_mode:
+                print("empty_hook_payload (shadow passthrough)", file=sys.stderr)
+                return 0
+            if host == "codex":
+                if codex_escalate_deny:
+                    print("empty_hook_payload", file=sys.stderr)
+                    print(
+                        _format_hook_stdout(
+                            {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": "empty_hook_payload",
+                            }
+                        )
+                    )
+                    return 2
+                return 0
+            if host == "generic":
+                print(json.dumps({"decision": "escalate", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
+                return 0
             print(
                 _format_hook_stdout(
                     {
@@ -172,8 +259,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            err_msg = f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})"
+            err_msg = _redact_error_text(f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})")
             print(err_msg, file=sys.stderr)
+            if shadow_mode:
+                return 0
+            if host == "generic":
+                print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+                return 2
             print(
                 _format_hook_stdout(
                     {
@@ -190,24 +282,58 @@ def main(argv: Optional[list[str]] = None) -> int:
             strict_ast=args.strict_ast,
             log_decisions=log_decisions,
             shadow_mode=shadow_mode,
+            host=host,
+            codex_escalate_deny=codex_escalate_deny,
         )
         if shadow_mode:
-            # Shadow mode logs to decision journal and passes control back cleanly
+            # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
         exit_code = int(result["exit_code"])
+        if host == "generic":
+            generic_out = {
+                k: result[k]
+                for k in (
+                    "decision",
+                    "decision_kind",
+                    "label",
+                    "reason_code",
+                    "layer",
+                    "latency_ms",
+                    "exit_code",
+                    "escalation_contract",
+                    "journal_written",
+                    "journal_error",
+                )
+                if k in result and result[k] is not None
+            }
+            generic_out["host"] = "generic"
+            if exit_code == 2:
+                print(result["reason"], file=sys.stderr)
+            print(json.dumps(generic_out))
+            return exit_code
+
         perm = result["permissionDecision"]
         if exit_code == 2:
             print(result["reason"], file=sys.stderr)
-            print(_format_hook_stdout(result["hookSpecificOutput"]))
+            if result["hookSpecificOutput"] is not None:
+                print(_format_hook_stdout(result["hookSpecificOutput"]))
             return 2
-        if perm == "allow" and not auto_allow:
-            # Silent pass-through: let Claude Code apply normal user permission rules
+        if host == "codex" and result.get("host_action") == "defer_to_host_approval":
             return 0
-        print(_format_hook_stdout(result["hookSpecificOutput"]))
+        if perm == "allow" and not auto_allow:
+            # Silent pass-through: let host apply normal user permission rules
+            return 0
+        if result["hookSpecificOutput"] is not None:
+            print(_format_hook_stdout(result["hookSpecificOutput"]))
         return exit_code
     except Exception as exc:
         err_msg = _redact_error_text(f"hook_internal_error:{type(exc).__name__}:{exc}")
         print(err_msg, file=sys.stderr)
+        if shadow_mode:
+            return 0
+        if host == "generic":
+            print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+            return 2
         print(
             _format_hook_stdout(
                 {

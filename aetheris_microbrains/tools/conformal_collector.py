@@ -499,7 +499,7 @@ ACTIVE_CORE_DATASETS: Dict[str, List[Tuple[List[str], str]]] = _generate_active_
 
 @dataclass
 class ConformalCalibrationReport:
-    """Outcome of running the held-out calibration pipeline on active microbrains."""
+    """Outcome of running the synthetic rule-consistency calibration pipeline on active microbrains."""
 
     domain: str
     q_hat: float
@@ -515,6 +515,7 @@ class ConformalCalibrationReport:
     upper_error_bound_rule_of_3: float = 0.0
     min_per_class_cal_samples: int = 0
     per_class_quantiles: Dict[str, float] = field(default_factory=dict)
+    calibration_data_origin: str = "synthetic_rule_consistency"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -523,6 +524,7 @@ class ConformalCalibrationReport:
             "per_class_quantiles": dict(self.per_class_quantiles),
             "alpha": self.alpha,
             "basis": self.basis,
+            "calibration_data_origin": self.calibration_data_origin,
             "n_train": self.n_train_samples,
             "n_calibration": self.n_calibration_samples,
             "n_validation": self.n_validation_samples,
@@ -810,13 +812,14 @@ def run_conformal_calibration_pipeline(
     alpha: float = 0.05,
     include_auxiliary_fleet: bool = True,
 ) -> List[ConformalCalibrationReport]:
-    """Execute split-conformal calibration with strict held-out coverage verification.
+    """Execute split-conformal synthetic rule-consistency calibration across the shipped fleet.
 
-    Guarantees:
-    - Train, Calibration, and Validation sets are strictly disjoint (0% data leakage).
-    - Calibration size n_cal >= 20 >= ceil(1/alpha) - 1 (19 for alpha = 0.05 -> 95% guarantee).
-    - q_hat is calculated exclusively on held-out calibration data.
-    - Empirical coverage is evaluated exclusively on held-out validation data.
+    Note:
+    - Train, Calibration, and Validation splits use strictly disjoint token signatures,
+      but calibration/validation probes are derived synthetically from the domain rule sets
+      (`calibration_data_origin="synthetic_rule_consistency"`). This verifies internal
+      rule-set consistency rather than external user-distribution exchangeability.
+    - Calibration size n_cal >= 120 >= ceil(1/alpha) - 1 (19 for alpha = 0.05).
     - When `include_auxiliary_fleet=True`, calibrates all auxiliary fleet models at `alpha`.
     """
     try:

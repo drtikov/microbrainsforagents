@@ -75,10 +75,11 @@ Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destruct
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
 Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations & Audit Trail (`v0.7.1`)
+### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.2`)
 - **Safe Timeout Contracts:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission.
-- **Clean Audit Journals:** Decision logs on disk (`decision_journal.jsonl`) automatically redact secrets, mask error strings, and are locked down to owner-only permissions (`0600`).
-- **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows if it's inspecting complete context.
+- **Zero-Fabrication Error Bounds:** `decide()` and telemetry emit `upper_error_bound_95: null` (`statistical_confidence_status: "unknown"`) whenever verified observations are absent, rather than inventing bounds from unlabelled counts. `decision_kind` separates deterministic `"structural_gate"` verdicts from `"routing_recommendation"` suggestions.
+- **Clean Audit Journals:** Decision logs on disk (`decision_journal.jsonl`) redact secrets, surface write failures (`journal_written`), preserve drift detection under `--shadow`, and set owner-only permissions (`0600`).
+- **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows whether it inspected complete file context.
 
 ---
 
@@ -437,14 +438,16 @@ python examples/07_swebench_lite_gate_benchmark.py
 | SWE core tool retained across all prompts (including full-catalog) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
 | Any SWE core tool retained within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `repo_read`: **103 / 127**) |
 
-### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.7.0`)
-Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials and internal errors write structured reasons to `stderr` with exit code `2` (fail-closed):
+### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.7.0`–`v0.7.2`)
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses official `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` avoids unsupported `"ask"` on escalations and defers cleanly to Codex's native approval flow, or pass `--codex-escalate-deny`), while fatal denials and internal errors write redacted reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast
+echo '{"tool_name":"Bash","tool_input":{"command":"custom_cmd"}}' | python -m aetheris_microbrains.hook --host codex
 ```
 
-* **Prefilter-by-default:** On safe `allow` verdicts, the hook exits `0` with empty `stdout` so Claude Code's normal user permission prompts still apply (pass `--auto-allow` only if you explicitly want to bypass prompts). Reading protected files (`.env`, `.ssh/id_rsa`, `credentials.json`) escalates to `"ask"`.
+* **Prefilter-by-default & Passive Shadow:** On safe `allow` verdicts, the hook exits `0` with empty `stdout` so host user permission prompts still apply (pass `--auto-allow` only if you explicitly want to bypass prompts). Reading protected files (`.env`, `.ssh/id_rsa`, `credentials.json`) escalates safely. With `--shadow`, the hook stays strictly passive (exit `0`) even on malformed input or internal errors, and logs `shadow_reason_code` so live OOD drift detection works during shadow rollouts.
+* **Server Extra (`pip install aetheris-microbrains[server]`):** Installs FastAPI, Uvicorn, and Pydantic for the optional local HTTP server (`/microbrain/prefilter` fails closed with `status: "error"` on internal errors).
 * **Fail-closed recommendation:** Set `"onFailure": "block"` in your Claude Code hook configuration so environment/import errors also block safely.
 
 ```python
@@ -469,7 +472,7 @@ pytest aetheris_microbrains/tests/test_fable_review_fixes.py aetheris_microbrain
 
 ### Independent Audit & Hardening Coverage:
 * **`test_fable_review_fixes.py` (`test_fable_1`..`23`)**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha`, honest `ESCALATED_TO_LLM` without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems or leaked benchmark identifiers in `test_colony_swe_shadow.py`, `allow_pickle=False`, zero numbered placeholder vocab tokens across all 42 models, ridge-fitted `W_gate` + empirical per-expert quantiles in `ToolRoutingMoE`, non-polluting `save()` CWD hygiene, full-file patched AST verification, multi-feature ensemble tokens, generic non-`ouroboros` blast-radius scanning, live `available_tools` enforcement, Clopper-Pearson upper bounds + nonconformity drift monitoring, grounded `CascadeEnsembleRouter` verdicts (`escalation_payload` on OOD/unknown tools), bilingual RU/EN `IntentPersistenceTracker`, grounded `MetacognitiveCalibrator`, universal `.env`/`.git/hooks`/`.ssh` protection, static data-table vs. cyclomatic complexity scoring, `recalibrate_from_decision_journal()`, zero legacy `Proposal N` comments, and `n_cal = 120` expanded calibration + external Tool-Drop Rate / retry-adjusted benchmark validation.
-* **Split-Conformal & Mondrian Coverage Discipline (`conformal_collector.py`)**: Disjoint **Train**, **120 Held-Out Calibration** ($n_{\text{cal}} \ge 1/\alpha - 1 = 19$ for $\alpha = 0.05 \implies 95\%$ nominal coverage, std error $\le 0.0197$), and **40 Held-Out Validation** splits across **all 42 clean-vocab models** (86 shipped store files, 33 distinct empirical `q_hat` quantiles) validated under strict prediction-set membership $Y \in C_\alpha(X)$, with SHA-256 weight checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Clopper-Pearson 95% upper failure bound, sliding-window drift detection, and Gibbs-Candès ACI adaptation.
+* **Split-Conformal & Mondrian Consistency Discipline (`conformal_collector.py`)**: Disjoint **Train**, **120 Calibration**, and **40 Validation** splits across **all 42 clean-vocab models** (`calibration_data_origin: "synthetic_rule_consistency"` — verifying internal rule consistency rather than field user-distribution exchangeability) validated under strict prediction-set membership $Y \in C_\alpha(X)$, with companion `.manifest.json` pair-integrity verification (`strict_directory=True` for continual-learning candidates), SHA-256 weight checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Clopper-Pearson upper bounds reported strictly from real measured evaluation sets (`unknown` otherwise), sliding-window drift detection, and Gibbs-Candès ACI adaptation.
 * **Ablation, Baselines & Economics (`test_layer_ablation_and_baselines.py`, `test_end_to_end_economics_and_drift.py`)**: Layer 0 / 0+1 / 0+1+2 ablation, bilingual RU/EN routing vs. English keyword baseline, MCP-Zero Top-$K$ schema reduction ($\ge 75\%$), `< 2 ms` p95 decision latency, risk-class fail-closed error handling, `shadow_mode` journaling, and `_candidates/` $\to$ `_rollback/` continual learning.
 * **Adversarial & Probe Suites (`test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py`)**: Diverse obfuscated Python sinks & secret leaks, realistic indented/`except`/`elif`/comment/`.ts`/`.json`/`.yaml`/`.md` diffs, real weight-space surgical causal inversion (no `MagicMock`), allowlist-first `shlex` shell parsing, and 120 bilingual (60 RU / 60 EN) SWE queries (`0/50` missed escalations).
 

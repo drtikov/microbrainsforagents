@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aetheris-microbrains"
-version = "0.7.1"
+version = "0.7.2"
 description = "Fast (<2ms) CPU safety gate & tool-routing coprocessor for LLM agents. Catches broken syntax, leaked secrets, and dangerous commands before execution, cutting prompt token costs by up to 39%."
 readme = "README.md"
 authors = [
@@ -38,6 +38,11 @@ dependencies = [
 [project.optional-dependencies]
 opencl = [
     "pyopencl>=2022.1",
+]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
 ]
 dev = [
     "pytest>=7.0.0",

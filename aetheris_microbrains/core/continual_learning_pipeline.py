@@ -126,11 +126,16 @@ class ContinualLearningPipeline:
                 fisher[name] = np.maximum(1e-4, np.square(arr) * 0.1).astype(np.float32)
         return fisher
 
-    def _resolve_brain(self, domain: str, search_dir: Optional[Path] = None) -> Optional[AnalyticalMicroTransformer]:
+    def _resolve_brain(
+        self,
+        domain: str,
+        search_dir: Optional[Path] = None,
+        strict: bool = False,
+    ) -> Optional[AnalyticalMicroTransformer]:
         target_dir = search_dir or self.store_dir
-        brain = AnalyticalMicroTransformer.load(f"neuro_{domain}", target_dir)
+        brain = AnalyticalMicroTransformer.load(f"neuro_{domain}", target_dir, strict_directory=strict)
         if brain is None:
-            brain = AnalyticalMicroTransformer.load(domain, target_dir)
+            brain = AnalyticalMicroTransformer.load(domain, target_dir, strict_directory=strict)
         return brain
 
     def _measure_hopfield_retention(self, brain: AnalyticalMicroTransformer) -> float:
@@ -152,24 +157,34 @@ class ContinualLearningPipeline:
                 hits += 1
         return round(hits / float(max(1, total)), 4)
 
+    def _measure_holdout_stats(
+        self,
+        brain: AnalyticalMicroTransformer,
+        holdout_data: List[Tuple[List[str], str]],
+    ) -> Tuple[float, int]:
+        """Measure strict conformal prediction-set coverage and miscoverage error count."""
+        if not holdout_data:
+            return 0.0, 0
+        hits = 0
+        for inp, target in holdout_data:
+            res = brain.infer_conformal(inp, alpha=brain.conformal_alpha or 0.05)
+            if target in res.get("prediction_set", []):
+                hits += 1
+        total = len(holdout_data)
+        return round(hits / float(total), 4), total - hits
+
     def _measure_holdout_coverage(
         self,
         brain: AnalyticalMicroTransformer,
         holdout_data: List[Tuple[List[str], str]],
     ) -> float:
         """Measure strict conformal prediction-set coverage P(Y in C_alpha(X))."""
-        if not holdout_data:
-            return 0.0
-        hits = 0
-        for inp, target in holdout_data:
-            res = brain.infer_conformal(inp, alpha=brain.conformal_alpha or 0.05)
-            if target in res.get("prediction_set", []):
-                hits += 1
-        return round(hits / float(len(holdout_data)), 4)
+        cov, _ = self._measure_holdout_stats(brain, holdout_data)
+        return cov
 
     def _backup_for_rollback(self, model_name: str) -> None:
         self.rollback_dir.mkdir(parents=True, exist_ok=True)
-        for suffix in ("_weights.npz", "_meta.json"):
+        for suffix in ("_weights.npz", "_meta.json", ".manifest.json"):
             src = self.store_dir / f"{model_name}{suffix}"
             if src.exists():
                 shutil.copy2(src, self.rollback_dir / f"{model_name}{suffix}")
@@ -187,7 +202,7 @@ class ContinualLearningPipeline:
         By default (`promote=False`), writes ONLY to `_candidates/` so unverified
         updates never overwrite production weights or fabricate conformal metrics.
         """
-        prod_brain = self._resolve_brain(domain, self.store_dir)
+        prod_brain = self._resolve_brain(domain, self.store_dir, strict=True)
         if prod_brain is None:
             return ContinualUpdateResult(
                 domain=domain,
@@ -203,7 +218,8 @@ class ContinualLearningPipeline:
 
         # Resume from staged candidate if present so multi-step adaptation accumulates against
         # the persistent production reference anchor (`W_embed_anchor`) rather than resetting it.
-        cand_brain = self._resolve_brain(domain, self.candidates_dir)
+        # strict=True guarantees an absent candidate never resolves back to production weights.
+        cand_brain = self._resolve_brain(domain, self.candidates_dir, strict=True)
         brain = cand_brain if (cand_brain is not None and not promote) else prod_brain
         anchor_src = getattr(prod_brain, "W_embed_anchor", prod_brain.W_embed)
         anchor_embed = np.copy(getattr(brain, "W_embed_anchor", brain.W_embed))
@@ -312,7 +328,7 @@ class ContinualLearningPipeline:
         min_coverage: float = 0.95,
     ) -> ContinualUpdateResult:
         """Gate staged candidate on unseen holdout data; backup to _rollback and promote only if passing."""
-        cand = self._resolve_brain(domain, self.candidates_dir)
+        cand = self._resolve_brain(domain, self.candidates_dir, strict=True)
         if cand is None:
             return ContinualUpdateResult(
                 domain=domain,
@@ -339,13 +355,14 @@ class ContinualLearningPipeline:
                 promoted=False,
             )
 
-        cov = self._measure_holdout_coverage(cand, holdout_data)
+        verified_eval_set = holdout_data
+        cov, eval_errors = self._measure_holdout_stats(cand, holdout_data)
         if cov < min_coverage and len(holdout_data) >= 10:
             # When vocabulary expansion shifted the softmax denominator since initial calibration,
             # perform a leak-free split-half conformal recalibration check on `holdout_data`:
             # calibrate threshold on first half, verify strict prediction-set coverage on unseen second half,
             # and reject if nonconformity quantile is degenerate (> 0.25) or coverage fails.
-            prod_orig = self._resolve_brain(domain, self.store_dir)
+            prod_orig = self._resolve_brain(domain, self.store_dir, strict=True)
             vocab_grew = prod_orig is not None and len(cand.vocab) > len(prod_orig.vocab)
             if vocab_grew:
                 mid = max(5, len(holdout_data) // 2)
@@ -355,7 +372,8 @@ class ContinualLearningPipeline:
                     probe_cal = cand.calibrate_conformal(cal_half, alpha=cand.conformal_alpha or 0.05, in_sample=False)
                     q_probe = float(probe_cal.get("quantile_q_hat", 1.0))
                     if q_probe <= 0.25:
-                        cov = self._measure_holdout_coverage(cand, val_half)
+                        cov, eval_errors = self._measure_holdout_stats(cand, val_half)
+                        verified_eval_set = val_half
         if cov < min_coverage:
             res = ContinualUpdateResult(
                 domain=domain,
@@ -371,7 +389,12 @@ class ContinualLearningPipeline:
             self._record_audit_event(res)
             return res
 
-        cand.calibrate_conformal(holdout_data, alpha=cand.conformal_alpha or 0.05, in_sample=False)
+        # Promote the EXACT verified candidate thresholds without post-verification recalibration leakage.
+        cand.record_evaluation_metrics(
+            len(verified_eval_set),
+            eval_errors,
+            sample_id=f"promote_{domain}_{len(verified_eval_set)}",
+        )
         self._backup_for_rollback(cand.name)
         cand.W_embed_anchor = np.copy(cand.W_embed).astype(np.float32)
         cand.save(directory=self.store_dir)
@@ -400,7 +423,21 @@ class ContinualLearningPipeline:
             if w_bak.exists() and m_bak.exists():
                 shutil.copy2(w_bak, self.store_dir / w_bak.name)
                 shutil.copy2(m_bak, self.store_dir / m_bak.name)
-                return AnalyticalMicroTransformer.load(prefix, self.store_dir, verify_checksum=True) is not None
+                man_bak = self.rollback_dir / f"{prefix}.manifest.json"
+                man_dst = self.store_dir / f"{prefix}.manifest.json"
+                if man_bak.exists():
+                    shutil.copy2(man_bak, man_dst)
+                elif man_dst.exists():
+                    man_dst.unlink()
+                return (
+                    AnalyticalMicroTransformer.load(
+                        prefix,
+                        self.store_dir,
+                        verify_checksum=True,
+                        strict_directory=True,
+                    )
+                    is not None
+                )
         return False
 
     def _record_audit_event(self, res: ContinualUpdateResult) -> None:

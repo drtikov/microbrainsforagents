@@ -432,12 +432,27 @@ def test_fable_16_clopper_pearson_bound_and_nonconformity_drift_monitor():
     b.compile_logic_association("write_file_token", "allow_write")
     cal_data = [(["read_file_token"], "allow_read")] * 11 + [(["write_file_token"], "allow_write")] * 11
     cal_rep = b.calibrate_conformal(cal_data, alpha=0.05, in_sample=False)
-    assert cal_rep["upper_error_bound_95"] == ub22
+    # Without an explicit evaluation set, upper_error_bound_95 must NOT be fabricated from 0/n_cal
+    assert cal_rep["upper_error_bound_95"] is None
+    assert cal_rep["error_bound_status"] == "unknown_no_eval_set"
+
+    eval_rep = b.evaluate_conformal_holdout(cal_data, alpha=0.05, sample_id="holdout_22")
+    assert eval_rep["eval_samples"] == 22
+    assert eval_rep["eval_errors"] == 0
+    assert eval_rep["upper_error_bound_95"] == ub22
 
     in_dist = b.infer_conformal(["read_file_token"])
     assert in_dist["upper_error_bound_95"] == ub22
+    assert in_dist["error_bound_status"] == "measured_eval"
     assert in_dist["drift_detected"] is False
 
+    in_dist_90 = b.infer_conformal(["read_file_token"], alpha=0.10)
+    assert in_dist_90["confidence_level"] == 0.9
+    assert in_dist_90["upper_error_bound_95"] == ub22
+    assert in_dist_90["upper_error_bound"] == AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(0, 22, alpha=0.10)
+
+    b._live_abstention_window.clear()
+    b._live_nonconformity_window.clear()
     last = None
     for i in range(12):
         last = b.infer_conformal([f"unseen_ood_token_{i}"])
@@ -537,24 +552,76 @@ def test_fable_20_static_data_table_vs_cyclomatic_complexity_blast_radius():
 
 
 def test_fable_21_decision_journal_recalibration_and_decide_telemetry():
-    from aetheris_microbrains.core.layered_decision_engine import recalibrate_from_decision_journal
+    from aetheris_microbrains.core.layered_decision_engine import (
+        _DECISION_RING_BUFFER,
+        recalibrate_from_decision_journal,
+    )
+    from aetheris_microbrains.core.tool_routing_moe import get_tool_routing_moe
 
-    res = mb.decide("read file src/app.py")
-    assert "upper_error_bound_95" in res
-    assert 0.0 < res["upper_error_bound_95"] < 0.5
-    assert isinstance(res["drift_detected"], bool)
+    moe = get_tool_routing_moe()
+    saved_state = (
+        moe.verified_episodes,
+        moe.verified_errors,
+        moe.calibration_alpha,
+        moe.recalibrated_from_journal,
+        moe.calibration_basis,
+        moe.calibration_sample_id,
+        dict(moe.per_expert_quantiles),
+        list(_DECISION_RING_BUFFER),
+    )
+    try:
+        # Start from clean unverified state
+        moe.verified_episodes = 0
+        moe.verified_errors = 0
+        moe.calibration_alpha = 0.05
+        moe.recalibrated_from_journal = False
+        moe.calibration_basis = "synthetic_self_consistency"
+        moe.calibration_sample_id = None
 
-    synthetic_journal = [
-        {"decision": "allow", "layer": 2, "latency_ms": 0.4, "verified_correct": True, "nonconformity_score": 0.03}
-        for _ in range(22)
-    ]
-    cal_summary = recalibrate_from_decision_journal(synthetic_journal, alpha=0.05)
-    assert cal_summary["n_episodes"] == 22
-    assert cal_summary["verified_episodes"] == 22
-    assert cal_summary["verified_errors"] == 0
-    assert cal_summary["recalibrated_q_hat"] is not None
-    assert cal_summary["router_updated"] is True
-    assert 0.12 <= cal_summary["upper_error_bound_95"] <= 0.14
+        res = mb.decide("read file src/app.py")
+        assert res["upper_error_bound_95"] is None
+        assert res["statistical_confidence_status"] == "unknown"
+        assert res["decision_kind"] == "routing_recommendation"
+        assert isinstance(res["drift_detected"], bool)
+
+        # Unlabeled journal entries must NOT manufacture a bound from n_total & 0 errors
+        unlabeled = [{"decision": "allow", "layer": 2, "latency_ms": 0.4} for _ in range(500)]
+        unlab_summary = recalibrate_from_decision_journal(unlabeled, alpha=0.05)
+        assert unlab_summary["verified_episodes"] == 0
+        assert unlab_summary["upper_error_bound_95"] is None
+        assert unlab_summary["statistical_confidence_status"] == "unknown"
+
+        # Labeled journal entries produce genuine Clopper-Pearson bounds and update MoE provenance
+        synthetic_journal = [
+            {"decision": "allow", "layer": 2, "latency_ms": 0.4, "verified_correct": True, "nonconformity_score": 0.03}
+            for _ in range(22)
+        ]
+        cal_summary = recalibrate_from_decision_journal(synthetic_journal, alpha=0.05)
+        assert cal_summary["n_episodes"] == 22
+        assert cal_summary["verified_episodes"] == 22
+        assert cal_summary["verified_errors"] == 0
+        assert cal_summary["recalibrated_q_hat"] is not None
+        assert cal_summary["router_updated"] is True
+        assert 0.12 <= cal_summary["upper_error_bound_95"] <= 0.14
+
+        res_after = mb.decide("read file src/app.py")
+        assert res_after["upper_error_bound_95"] is not None
+        assert 0.12 <= res_after["upper_error_bound_95"] <= 0.14
+        assert res_after["calibration_basis"] == "recalibrated_journal"
+    finally:
+        (
+            moe.verified_episodes,
+            moe.verified_errors,
+            moe.calibration_alpha,
+            moe.recalibrated_from_journal,
+            moe.calibration_basis,
+            moe.calibration_sample_id,
+            orig_quantiles,
+            orig_ring,
+        ) = saved_state
+        moe.per_expert_quantiles = orig_quantiles
+        _DECISION_RING_BUFFER.clear()
+        _DECISION_RING_BUFFER.extend(orig_ring)
 
 
 def test_fable_22_zero_proposal_n_comments_in_codebase():
@@ -1047,7 +1114,209 @@ def test_fable_39_praxis_hardening_journal_escalation_hunk_and_basis(tmp_path):
     l1_res = mb.decide({"tool": "read_file", "path": "src/a.py"})
     assert l1_res["calibration_basis"] == "deterministic_rule"
     l2_res = mb.decide("read file src/app.py")
-    assert l2_res["calibration_basis"] in {"measured_holdout", "recalibrated_journal", "default_fallback"}
+    assert l2_res["calibration_basis"] in {
+        "measured_holdout",
+        "recalibrated_journal",
+        "synthetic_self_consistency",
+        "uncalibrated_unknown",
+        "default_fallback",
+    }
+
+
+def test_fable_40_review_hardening_honest_bounds_consult_cl_hook_and_prefilter(tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+    from aetheris_microbrains import hook as hook_mod
+    from aetheris_microbrains.core import microbrain_server
+    from aetheris_microbrains.core.layered_decision_engine import _DECISION_RING_BUFFER
+    from aetheris_microbrains.core.tool_routing_moe import ToolRoutingMoE
+    from aetheris_microbrains.evolution.dsh_microbrain_client import (
+        DSHMicrobrainIntegration,
+        PrefilterResponse,
+    )
+    from aetheris_microbrains.tools import microbrain as mb_tools
+
+    # 1. ToolRoutingMoE reports unknown error bounds without verified observations
+    fresh_moe = ToolRoutingMoE(d_model=256)
+    moe_rep = fresh_moe.calibration_report()
+    assert moe_rep["upper_error_bound_95"] is None
+    assert moe_rep["statistical_confidence_status"] == "unknown"
+    assert moe_rep["calibration_basis"] == "synthetic_self_consistency"
+
+    # 2. microbrain_consult() top-level abstained & error propagation
+    orig_loader = mb_tools._load_brain
+    sample_brain = orig_loader("neuro_code_edit_verifier")
+    assert sample_brain is not None
+
+    class _AbstainProxy:
+        def __init__(self, inner, raise_err: bool = False):
+            self._inner = inner
+            self._raise_err = raise_err
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+        def forward(self, seq):
+            return self._inner.forward(seq)
+
+        def infer_conformal(self, seq):
+            if self._raise_err:
+                raise RuntimeError("simulated_conformal_failure")
+            return {
+                "abstained": True,
+                "reason": "ambiguous",
+                "predicted_token": "<abstain>",
+                "prediction_set": ["verifier_verdict_accept", "verifier_verdict_reject"],
+                "confidence": 0.42,
+                "n_calibration_samples": 120,
+                "conformal_guarantee_valid": True,
+                "calibration_basis": "held_out",
+                "upper_error_bound_95": None,
+            }
+
+    monkeypatch.setattr(mb_tools, "_load_brain", lambda _n: _AbstainProxy(sample_brain, raise_err=False))
+    amb = mb_tools.microbrain_consult("syntax error in AST parser during code edit")
+    assert amb["abstained"] is True
+    assert amb["conformal_abstained"] is True
+    assert amb["predicted_token"] == "<abstain>"
+    assert amb["reason_code"] == "ambiguous"
+
+    monkeypatch.setattr(mb_tools, "_load_brain", lambda _n: _AbstainProxy(sample_brain, raise_err=True))
+    err_c = mb_tools.microbrain_consult("syntax error in AST parser during code edit")
+    assert err_c["abstained"] is True
+    assert err_c["conformal_abstained"] is True
+    assert err_c["reason_code"] == "conformal_inference_error:RuntimeError"
+    assert "conformal_error" in err_c
+    monkeypatch.setattr(mb_tools, "_load_brain", orig_loader)
+
+    # 3. Continual learning: strict_directory=True, absent candidate refusal, no post-verification recalibration, manifest integrity
+    assert AnalyticalMicroTransformer.load("neuro_code_edit_verifier", tmp_path, strict_directory=True) is None
+    cl_store = tmp_path / "cl_store"
+    cl_store.mkdir()
+    for suffix in ("_weights.npz", "_meta.json"):
+        shutil.copy2(BRAINS_DIR / f"neuro_code_edit_verifier{suffix}", cl_store / f"neuro_code_edit_verifier{suffix}")
+
+    pipeline = ContinualLearningPipeline(store_dir=cl_store, audit_log_path=tmp_path / "cl_audit.json")
+    missing_prom = pipeline.verify_and_promote_candidate("code_edit_verifier", [(["ast_node_function_def"], "verifier_verdict_accept")], min_coverage=0.95)
+    assert missing_prom.promoted is False
+    assert "not found" in missing_prom.status
+
+    orig_prod = AnalyticalMicroTransformer.load("neuro_code_edit_verifier", cl_store, strict_directory=True)
+    assert orig_prod is not None
+    vocab_slice = orig_prod.W_embed[: len(orig_prod.vocab)]
+    holdout = []
+    for k_vec, v_vec in zip(orig_prod.hopfield_keys[:22], orig_prod.hopfield_values[:22]):
+        k_tok = orig_prod.inv_vocab[int(np.argmax(np.dot(vocab_slice, k_vec)))]
+        v_tok = orig_prod.inv_vocab[int(np.argmax(np.dot(vocab_slice, v_vec)))]
+        holdout.append(([k_tok], v_tok))
+    cal_split = holdout[:11]
+    val_split = holdout[11:]
+
+    pipeline.apply_plasticity_feedback(
+        "code_edit_verifier",
+        ["new_ast_token_omega"],
+        holdout_data=cal_split,
+        promote=False,
+    )
+    cand = AnalyticalMicroTransformer.load("neuro_code_edit_verifier", cl_store / "_candidates", strict_directory=True)
+    assert cand is not None
+
+    pre_q = round(float(cand.conformal_quantile or 0.0), 4)
+    prom = pipeline.verify_and_promote_candidate("code_edit_verifier", val_split, min_coverage=0.95)
+    assert prom.promoted is True
+    assert prom.recalibrated_quantile == pre_q
+    promoted_model = AnalyticalMicroTransformer.load("neuro_code_edit_verifier", cl_store, verify_checksum=True, strict_directory=True)
+    assert promoted_model is not None
+    assert promoted_model.eval_samples == len(val_split)
+    assert (cl_store / "neuro_code_edit_verifier.manifest.json").exists()
+
+    # Meta tamper is caught by .manifest.json verification
+    meta_p = cl_store / "neuro_code_edit_verifier_meta.json"
+    meta_txt = meta_p.read_text(encoding="utf-8")
+    meta_p.write_text(meta_txt + "\n", encoding="utf-8")
+    assert AnalyticalMicroTransformer.load("neuro_code_edit_verifier", cl_store, verify_checksum=True, strict_directory=True) is None
+    meta_p.write_text(meta_txt, encoding="utf-8")
+    assert pipeline.rollback_domain("code_edit_verifier") is True
+
+    # 4. Hook protocols (--host codex, passive --shadow on crashes/bad JSON), shadow drift, journal errors
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: json.dumps({"tool_name": "NotebookEdit", "tool_input": {"path": "nb.ipynb"}})})())
+    rc_codex = hook_mod.main(["--host", "codex"])
+    cap_codex = capsys.readouterr()
+    assert rc_codex == 0
+    assert cap_codex.out.strip() == ""
+
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: json.dumps({"tool_name": "NotebookEdit", "tool_input": {"path": "nb.ipynb"}})})())
+    rc_codex_deny = hook_mod.main(["--host", "codex", "--codex-escalate-deny"])
+    cap_codex_deny = capsys.readouterr()
+    assert rc_codex_deny == 2
+    assert json.loads(cap_codex_deny.out.strip())["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: "{bad_json"})())
+    rc_sh_bad = hook_mod.main(["--shadow"])
+    cap_sh_bad = capsys.readouterr()
+    assert rc_sh_bad == 0
+    assert cap_sh_bad.out.strip() == ""
+
+    def _crash(*args, **kwargs):
+        raise RuntimeError("boom_shadow_crash")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(hook_mod, "evaluate_hook_payload", _crash)
+        mp.setattr(sys, "stdin", type("S", (), {"read": lambda self: '{"tool_name":"Bash","tool_input":{"command":"ls"}}'})())
+        rc_sh_crash = hook_mod.main(["--shadow"])
+        cap_sh_crash = capsys.readouterr()
+        assert rc_sh_crash == 0
+        assert cap_sh_crash.out.strip() == ""
+
+    # Shadow drift detection via shadow_reason_code & journal error reporting
+    saved_ring = list(_DECISION_RING_BUFFER)
+    try:
+        _DECISION_RING_BUFFER.clear()
+        j_shadow = tmp_path / "shadow_drift.jsonl"
+        last_shadow = None
+        for idx in range(11):
+            last_shadow = mb.decide(
+                f"quantum singularity hyperdrive frobnicator_{idx}",
+                context={"shadow_mode": True, "journal_path": str(j_shadow)},
+            )
+        assert last_shadow is not None
+        assert last_shadow["drift_detected"] is True
+        assert last_shadow["journal_written"] is True
+
+        # Passing an existing directory path as journal_path fails gracefully with journal_written=False
+        dir_err = mb.decide("read file src/app.py", context={"log_decisions": True, "journal_path": str(tmp_path)})
+        assert dir_err["journal_written"] is False
+        assert "journal_error" in dir_err
+    finally:
+        _DECISION_RING_BUFFER.clear()
+        _DECISION_RING_BUFFER.extend(saved_ring)
+
+    # 5. HTTP prefilter fail-closed on exception + DSH threshold forwarding
+    import ast as _ast
+    import asyncio
+
+    def _ast_boom(_code):
+        raise RuntimeError("simulated_ast_crash")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(_ast, "parse", _ast_boom)
+        req = microbrain_server.PrefilterRequest(candidates=[{"id": "c1", "code": "def ok():\n    return 1\n"}], threshold=0.5)
+        resp = asyncio.run(microbrain_server.prefilter_candidates(req))
+        assert resp.status == "error"
+        assert resp.filtered_count == 0
+        assert resp.results[0].passed is False
+
+    seen_thresholds = []
+
+    class _FakeClient:
+        def prefilter_candidates(self, candidates, max_results=10, threshold=0.5):
+            seen_thresholds.append(threshold)
+            return PrefilterResponse(results=[{"candidate_id": "c1", "score": 0.9, "passed": True}], filtered_count=1, total_count=1)
+
+    integ = DSHMicrobrainIntegration(client=_FakeClient())
+    kept = integ.prefilter_evolution_candidates([{"id": "c1", "code": "def f(): pass"}], threshold=0.8)
+    assert seen_thresholds == [0.8]
+    assert len(kept) == 1
 
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -35,6 +36,8 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple
+
+log = logging.getLogger(__name__)
 
 RULES_VERSION = "2.1.0-layered-structural"
 DEFAULT_MODEL_VERSION = "analytical-wsp-v2.1"
@@ -1275,7 +1278,7 @@ def redact_secrets(text: str) -> str:
     return out
 
 
-def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] = None) -> None:
+def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] = None) -> Dict[str, Any]:
     """Record structured decision telemetry into ring buffer and optional JSONL journal."""
     sanitized = dict(entry)
     if isinstance(sanitized.get("label"), str):
@@ -1289,8 +1292,11 @@ def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] 
             f.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
         if is_new and os.name != "nt":
             os.chmod(target, 0o600)
-    except Exception:
-        pass
+        return {"written": True, "path": str(target), "error": None}
+    except Exception as exc:
+        err_str = redact_secrets(f"{type(exc).__name__}:{exc}")
+        log.warning("Failed to append decision journal %s: %s", target, err_str)
+        return {"written": False, "path": str(target), "error": err_str}
 
 
 def get_recent_decision_journal(limit: int = 50) -> List[Dict[str, Any]]:
@@ -1385,6 +1391,11 @@ def decide(
         layer: int,
         conformal_bound: Optional[float] = None,
         calibration_basis: Optional[str] = None,
+        verified_episodes: int = 0,
+        verified_errors: int = 0,
+        confidence_level: Optional[float] = None,
+        sample_id: Optional[str] = None,
+        decision_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
@@ -1393,15 +1404,23 @@ def decide(
             disk_recent = _tail_journal_recent(j_target, limit=12)
             if len(disk_recent) > len(recent):
                 recent = disk_recent[-12:]
-        ood_hits = sum(1 for item in recent if item.get("reason_code") == "layer2_conformal_abstention_ood")
+        ood_hits = sum(
+            1
+            for item in recent
+            if str(item.get("shadow_reason_code") or item.get("reason_code") or "") == "layer2_conformal_abstention_ood"
+        )
         if reason_code == "layer2_conformal_abstention_ood":
             ood_hits += 1
         denom = max(1, len(recent) + 1)
         drift_detected = bool(denom >= 10 and (ood_hits / float(denom)) > 0.60)
         upper_error_bound_95 = round(float(conformal_bound), 4) if conformal_bound is not None else None
+        resolved_kind = decision_kind or (
+            "structural_gate" if layer in (0, 1) else ("routing_recommendation" if layer == 2 else "fallback_escalation")
+        )
 
         out: Dict[str, Any] = {
             "decision": decision,
+            "decision_kind": resolved_kind,
             "label": redact_secrets(label),
             "prediction_set": pred_set,
             "reason_code": reason_code,
@@ -1412,6 +1431,11 @@ def decide(
             "input_sha256": input_sha256,
             "shadow_mode": shadow_mode,
             "upper_error_bound_95": upper_error_bound_95,
+            "statistical_confidence_status": "verified" if upper_error_bound_95 is not None else "unknown",
+            "verified_episodes": int(verified_episodes),
+            "verified_errors": int(verified_errors),
+            "confidence_level": confidence_level,
+            "calibration_sample_id": sample_id,
             "calibration_basis": calibration_basis or "deterministic_rule",
             "drift_detected": drift_detected,
         }
@@ -1428,7 +1452,10 @@ def decide(
             out["reason_code"] = "shadow_mode_observation"
 
         if should_log:
-            record_decision_journal(out, journal_path=journal_path)
+            j_status = record_decision_journal(out, journal_path=journal_path)
+            out["journal_written"] = bool(j_status.get("written", False))
+            if j_status.get("error"):
+                out["journal_error"] = j_status["error"]
         else:
             _DECISION_RING_BUFFER.append(dict(out))
         return out
@@ -1525,13 +1552,19 @@ def decide(
             moe = get_tool_routing_moe()
             moe_res = moe.route(query_text, available_tools=available_tools)
             cal_rep = moe.calibration_report() if hasattr(moe, "calibration_report") else {}
-            cal_bound = cal_rep.get("upper_error_bound_95", round(1.0 - (0.05 ** (1.0 / 120.0)), 4))
-            if cal_rep.get("recalibrated"):
+            cal_bound = cal_rep.get("upper_error_bound_95")
+            verified_eps = int(cal_rep.get("verified_episodes", 0) or 0)
+            verified_errs = int(cal_rep.get("verified_errors", 0) or 0)
+            conf_level = cal_rep.get("confidence_level")
+            sample_id = cal_rep.get("sample_id")
+            if cal_rep.get("recalibrated") and verified_eps > 0:
                 cal_basis = "recalibrated_journal"
-            elif cal_rep.get("n_calibration_samples", 0) > 0:
+            elif verified_eps > 0:
                 cal_basis = "measured_holdout"
+            elif cal_rep.get("calibration_basis"):
+                cal_basis = str(cal_rep["calibration_basis"])
             else:
-                cal_basis = "default_fallback"
+                cal_basis = "uncalibrated_unknown"
             if not moe_res.conformal_passed:
                 return _finish(
                     "escalate",
@@ -1541,6 +1574,11 @@ def decide(
                     2,
                     conformal_bound=cal_bound,
                     calibration_basis=cal_basis,
+                    verified_episodes=verified_eps,
+                    verified_errors=verified_errs,
+                    confidence_level=conf_level,
+                    sample_id=sample_id,
+                    decision_kind="routing_recommendation",
                 )
             return _finish(
                 "allow",
@@ -1550,6 +1588,11 @@ def decide(
                 2,
                 conformal_bound=cal_bound,
                 calibration_basis=cal_basis,
+                verified_episodes=verified_eps,
+                verified_errors=verified_errs,
+                confidence_level=conf_level,
+                sample_id=sample_id,
+                decision_kind="routing_recommendation",
             )
         except Exception as exc:
             # Fail safe: escalate to Layer 3 LLM rather than returning a fake constant
@@ -1611,12 +1654,22 @@ def recalibrate_from_decision_journal(
 
     from .analytical_micro_transformer import AnalyticalMicroTransformer
 
-    bound_n = verified_total if verified_total > 0 else n_total
-    upper_bound = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
-        verified_errors if verified_total > 0 else 0,
-        max(1, bound_n),
-        alpha=float(alpha),
-    )
+    upper_bound: Optional[float] = None
+    upper_bound_95: Optional[float] = None
+    if verified_total > 0:
+        upper_bound = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
+            verified_errors,
+            verified_total,
+            alpha=float(alpha),
+        )
+        upper_bound_95 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(
+            verified_errors,
+            verified_total,
+            alpha=0.05,
+        )
+        conf_status = "verified"
+    else:
+        conf_status = "unknown"
 
     recalibrated_q_hat: Optional[float] = None
     router_updated = False
@@ -1635,6 +1688,22 @@ def recalibrate_from_decision_journal(
         except Exception:
             router_updated = False
 
+    if verified_total > 0 or router_updated:
+        try:
+            from .tool_routing_moe import get_tool_routing_moe
+
+            moe = get_tool_routing_moe()
+            moe.verified_episodes = int(verified_total)
+            moe.verified_errors = int(verified_errors)
+            moe.calibration_alpha = float(alpha)
+            moe.recalibrated_from_journal = bool(router_updated)
+            moe.calibration_basis = "recalibrated_journal" if router_updated else "measured_journal"
+            moe.calibration_sample_id = (
+                f"journal_{verified_total}" if verified_total > 0 else f"journal_scores_{len(nonconf_scores)}"
+            )
+        except Exception:
+            pass
+
     return {
         "n_episodes": n_total,
         "decision_counts": decision_counts,
@@ -1644,7 +1713,11 @@ def recalibrate_from_decision_journal(
         "p95_latency_ms": p95_lat,
         "verified_episodes": verified_total,
         "verified_errors": verified_errors,
-        "upper_error_bound_95": upper_bound,
+        "upper_error_bound": upper_bound,
+        "upper_error_bound_95": upper_bound_95,
+        "confidence_level": round(1.0 - float(alpha), 4),
+        "statistical_confidence_status": conf_status,
+        "error_metric": "verified_decision_error",
         "recalibrated_q_hat": recalibrated_q_hat,
         "router_updated": router_updated,
         "alpha": float(alpha),
