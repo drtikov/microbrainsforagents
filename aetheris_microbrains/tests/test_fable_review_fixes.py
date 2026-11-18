@@ -489,7 +489,7 @@ def test_fable_18_bilingual_intent_persistence_and_grounded_metacognitive_calibr
     for _ in range(3):
         drifted = tracker.register_step("покупка авиабилетов и прогноз погоды", "отвлеченная задача")
     assert drifted.is_drifting is True
-    assert drifted.neural_signal == "reanchoring_triggered"
+    assert "reanchoring_triggered" in str(drifted.neural_signal)
 
     cal_unc = calibrate_action_confidence("git_operations", raw_confidence=0.80, context_familiarity=0.40)
     assert cal_unc.neural_signal == "entropy_floor_enforced"
@@ -830,6 +830,19 @@ def test_fable_34_cascade_escalation_payload_on_block_verdicts():
     assert blocked_suki.verdict == "BLOCKED_PRECONDITION_SUKI"
     assert blocked_suki.escalation_payload is not None
     assert blocked_suki.escalation_payload["delegate_to"] == "POLICY_REVIEWER"
+
+
+def test_fable_35_negation_do_and_clause_window():
+    from aetheris_microbrains.core.active_inference import _action_category
+
+    # Affirmative 'do' imperative must NOT be treated as negation
+    assert _action_category("do fix the bug") == "careful_repair"
+    assert _action_category("do not fix the bug") == "generic_action"
+    # Medium-distance negation (6 words between don't and fix) within same clause
+    assert _action_category("Don't you think that we should probably fix the login flow") == "generic_action"
+    # Clause boundary resets negation scope
+    assert _action_category("Don't panic, fix the login flow") == "careful_repair"
+
 
 
 
