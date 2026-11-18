@@ -86,6 +86,19 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 
 ---
 
+## 🌐 Beyond AI Agents: Other Use Cases & Readiness
+
+Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-conformal abstention engine also apply outside agent loops:
+
+| Domain | Status Today | What's Ready vs. What's Needed |
+| :--- | :--- | :--- |
+| **CI/CD & Pre-Commit Gates** | **Ready out-of-the-box** | `decide()` and `analyze_code_diff()` already check Python ASTs, secrets, breaking API signatures, YAML/JS patterns, and shell commands in `< 2 ms`. |
+| **Edge / Offline & Air-Gapped Systems** | **Ready out-of-the-box** | Pure NumPy + Python stdlib, tiny `.npz` weights (`allow_pickle=False`), zero GPU/internet required, and PEP 562 lazy imports. |
+| **Ticket & Intent Triage (Support / IT Ops)** | **Engine ready, needs your data** | `ToolRoutingMoE.fit_from_traces()` + conformal abstention work on arbitrary text categories, **but** shipped weights target SWE/DevOps tasks—you must supply your own labeled traces. |
+| **MLOps Drift & Auditable Intake** | **Telemetry ready, needs adapter** | `upper_error_bound_95`, `drift_detected`, `recalibrate_from_decision_journal()`, `input_sha256`, `shadow_mode`, and JSONL logging are built, **but** require your domain schemas and compliance integration. |
+
+---
+
 ## 🏗️ 4-Layer Decision Architecture
 
 1. **Layer 0: Policy & Protected Paths**
