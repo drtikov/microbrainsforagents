@@ -96,7 +96,21 @@ Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-confor
 | **Edge / Offline & Air-Gapped Systems** | **Ready out-of-the-box** | Pure NumPy + Python stdlib, tiny `.npz` weights (`allow_pickle=False`), zero GPU/internet required, and PEP 562 lazy imports. |
 | **Ticket & Intent Triage (Support / IT Ops)** | **Engine ready, needs your data** | `ToolRoutingMoE.fit_from_traces()` + conformal abstention work on arbitrary text categories, **but** shipped weights target SWE/DevOps tasks—you must supply your own labeled traces. |
 | **MLOps Drift & Auditable Intake** | **Telemetry ready, needs adapter** | `upper_error_bound_95`, `drift_detected`, `recalibrate_from_decision_journal()`, `input_sha256`, `shadow_mode`, and JSONL logging are built, **but** require your domain schemas and compliance integration. |
-| **Robotics (High-Level LLM-to-ROS 2)** | **Conceptually compatible, needs adapter & data** | Fits the upper planner layer (ROS 2 skill narrowing via `narrow_tool_surface`, conformal `"ask"` on ambiguous instructions, script AST/shell gating) without using GPU VRAM; **not** for real-time servo/motor loops or hardware safety interlocks. |
+| **Robotics (High-Level LLM-to-ROS 2)** | **Middle-layer modules included (`v0.7.0+`), needs ROS 2 adapter & data** | Includes `StateCBFSafetyFilter`, `VLActionGate`, `SensorimotorLoop`, `EFPAgent`, and `PackedTernaryLinear` for the 10–50 Hz planner/VLA layer without GPU VRAM; **not** for real-time 1 kHz+ servo/motor loops or hardware safety interlocks. |
+
+---
+
+## 🤖 Robotics Extension Layer (10–50 Hz VLA / Planner Middleware)
+
+For high-level robot autonomy (between ~1 kHz MCU/RTOS servo loops and tens-of-ms VLA/LLM calls), the SDK includes six pure-NumPy robotics modules:
+
+| Component | What It IS | What It Is NOT |
+| :--- | :--- | :--- |
+| **`StateCBFSafetyFilter`** (`core/state_cbf_filter.py`) | Exact Euclidean projection onto affine CBF halfspaces $\cap$ control box via Dykstra's algorithm, with conformal barrier inflation and `verified_safe=False` fail-closed on infeasibility. | Not a hard real-time C++/RTOS safety controller or certified hardware E-stop. |
+| **`VLActionGate` & `SkillLibrary`** (`core/vla_gating.py`) | Three-tier gate (`local_reflex` / `call_vla` / `escalate_human`) composing CBF feasibility, fail-closed conformal risk (`uncalibrated` never allows), and VSA skill affordances (with `scene_prototype` / `bind_scene_example`). Also wired at `POST /microbrain/gate`. | Not a learned SayCan feasibility value function unless backed by your scene prototypes/traces. |
+| **`SensorimotorLoop` & `nir_export`** (`core/sensorimotor_loop.py`, `core/nir_export.py`) | Fixed-dt multi-rate tick scheduler with `ReservoirReflexLayer` (FORCE/RLS online readouts on `LiquidStateReservoir`) and guarded NIR-dialect graph export. | Not an ISO-certified real-time firmware loop or full Neuromorphic Intermediate Representation compiler. |
+| **`EFPAgent` & `GenerativeModel`** (`core/pymdp_efe.py`) | Discrete POMDP generative model (`A`/`B`/`C`/`D`) computing Expected Free Energy (pragmatic + epistemic mutual-information terms) and exact Bayes belief updates. | Not a continuous-control MPC solver. |
+| **`PackedTernaryLinear`** (`core/ternary_edge_runtime.py`) | 2-bit packed `.npz` ternary weights with atomic saves, exact integer parity with `BitLinearLayer`, latency receipts (`bench_receipt`), and guarded ONNX export. | Not a custom CUDA/NPU kernel. |
 
 ---
 

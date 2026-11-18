@@ -107,6 +107,25 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "run_wsp_surgeon": (".tools.wsp_tensor_surgeon", "run"),
     "ConformalCalibrationReport": (".tools.conformal_collector", "ConformalCalibrationReport"),
     "run_conformal_calibration_pipeline": (".tools.conformal_collector", "run_conformal_calibration_pipeline"),
+    # Robotics extension layer
+    "BarrierConstraint": (".core.state_cbf_filter", "BarrierConstraint"),
+    "HalfPlaneBarrier": (".core.state_cbf_filter", "HalfPlaneBarrier"),
+    "SphereBarrier": (".core.state_cbf_filter", "SphereBarrier"),
+    "ControlAffineDynamics": (".core.state_cbf_filter", "ControlAffineDynamics"),
+    "LinearDynamics": (".core.state_cbf_filter", "LinearDynamics"),
+    "StateCBFSafetyFilter": (".core.state_cbf_filter", "StateCBFSafetyFilter"),
+    "SensorimotorLoop": (".core.sensorimotor_loop", "SensorimotorLoop"),
+    "ReservoirReflexLayer": (".core.sensorimotor_loop", "ReservoirReflexLayer"),
+    "export_reservoir_nir": (".core.nir_export", "export_reservoir_nir"),
+    "validate_nir_dialect_graph": (".core.nir_export", "validate_nir_dialect_graph"),
+    "GenerativeModel": (".core.pymdp_efe", "GenerativeModel"),
+    "EFPAgent": (".core.pymdp_efe", "EFPAgent"),
+    "PackedTernaryLinear": (".core.ternary_edge_runtime", "PackedTernaryLinear"),
+    "bench_receipt": (".core.ternary_edge_runtime", "bench_receipt"),
+    "export_packed_linear_onnx": (".core.ternary_edge_runtime", "export_packed_linear_onnx"),
+    "SkillLibrary": (".core.vla_gating", "SkillLibrary"),
+    "ConformalActionGate": (".core.vla_gating", "ConformalActionGate"),
+    "VLActionGate": (".core.vla_gating", "VLActionGate"),
 }
 
 __all__ = list(_LAZY_EXPORTS.keys())

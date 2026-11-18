@@ -197,6 +197,177 @@ class LiquidStateReservoir:
             res["readout_prediction"] = np.dot(self.state, self.W_readout).tolist()
         return res
 
+    # ------------------------------------------------------------------
+    # 2026-11-18 robotics extension: ONLINE readout adaptation (RLS/FORCE).
+    # The pre-existing fit_readout() is BATCH ridge over collected
+    # trajectories; the methods below adapt the readout per step so the
+    # reservoir can track non-stationary targets in a closed sensorimotor
+    # loop (RLS with forgetting; FORCE rank-1, Sussillo & Abbott style).
+    # ------------------------------------------------------------------
+
+    def init_online_readout(
+        self,
+        out_dim: int,
+        method: str = "rls",
+        forgetting_factor: float = 0.999,
+        force_gamma: float = 1.0,
+        l2_delta: float = 1e-6,
+    ) -> Dict[str, Any]:
+        """
+        Prepare the readout for per-step online adaptation.
+
+        method="rls":   recursive least squares with forgetting factor
+                        lambda = forgetting_factor in (0, 1]; maintains the
+                        inverse autocorrelation matrix P (reservoir_dim x
+                        reservoir_dim) initialized to I/l2_delta (standard
+                        large-P0 RLS: l2_delta must be << data scale or the
+                        prior biases low-energy directions).
+        method="force": FORCE rank-1 (fixed-P) update, W += s e^T / gamma.
+                        No inverse-correlation tracking (O(N) per step);
+                        gamma must be >> ||s||^2 or the delta rule diverges
+                        (an honest numerical reset guards that case).
+        """
+        method = str(method).lower()
+        if method not in ("rls", "force"):
+            return {"status": "skipped_invalid_method", "method": method}
+        out_dim = int(out_dim)
+        if out_dim < 1:
+            return {"status": "skipped_invalid_out_dim", "out_dim": out_dim}
+        lam = float(forgetting_factor)
+        if not (0.0 < lam <= 1.0):
+            return {"status": "skipped_invalid_forgetting", "forgetting_factor": forgetting_factor}
+
+        self.W_readout = np.zeros((self.reservoir_dim, out_dim), dtype=np.float32)
+        self.readout_trained = True  # predictions are emitted from now on (zeros until first update)
+        self._online_method = method
+        self._forgetting_factor = lam
+        self._force_gamma = max(float(force_gamma), 1e-6)
+        self._P: Optional[np.ndarray] = (
+            np.eye(self.reservoir_dim, dtype=np.float64) / max(float(l2_delta), 1e-12)
+            if method == "rls"
+            else None
+        )
+        self._online_updates = 0
+        self._online_ema_mse: Optional[float] = None
+        return {
+            "status": "online_readout_ready",
+            "method": method,
+            "out_dim": out_dim,
+            "forgetting_factor": lam if method == "rls" else None,
+            "reservoir_dim": self.reservoir_dim,
+        }
+
+    def update_readout_online(
+        self,
+        target: Union[List[float], np.ndarray],
+        state_vector: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """
+        One online adaptation step against the CURRENT reservoir state
+        (or an explicit state_vector of length reservoir_dim).
+
+        RLS:   k = P s / (lambda + s^T P s);  W += k e^T;  P = (P - k s^T P) / lambda
+        FORCE: W += (1/gamma) * s e^T
+
+        The returned pre_mse is the error of the prediction MADE BEFORE this
+        update (proper online protocol), post_mse is the error after.
+        """
+        if not (self.readout_trained and self.W_readout is not None):
+            return {"status": "skipped_not_initialized"}
+        s = (
+            np.asarray(state_vector, dtype=np.float64).flatten()
+            if state_vector is not None
+            else self.state.astype(np.float64).flatten()
+        )
+        if s.shape[0] != self.reservoir_dim:
+            return {
+                "status": "skipped_state_dim_mismatch",
+                "expected": self.reservoir_dim,
+                "received": int(s.shape[0]),
+            }
+        y = np.asarray(target, dtype=np.float64).flatten()
+        if y.shape[0] != self.W_readout.shape[1]:
+            return {
+                "status": "skipped_target_dim_mismatch",
+                "expected": int(self.W_readout.shape[1]),
+                "received": int(y.shape[0]),
+            }
+
+        W = self.W_readout.astype(np.float64)
+        pre_pred = W.T @ s
+        e = y - pre_pred
+        pre_mse = float(np.mean(e ** 2))
+
+        if self._online_method == "rls" and self._P is not None:
+            P_s = self._P @ s
+            denom = max(self._forgetting_factor + float(s @ P_s), 1e-12)
+            k = (P_s / denom)[:, None]
+            W = W + k @ e[None, :]
+            self._P = (self._P - k @ (P_s[None, :])) / self._forgetting_factor
+            # numerical hygiene: keep P symmetric, bound its norm
+            self._P = 0.5 * (self._P + self._P.T)
+            p_norm = float(np.linalg.norm(self._P))
+            if not np.isfinite(p_norm) or p_norm > 1e12:
+                self._P = np.eye(self.reservoir_dim, dtype=np.float64)
+                W = np.zeros_like(W)
+                reset_flag = True
+            else:
+                reset_flag = False
+        else:
+            W = W + (s[:, None] @ e[None, :]) / self._force_gamma
+            w_norm = float(np.linalg.norm(W))
+            if not np.isfinite(w_norm) or w_norm > 1e8:
+                # FORCE delta rule diverges when gamma << ||s||^2; reset honestly
+                W = np.zeros_like(W)
+                reset_flag = True
+            else:
+                reset_flag = False
+
+        self.W_readout = W.astype(np.float32)
+        post_pred = self.W_readout.astype(np.float64).T @ s
+        post_mse = float(np.mean((y - post_pred) ** 2))
+        self._online_updates += 1
+        self._online_ema_mse = (
+            post_mse
+            if self._online_ema_mse is None
+            else 0.9 * self._online_ema_mse + 0.1 * post_mse
+        )
+        return {
+            "status": "updated_after_p_numerical_reset" if reset_flag else "updated",
+            "method": self._online_method,
+            "updates": self._online_updates,
+            "pre_mse": round(pre_mse, 8),
+            "post_mse": round(post_mse, 8),
+            "ema_mse": round(self._online_ema_mse, 8),
+        }
+
+    def online_step(
+        self,
+        input_vector: Union[List[float], np.ndarray],
+        target: Optional[Union[List[float], np.ndarray]] = None,
+        delta_t: Optional[float] = None,
+        event_tag: str = "robotics_step",
+    ) -> Dict[str, Any]:
+        """
+        Fixed-role sensorimotor tick: step the liquid, emit the readout
+        prediction for this state, THEN adapt against the (optional) target.
+        The prediction is emitted BEFORE the update (honest online protocol —
+        the model never scores a sample it has already trained on).
+        """
+        if delta_t is not None:
+            res = self.step_cfc_continuous(input_vector, delta_t=delta_t, event_tag=event_tag)
+        else:
+            res = self.step(input_vector, event_tag=event_tag)
+        res["online"] = {"initialized": bool(self.readout_trained and self.W_readout is not None)}
+        if res["online"]["initialized"]:
+            res["online"]["updates"] = self._online_updates
+            res["online"]["ema_mse"] = (
+                round(self._online_ema_mse, 8) if self._online_ema_mse is not None else None
+            )
+        if target is not None:
+            res["online_update"] = self.update_readout_online(target)
+        return res
+
     def reset_state(self):
         """Flushes the reservoir liquid to ground state."""
         self.state = np.zeros(self.reservoir_dim, dtype=np.float32)

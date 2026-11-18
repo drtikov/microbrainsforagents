@@ -279,8 +279,17 @@ async def health():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus-compatible real-time telemetry metrics endpoint."""
+    """Prometheus-compatible telemetry endpoint backed by the LIVE MicrobrainTelemetry log.
+
+    Honesty note (2026-11-18): this endpoint previously served hardcoded showcase
+    values (coverage 0.985, latencies 0.150-3.476 ms, abstention 0.035/0.015) that
+    were not derived from any measurement. All values below are now computed from
+    the live telemetry JSONL via ``get_microbrain_telemetry().generate_dashboard()``.
+    When no telemetry events exist, an explicit ``microbrain_telemetry_events_total 0``
+    counter is emitted and per-domain gauges are omitted rather than invented.
+    """
     from fastapi.responses import PlainTextResponse
+
     uptime = time.time() - _start_time
     gpu_flag = 1 if (_accelerator and getattr(_accelerator, "available", False)) else 0
     lines = [
@@ -295,32 +304,70 @@ async def prometheus_metrics():
         "# HELP microbrain_loaded_brains Count of microbrains currently loaded in RAM",
         "# TYPE microbrain_loaded_brains gauge",
         f"microbrain_loaded_brains {len(_brain_cache)}",
-        "",
-        "# HELP microbrain_conformal_coverage Empirical coverage across active domains",
-        "# TYPE microbrain_conformal_coverage gauge",
-        'microbrain_conformal_coverage{domain="tool_routing_v3"} 0.985',
-        'microbrain_conformal_coverage{domain="constitutional_guardian"} 0.985',
-        'microbrain_conformal_coverage{domain="drift_detector"} 0.985',
-        'microbrain_conformal_coverage{domain="tool_failure_classifier"} 0.985',
-        'microbrain_conformal_coverage{domain="patch_quality_predictor"} 0.985',
-        "",
-        "# HELP microbrain_inference_latency_ms Median inference latency in milliseconds",
-        "# TYPE microbrain_inference_latency_ms gauge",
-        'microbrain_inference_latency_ms{domain="fast_intent",quantile="p50"} 0.280',
-        'microbrain_inference_latency_ms{domain="tool_routing_moe",quantile="p50"} 3.476',
-        'microbrain_inference_latency_ms{domain="constitutional_guardian",quantile="p50"} 0.150',
-        "",
-        "# HELP microbrain_abstention_rate Conformal selective prediction abstention rate",
-        "# TYPE microbrain_abstention_rate gauge",
-        'microbrain_abstention_rate{domain="critical_ensemble"} 0.035',
-        'microbrain_abstention_rate{domain="tool_failure"} 0.015',
     ]
+
+    report = None
+    try:
+        from .microbrain_telemetry import get_microbrain_telemetry
+
+        report = get_microbrain_telemetry().generate_dashboard(window_size=100)
+    except Exception as exc:
+        log.warning("Live telemetry unavailable for /metrics: %s", exc)
+
+    if report is None or report.total_events == 0:
+        lines += [
+            "",
+            "# No telemetry events recorded yet; per-domain gauges omitted (no fabricated values).",
+            "# TYPE microbrain_telemetry_events_total counter",
+            "microbrain_telemetry_events_total 0",
+        ]
+        return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
+
+    lines += [
+        "",
+        "# HELP microbrain_telemetry_events_total Telemetry events in the live log",
+        "# TYPE microbrain_telemetry_events_total counter",
+        f"microbrain_telemetry_events_total {report.total_events}",
+        "",
+        "# HELP microbrain_conformal_coverage Empirical conformal pass rate across the live log",
+        "# TYPE microbrain_conformal_coverage gauge",
+        f"microbrain_conformal_coverage {report.conformal_empirical_coverage}",
+        "",
+        "# HELP microbrain_sliding_window_coverage Conformal+accuracy coverage over the recent window",
+        "# TYPE microbrain_sliding_window_coverage gauge",
+        f"microbrain_sliding_window_coverage {report.sliding_window_coverage}",
+        "",
+        "# HELP microbrain_expected_calibration_error ECE over the live log",
+        "# TYPE microbrain_expected_calibration_error gauge",
+        f"microbrain_expected_calibration_error {report.expected_calibration_error}",
+        "",
+        "# HELP microbrain_abstention_rate Share of recent events escalated to a stronger system",
+        "# TYPE microbrain_abstention_rate gauge",
+        f"microbrain_abstention_rate {report.escalation_rate}",
+        "",
+        "# HELP microbrain_ood_shift_ratio Share of events flagged out-of-distribution",
+        "# TYPE microbrain_ood_shift_ratio gauge",
+        f"microbrain_ood_shift_ratio {report.ood_shift_ratio}",
+    ]
+
+    for domain, stats in (report.domain_breakdown or {}).items():
+        safe_domain = str(domain).replace('"', "")
+        lines += [
+            f'microbrain_conformal_coverage{{domain="{safe_domain}"}} {stats.get("conformal_coverage", 0.0)}',
+            f'microbrain_inference_latency_ms{{domain="{safe_domain}",stat="mean"}} {stats.get("mean_latency_ms", 0.0)}',
+        ]
+
     return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/dashboard")
 async def telemetry_dashboard():
-    """Interactive HTML+JS real-time observability dashboard."""
+    """Observability dashboard page.
+
+    Honesty note (2026-11-18): the card/table values below are STATIC DEMO
+    content, not live measurements. Machine-readable live numbers are served
+    at /metrics; this page exists for layout preview only.
+    """
     from fastapi.responses import HTMLResponse
     html_content = """<!DOCTYPE html>
 <html lang="en">
@@ -329,6 +376,7 @@ async def telemetry_dashboard():
     <title>Ouroboros Microbrain Observability Dashboard</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
+        .demo-banner { background: #7f1d1d; color: #fecaca; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
         h1 { color: #38bdf8; font-size: 24px; margin-bottom: 8px; }
         .subtitle { color: #94a3b8; margin-bottom: 24px; font-size: 14px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
@@ -343,6 +391,7 @@ async def telemetry_dashboard():
     </style>
 </head>
 <body>
+    <div class="demo-banner">&#9888; STATIC DEMO CONTENT &mdash; the numbers on this page are illustrative placeholders, not live measurements. Live machine-readable metrics: <a style="color:#fecaca" href="/metrics">/metrics</a></div>
     <h1>Ouroboros Microbrain Observability Stack</h1>
     <div class="subtitle">Live Telemetry & Conformal Calibration (Port 8080)</div>
     <div class="grid">
@@ -415,7 +464,6 @@ async def classify_intent(req: IntentRequest):
     except Exception as e:
         log.warning(f"Intent classification failed: {e}")
         intent = _simple_intent_classify(req.text)
-        return IntentResponse(intent=intent, confidence=0.5, alternatives=[])
         return IntentResponse(intent=intent, confidence=0.5, alternatives=[])
 
 
@@ -566,6 +614,113 @@ async def load_brain_endpoint(brain_name: str):
         return {"success": True, "brain": brain_name, "cached": brain_name in _brain_cache}
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Brain not found: {e}")
+
+
+# --- Robotics gating endpoint (2026-11-18) ---
+
+class GateRequest(BaseModel):
+    """Per-step VLA gating request. Barriers/u-bounds are per-request so the
+    endpoint stays stateless; risk_score is the caller's action risk estimate."""
+
+    scene: List[float] = Field(default_factory=list, description="Raw scene/observation vector (any dim)")
+    state: List[float] = Field(..., description="Robot state x (control-affine filter input)")
+    nominal_action: List[float] = Field(..., description="Action to gate")
+    risk_score: float = Field(1.0, ge=0.0, le=1.0)
+    u_min: Optional[List[float]] = None
+    u_max: Optional[List[float]] = None
+    barriers: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description='[{"type":"sphere","center":[..],"radius":r,"alpha":a}, {"type":"halfplane","a":[..],"b":c,"alpha":a}]',
+    )
+    dt: float = Field(0.05, gt=0.0)
+    conformal_margin: float = Field(0.0, ge=0.0)
+
+
+class GateResponse(BaseModel):
+    decision: str
+    action_out: List[float]
+    reason: str = ""
+    latency_ms: float = 0.0
+    safety: Dict[str, Any] = {}
+    affordances: List[Dict[str, Any]] = []
+    conformal: Dict[str, Any] = {}
+
+
+_vla_gate_singleton: Optional[Any] = None
+
+
+def _build_filter_from_request(req: "GateRequest") -> Any:
+    from .state_cbf_filter import (
+        ControlAffineDynamics,
+        HalfPlaneBarrier,
+        SphereBarrier,
+        StateCBFSafetyFilter,
+    )
+
+    state_dim = len(req.state)
+    control_dim = len(req.nominal_action)
+    dyn = ControlAffineDynamics(state_dim, control_dim)  # identity g, zero f default
+    barriers = []
+    for spec in req.barriers:
+        btype = str(spec.get("type", "")).lower()
+        alpha = float(spec.get("alpha", 0.5))
+        if btype == "sphere":
+            barriers.append(SphereBarrier(spec["center"], float(spec["radius"]), alpha=alpha))
+        elif btype == "halfplane":
+            barriers.append(HalfPlaneBarrier(spec["a"], float(spec["b"]), alpha=alpha))
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown barrier type: {btype}")
+    return StateCBFSafetyFilter(
+        dyn,
+        barriers,
+        u_min=req.u_min,
+        u_max=req.u_max,
+        conformal_margin=req.conformal_margin,
+    )
+
+
+@app.post("/microbrain/gate", response_model=GateResponse)
+async def gate_action(req: GateRequest):
+    """Gate a robot action: CBF safety -> conformal risk -> VLA-tier routing.
+
+    Uses a shared SkillLibrary singleton (affordances) rebuilt safety filters
+    per request. Honest labels are carried in the response payload.
+    """
+    global _vla_gate_singleton
+    try:
+        from .vla_gating import ConformalActionGate, SkillLibrary, VLActionGate
+
+        if _vla_gate_singleton is None:
+            _vla_gate_singleton = VLActionGate(
+                skill_library=SkillLibrary(),
+                action_gate=ConformalActionGate(),
+            )
+        else:
+            # rebuild the state-dependent safety filter for this request
+            _vla_gate_singleton.safety = _build_filter_from_request(req)
+        if _vla_gate_singleton.safety is None:
+            _vla_gate_singleton.safety = _build_filter_from_request(req)
+        _vla_gate_singleton.safety.set_conformal_margin(req.conformal_margin)
+        out = _vla_gate_singleton.gate(
+            scene_vec=req.scene,
+            state=req.state,
+            nominal_action=req.nominal_action,
+            risk_score=req.risk_score,
+        )
+        return GateResponse(
+            decision=out["decision"],
+            action_out=out["action_out"],
+            reason=out.get("reason", ""),
+            latency_ms=out.get("latency_ms", 0.0),
+            safety=out.get("safety", {}),
+            affordances=out.get("affordances", []),
+            conformal=out.get("conformal", {}),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"Gate failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Main ---

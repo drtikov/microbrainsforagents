@@ -1,5 +1,12 @@
 """Active Inference Engine — Expected Free Energy (EFE) minimization and homeostatic drive regulation.
 
+P: 2026-11-18 - naming disambiguation.  Despite the module name, this is
+NOT a sensorimotor control agent: the live surfaces are persona-drive
+EFE scoring over four archetypes plus file-backed Bayesian persona
+memory.  For a discrete categorical generative-model planner (pymdp
+A/B/C/D API shape) see ``core/pymdp_efe.py``; for state-space safety
+filtering see ``core/state_cbf_filter.py``.
+
 P: 2026-11-10 - honesty rewrite (tier-2 audit finding #30).  The old
 module shipped two APIs nobody called (a dict-form
 ``predict_state_update(state, action)`` that was keyword matching over
