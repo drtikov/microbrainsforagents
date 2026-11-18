@@ -96,6 +96,7 @@ Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-confor
 | **Edge / Offline & Air-Gapped Systems** | **Ready out-of-the-box** | Pure NumPy + Python stdlib, tiny `.npz` weights (`allow_pickle=False`), zero GPU/internet required, and PEP 562 lazy imports. |
 | **Ticket & Intent Triage (Support / IT Ops)** | **Engine ready, needs your data** | `ToolRoutingMoE.fit_from_traces()` + conformal abstention work on arbitrary text categories, **but** shipped weights target SWE/DevOps tasks—you must supply your own labeled traces. |
 | **MLOps Drift & Auditable Intake** | **Telemetry ready, needs adapter** | `upper_error_bound_95`, `drift_detected`, `recalibrate_from_decision_journal()`, `input_sha256`, `shadow_mode`, and JSONL logging are built, **but** require your domain schemas and compliance integration. |
+| **Robotics (High-Level LLM-to-ROS 2)** | **Conceptually compatible, needs adapter & data** | Fits the upper planner layer (ROS 2 skill narrowing via `narrow_tool_surface`, conformal `"ask"` on ambiguous instructions, script AST/shell gating) without using GPU VRAM; **not** for real-time servo/motor loops or hardware safety interlocks. |
 
 ---
 
