@@ -5,9 +5,9 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.7.1`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of any autonomous AI agent — from coding agents (**Claude Code**, **SWE-agent**, **Codex**) to personal/OS assistants (**OpenClaw**, **Hermes**, or custom LLM loops).
+**Aetheris Microbrains** is a super-fast, lightweight safety guard and tool router for AI agents (like **Claude Code**, **Codex**, **SWE-agent**, or custom LLM bots). 
 
-It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**.
+Think of it as an **instant pre-flight check or an "airbag" for your AI**: before an agent runs a command or applies code to your computer, Microbrains inspects it in under **2 milliseconds on your CPU**—stopping syntax bugs, leaked passwords, and dangerous commands before they ever happen.
 
 ```text
        [ User / Task ]
@@ -20,11 +20,11 @@ It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**
               ▼
    ⚡ [ AETHERIS MICROBRAINS ]  ── (<2 ms local CPU pre-flight gate)
          │
-         ├── 🛑 Blocked locally? (Syntax error, leaked secret, rm -rf, protected path)
-         │       ↳ Instant reject. Zero cloud tokens wasted. Zero broken runs.
+         ├── 🛑 Destructive or broken? (Syntax error, leaked API key, rm -rf, .env leak)
+         │       ↳ Intercepted immediately. Zero wasted tokens. Zero machine damage.
          │
-         ├── 🔍 Ambiguous / Uninspected?
-         │       ↳ Safely escalates ("ask") to human or full LLM review.
+         ├── ❓ Ambiguous / Risky?
+         │       ↳ Escalates ("ask") to the human or LLM supervisor for confirmation.
          │
          └── ✅ Verified safe?
                  ↳ Allowed to run.
@@ -34,42 +34,51 @@ It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**
 
 ## 🚀 What Is It (In Plain English)?
 
-When an AI agent writes code or executes commands, it frequently wastes time and money:
-1. **Broken Patches & Retries:** The agent makes a syntax error, leaks an API token, or invokes a destructive shell command (`rm -rf`, `curl | sh`). The runner executes it, tests fail, and the agent burns multiple expensive LLM turns just to read the traceback and retry.
-2. **Context Window Bloat:** Passing 30+ tool definitions in every single turn burns thousands of prompt tokens per step and degrades model focus.
+When AI agents work on your code or execute terminal commands, two common problems happen:
 
-**Microbrains solves this at zero LLM cost:**
-* **Instant Pre-Flight Safety Shield:** Validates code diffs with real AST parsing, checks for secrets, and parses shell commands *before* anything runs. Broken patches are intercepted in 1.3 ms.
-* **Smart Tool Pruning:** Dynamically narrows large tool catalogs down to the Top-4 most relevant tools for the current step, saving **up to 39% of schema tokens** without starving the agent of needed capabilities.
-* **Claude Code & Codex Ready:** Includes a standard `PreToolUse` hook CLI (`python -m aetheris_microbrains.hook`) that plugs right into agent workflows with full `hookSpecificOutput` compatibility.
+1. **Wasted Time & Money from Broken Actions:**  
+   The agent generates code with a syntax typo, leaks a secret token, or runs a destructive shell command (`rm -rf`, `curl | sh`). The computer crashes or tests fail, and the agent spends 3–5 expensive, slow LLM turns just reading errors and trying to fix itself.
+2. **Cluttered Context Windows:**  
+   Sending 30+ different tool definitions in every prompt wastes thousands of tokens per step, runs up your API bill, and confuses the model.
 
-> **What it is NOT:** Microbrains is **not** an LLM that writes code from scratch, and it does not replace an OS sandbox. It is an ultra-fast structural filter and router designed to make your agent faster, cheaper, and safer.
+### How Microbrains Helps:
+* 🛡️ **Instant Safety Shield:** It checks code diffs using real Python syntax trees and scans shell commands *before* execution. If a patch has a syntax error or a destructive command, it stops it in **1.3 ms** on your CPU.
+* ✂️ **Smart Tool Trimming:** Shrinks huge lists of tools down to the top 4 most relevant tools for the current step, saving **up to ~39% in prompt tokens**.
+* 🔌 **Drop-in Ready:** Plugs straight into **Claude Code** and **Codex** using a single hook command (`python -m aetheris_microbrains.hook`).
+* ⚡ **Runs on Any Laptop:** Written in pure Python and NumPy with zero GPU or cloud dependencies.
+
+> **What it is NOT:** Microbrains is **not** an LLM itself, and it doesn't write code from scratch. It is a guardrail and router that makes your existing agents faster, safer, and cheaper to run.
 
 ---
 
 ## 🤝 Compatible Agent Ecosystems
 
-Microbrains is architecturally independent of any specific LLM provider or orchestration framework. Below is the exact integration status today:
+Microbrains works alongside any AI agent or framework:
 
-| Category | Agents & Frameworks | Integration Status | What Microbrains Covers (and Does Not Cover) |
+| Category | Agents & Frameworks | Integration Status | What Microbrains Does |
 | :--- | :--- | :--- | :--- |
-| **Claude Code & `PreToolUse` Harnesses** | **Claude Code** (≥ 2.1.295 for `onFailure: "block"`), **Codex** | **Built-in CLI Hook** (`python -m aetheris_microbrains.hook`) | Pre-flight AST/secret/shell filter on individual tool calls (`allow` passes through to user prompts, `ask` escalates, `deny` blocks). Not an OS/network sandbox. |
-| **Coding Agents** | **SWE-agent** / **mini-SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Custom Adapter** (`mb.decide(...)`) | Catches malformed syntax, leaked secrets, and destructive commands in diffs/commands before test execution. Does not audit full repos or verify test logic. |
-| **Personal & Desktop OS Assistants** | **OpenClaw**, **Hermes Agent**, **Goose**, **Computer Use Agents** | **Python API / Custom Adapter** | Protects `.env`, `.git/hooks/`, `.ssh/` paths, blocks destructive shell chains, and escalates uninspected external calls to `"ask"`. Must be paired with OS/process permissions. |
-| **Orchestration & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Custom Adapter** (`mb.narrow_tool_surface(...)`) | Shrinks tool-schema tokens per turn; `ask` is a client-side prompt (not a server-side MCP permission boundary), and schema pruning does not cap total steps or session spend. |
+| **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook** (`python -m aetheris_microbrains.hook`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
+| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Adapter** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
+| **Personal & Desktop OS Assistants** | **OpenClaw**, **Hermes Agent**, **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
+| **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Adapter** (`mb.narrow_tool_surface(...)`) | Prunes tool schemas per turn to cut token costs without starving agents of tools. |
 
 ---
 
 ## 💡 Key Benefits
 
-### 1. 💰 Lower API Bills & Fewer Wasted Turns
-Catching malformed code, invalid syntax, and leaked keys locally in 1.3 ms prevents paying cloud token fees for broken execution cycles and costly model retries.
+### 1. 💰 Lower API Bills & No Wasted Loops
+Catching broken syntax, missing variables, or leaked keys locally in 1.3 ms stops the agent from executing broken code and spending $0.10–$0.50 per retry turn.
 
-### 2. 🛡️ Strong Local Protection
-Guards sensitive files (`.env*`, `.git/hooks/`, `.ssh/`, `credentials.json`), blocks obfuscated code injection (`eval`, `exec`, `getattr`, base64 execution), and vetoes destructive terminal commands before they hit your machine.
+### 2. 🛡️ Protects Your Machine & Secrets
+Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destructive commands (`rm -rf`, `DROP DATABASE`), and catches hidden code execution tricks (`eval`, `base64` decode into `exec`).
 
-### 3. ⚡ Zero Lag (<2 ms CPU Latency)
-Pure NumPy with zero GPU required. The checks run in microseconds to under 2 milliseconds on standard laptop hardware—adding virtually zero overhead to seconds-long LLM calls.
+### 3. ⏱️ Blazing Fast (<2 ms Latency)
+Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
+
+### 4. 🧭 Reliable Escalations & Audit Trail (`v0.7.1`)
+- **Safe Timeout Contracts:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission.
+- **Clean Audit Journals:** Decision logs on disk (`decision_journal.jsonl`) automatically redact secrets, mask error strings, and are locked down to owner-only permissions (`0600`).
+- **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows if it's inspecting complete context.
 
 ---
 
