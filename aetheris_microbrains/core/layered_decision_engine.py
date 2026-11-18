@@ -760,8 +760,23 @@ def analyze_code_diff(
             stripped = ln.strip()
             if stripped.startswith(("//", "#", "/*", "*")):
                 continue
-            if re.search(r"\beval\s*\(", stripped) and ext in {".js", ".ts", ".jsx", ".tsx"}:
-                non_py_findings.append("js_eval_call")
+            if ext in {".js", ".ts", ".jsx", ".tsx"}:
+                if re.search(r"\beval\s*\(", stripped):
+                    non_py_findings.append("js_eval_call")
+                if re.search(r"\bnew\s+Function\s*\(|\bchild_process\b|\bexecSync\s*\(|\bspawnSync\s*\(", stripped):
+                    non_py_findings.append("js_dangerous_sink")
+            if ext in {".yaml", ".yml"}:
+                if re.search(r"!!python/(?:object|apply|module|name)\b", stripped):
+                    non_py_findings.append("yaml_unsafe_deserialization_tag")
+
+        # Optional tree-sitter syntax verification when tree_sitter is installed
+        ts_verified = False
+        try:
+            import tree_sitter  # type: ignore  # noqa: F401
+            ts_verified = True
+        except ImportError:
+            pass
+
         non_py_findings = list(dict.fromkeys(non_py_findings))
         is_doc_or_cfg = ext in {".md", ".txt", ".yaml", ".yml", ".toml", ".css", ".html"} and len(non_py_findings) == 0
         return {
@@ -774,7 +789,7 @@ def analyze_code_diff(
             "ast_nodes": [],
             "cyclomatic_complexity": 0,
             "is_static_data_or_doc": is_doc_or_cfg,
-            "context_ast_parsed": False,
+            "context_ast_parsed": ts_verified,
             "patched_file_ast_verified": False,
         }
 

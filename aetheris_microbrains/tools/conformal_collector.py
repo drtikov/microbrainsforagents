@@ -451,8 +451,25 @@ _DOMAIN_TRAIN_SPECS: Dict[str, SampleList] = {
 }
 
 
+def _balanced_mondrian_anchors(pairs: SampleList, min_per_class: int, min_total: int) -> SampleList:
+    """Sample anchors round-robin per class so every Mondrian class has >= min_per_class samples."""
+    by_cls: Dict[str, SampleList] = {}
+    for toks, tgt in pairs:
+        by_cls.setdefault(tgt, []).append((toks, tgt))
+    classes = sorted(by_cls.keys())
+    if not classes:
+        return []
+    per_cls = max(min_per_class, math.ceil(min_total / float(len(classes))))
+    anchors: SampleList = []
+    for k in range(per_cls):
+        for cls in classes:
+            bucket = by_cls[cls]
+            anchors.append(bucket[k % len(bucket)])
+    return anchors
+
+
 def _generate_active_core_datasets() -> Dict[str, List[Tuple[List[str], str]]]:
-    """Assemble disjoint datasets per domain (30+ train, 120 calibration, 40 validation)."""
+    """Assemble disjoint datasets per domain (>= 25 cal/class, >= 120 cal total, 40 validation)."""
     datasets: Dict[str, List[Tuple[List[str], str]]] = {}
     for domain, train_rows in _DOMAIN_TRAIN_SPECS.items():
         # Resolve exact post-compile trigger -> target mapping so cal/val anchors are consistent
@@ -464,8 +481,7 @@ def _generate_active_core_datasets() -> Dict[str, List[Tuple[List[str], str]]]:
             ([tok], tgt) for tok, tgt in compiled_map.items()
         ]
         n_ct = len(consistent_triggers)
-        # Space 120 calibration anchors and 40 validation anchors evenly across the domain spectrum
-        cal_anchors = [consistent_triggers[(i * n_ct) // 120] for i in range(120)]
+        cal_anchors = _balanced_mondrian_anchors(consistent_triggers, min_per_class=25, min_total=120)
         val_anchors = [consistent_triggers[((i * n_ct) // 40 + 3) % n_ct] for i in range(40)]
         splits = _build_disjoint_domain_dataset(
             train_samples=train_rows,
@@ -497,6 +513,7 @@ class ConformalCalibrationReport:
     conformal_guarantee_valid: bool = False
     coverage_std_error: float = 0.0
     upper_error_bound_rule_of_3: float = 0.0
+    min_per_class_cal_samples: int = 0
     per_class_quantiles: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -509,10 +526,12 @@ class ConformalCalibrationReport:
             "n_train": self.n_train_samples,
             "n_calibration": self.n_calibration_samples,
             "n_validation": self.n_validation_samples,
+            "min_per_class_cal_samples": self.min_per_class_cal_samples,
             "empirical_coverage": round(self.empirical_coverage, 3),
             "coverage_std_error": round(self.coverage_std_error, 4),
             "upper_error_bound_rule_of_3": round(self.upper_error_bound_rule_of_3, 4),
             "passed_gate": self.passed_coverage_gate,
+            "conformal_set_valid": self.conformal_guarantee_valid,
             "conformal_guarantee_valid": self.conformal_guarantee_valid,
         }
 
@@ -729,7 +748,7 @@ def calibrate_auxiliary_fleet(
             continue
 
         n_rp = len(rule_pairs)
-        cal_anchors = [rule_pairs[(i * n_rp) // 120] for i in range(120)]
+        cal_anchors = _balanced_mondrian_anchors(rule_pairs, min_per_class=25, min_total=120)
         val_anchors = [rule_pairs[((i * n_rp) // 40 + 1) % n_rp] for i in range(40)]
 
         # Disjoint calibration & validation splits (exact exchangeable 1/3 clean + 2/3 OOD-prefixed)
@@ -759,6 +778,11 @@ def calibrate_auxiliary_fleet(
         cov_std = math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(len(cal_data) + 2))
         upper_r3 = 3.0 / float(len(val_data))
 
+        cls_counts: Dict[str, int] = {}
+        for _, tgt in cal_data:
+            cls_counts[tgt] = cls_counts.get(tgt, 0) + 1
+        min_cls_cal = min(cls_counts.values()) if cls_counts else 0
+
         reports.append(
             ConformalCalibrationReport(
                 domain=domain,
@@ -773,6 +797,7 @@ def calibrate_auxiliary_fleet(
                 conformal_guarantee_valid=len(cal_data) >= min_req,
                 coverage_std_error=round(cov_std, 4),
                 upper_error_bound_rule_of_3=round(upper_r3, 4),
+                min_per_class_cal_samples=min_cls_cal,
                 per_class_quantiles=dict(getattr(brain, "per_class_quantiles", {})),
             )
         )
@@ -809,7 +834,8 @@ def run_conformal_calibration_pipeline(
 
     for domain, samples in ACTIVE_CORE_DATASETS.items():
         n_train = len(_DOMAIN_TRAIN_SPECS.get(domain, [])) or int(len(samples) * 0.46)
-        n_cal = 120 if len(samples) >= n_train + 160 else int((len(samples) - n_train) * 0.75)
+        n_val_target = 40
+        n_cal = max(120, len(samples) - n_train - n_val_target)
         train_data = samples[:n_train]
         cal_data = samples[n_train : n_train + n_cal]
         val_data = samples[n_train + n_cal :]

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aetheris-microbrains"
-version = "0.6.5"
-description = "Sub-2ms pure-NumPy 4-layer pre-flight safety, full-file AST/strict-allowlist/secret/shell guard, PreToolUse hook & semantic-hybrid MCP-Zero router (v0.6.5): 97.4% Recall@4 (39.7% net tokens saved after retries), 42/42 alpha=0.05 calibration (n_cal=120), Clopper-Pearson bounds & drift monitor"
+version = "0.6.7"
+description = "Sub-2ms pure-NumPy 4-layer pre-flight safety, full-file AST/strict-allowlist/YAML/JS/secret/shell guard, PreToolUse hook & trace-trainable MCP-Zero router (v0.6.6): 97.4% Recall@4 (<=11.9% CP95 drop bound, 39.6% net tokens saved after retries), 42/42 Mondrian alpha=0.05 calibration (>=25/class, n_cal=120..550)"
 readme = "README.md"
 authors = [
     { name = "Dmitry Tikov", email = "drtikov@gmail.com" }

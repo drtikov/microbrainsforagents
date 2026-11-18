@@ -215,6 +215,65 @@ class ToolRoutingMoE:
         W = np.linalg.solve(gram, X.T @ Y)
         return W.astype(np.float32)
 
+    def fit_from_traces(
+        self,
+        traces: Sequence[Dict[str, Any]],
+        l2_reg: float = 0.25,
+        blend_with_prior: float = 0.35,
+    ) -> Dict[str, Any]:
+        """Fit gating weights W_gate from real agent `(query, tool)` execution traces.
+
+        Solves closed-form L2 ridge regression on recorded agent trajectories and
+        re-calibrates per-expert split-conformal quantiles.
+        """
+        n_experts = len(self.EXPERTS)
+        tool_to_expert: Dict[str, int] = {}
+        for e_idx, expert_name in enumerate(self.EXPERTS):
+            for t_name in self.EXPERT_TOOLS.get(expert_name, ()):
+                tool_to_expert[t_name] = e_idx
+
+        rows: List[np.ndarray] = []
+        targets: List[np.ndarray] = []
+        experts_seen: set[str] = set()
+        for tr in traces:
+            if not isinstance(tr, dict):
+                continue
+            q = str(tr.get("query") or tr.get("task_prompt") or "").strip()
+            tool = str(tr.get("tool") or tr.get("selected_tool") or tr.get("expected_tool") or "").strip()
+            e_idx = tool_to_expert.get(tool)
+            if e_idx is None and tr.get("expert") in self.EXPERTS:
+                e_idx = self.EXPERTS.index(str(tr["expert"]))
+            if not q or e_idx is None:
+                continue
+            toks = [t for t in re.findall(r"(?u)\b\w+\b", q.lower()) if len(t) > 1]
+            if not toks:
+                continue
+            rows.append(self._embed_context(toks))
+            y_vec = np.zeros(n_experts, dtype=np.float64)
+            y_vec[e_idx] = 1.0
+            targets.append(y_vec)
+            experts_seen.add(self.EXPERTS[e_idx])
+
+        if not rows:
+            return {"n_traces": 0, "experts_updated": [], "train_top1_acc": 0.0}
+
+        X = np.stack(rows, axis=0).astype(np.float64)
+        Y = np.stack(targets, axis=0).astype(np.float64)
+        gram = X.T @ X + float(l2_reg) * np.eye(self.d_model, dtype=np.float64)
+        W_traces = np.linalg.solve(gram, X.T @ Y).astype(np.float32)
+        blend = max(0.0, min(1.0, float(blend_with_prior)))
+        self.W_gate = ((1.0 - blend) * W_traces + blend * self.W_gate).astype(np.float32)
+        self._calibrate_expert_quantiles(alpha=0.05)
+
+        preds = np.argmax(X @ self.W_gate, axis=1)
+        truth = np.argmax(Y, axis=1)
+        acc = float(np.mean(preds == truth))
+        return {
+            "n_traces": len(rows),
+            "experts_updated": sorted(experts_seen),
+            "train_top1_acc": round(acc, 4),
+        }
+
     def _compute_raw_gate_logits(self, tokens: List[str], ctx_vec: np.ndarray) -> Tuple[np.ndarray, int]:
         """Shared deterministic gating logits computation used by calibration and inference."""
         proto_sims = np.dot(ctx_vec, self.W_trigram_proto)

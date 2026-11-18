@@ -15,6 +15,7 @@ ones the kernel and the tests actually pin.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .atomic import atomic_read, atomic_write
@@ -91,19 +92,42 @@ ACTION_TRANSITION_PRIORS: Dict[str, Dict[str, float]] = {
 
 _DEFAULT_CATEGORY = "generic_action"
 
+_NEGATION_TOKENS = {
+    "not", "don't", "dont", "do", "didn't", "didnt", "never",
+    "avoid", "skip", "without", "no", "не", "без", "перестань",
+}
+
+
+def _has_negation_prefix(text: str, match_start: int, window: int = 4) -> bool:
+    """Return True if a negation particle appears within `window` words before `match_start`."""
+    preceding = text[:match_start].lower()
+    tokens = [tok for tok in re.split(r"[\s,;:.!?()\[\]\"]+", preceding.strip()) if tok]
+    if not tokens:
+        return False
+    return any(tok in _NEGATION_TOKENS for tok in tokens[-window:])
+
+
+def _has_unnegated_keyword(text: str, keywords: Tuple[str, ...]) -> bool:
+    for kw in keywords:
+        start = 0
+        while True:
+            idx = text.find(kw, start)
+            if idx == -1:
+                break
+            if not _has_negation_prefix(text, idx):
+                return True
+            start = idx + len(kw)
+    return False
+
 
 def _action_category(text: str) -> str:
-    """Map goal/prompt text to an action category.
-
-    Declared keyword heuristic over an observable property of the task
-    text; it is the model's category prior, not a measured intent.
-    """
+    """Map goal/prompt text to an action category, ignoring negated clauses."""
     t = str(text or "").lower()
-    if any(k in t for k in ("fix", "repair", "bug", "error", "debug", "broken")):
+    if _has_unnegated_keyword(t, ("fix", "repair", "bug", "error", "debug", "broken")):
         return "careful_repair"
-    if any(k in t for k in ("how", "why", "analy", "breakdown", "explain", "question")):
+    if _has_unnegated_keyword(t, ("how", "why", "analy", "анализ", "breakdown", "explain", "question")):
         return "logical_breakdown"
-    if any(k in t for k in ("build", "implement", "create", "write", "optimi", "deploy")):
+    if _has_unnegated_keyword(t, ("build", "implement", "create", "write", "optimi", "deploy")):
         return "focused_execution"
     return _DEFAULT_CATEGORY
 

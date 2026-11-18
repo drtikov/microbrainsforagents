@@ -633,6 +633,8 @@ class AnalyticalMicroTransformer:
             "calibrated": not uncalibrated,
             "calibration_basis": "uncalibrated_default" if uncalibrated else self.conformal_basis,
             "n_calibration_samples": n_cal,
+            "conformal_set_valid": guarantee_valid,
+            "coverage_target": round(1.0 - float(effective_alpha), 4),
             "conformal_guarantee_valid": guarantee_valid,
             "weights_sha256": getattr(self, "weights_sha256", None),
             "alpha": effective_alpha,

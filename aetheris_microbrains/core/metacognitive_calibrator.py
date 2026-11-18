@@ -60,6 +60,8 @@ class CalibratedConfidence:
     should_proceed: bool
     epistemic_recommendation: str
     neural_signal: Optional[str] = None
+    q_hat: float = 0.15
+    conformal_basis: str = "empirical_fallback"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +74,8 @@ class CalibratedConfidence:
             "conformal_set": self.conformal_set,
             "conformal_set_size": self.conformal_set_size,
             "coverage_guarantee": self.coverage_guarantee,
+            "q_hat": round(self.q_hat, 4),
+            "conformal_basis": self.conformal_basis,
             "verdict": self.verdict.value,
             "should_proceed": self.should_proceed,
             "epistemic_recommendation": self.epistemic_recommendation,
@@ -123,17 +127,20 @@ def calibrate_action_confidence(
 
     # Empirical Conformal Quantile Lookup from Model Metadata
     q_hat = None
+    conformal_basis = "empirical_fallback"
     try:
         from .analytical_micro_transformer import AnalyticalMicroTransformer
         cal_model = AnalyticalMicroTransformer.load("neuro_metacognitive_calibrator")
         if cal_model and getattr(cal_model, "conformal_quantile", None) is not None:
             q_hat = float(cal_model.conformal_quantile)
+            conformal_basis = str(getattr(cal_model, "conformal_basis", "held_out"))
     except Exception:
         q_hat = None
 
     if q_hat is None or q_hat <= 0.0 or q_hat >= 1.0:
         # Calibrated empirical fallback from validation distribution (not arbitrary 1 - alpha)
         q_hat = 0.15  # Empirical held-out nonconformity threshold at alpha=0.10
+        conformal_basis = "empirical_fallback"
 
     # Consult Neural Microbrain using in-vocabulary structural uncertainty features BEFORE finalizing conformal set
     neural_sig: Optional[str] = None
@@ -205,4 +212,6 @@ def calibrate_action_confidence(
         should_proceed=should_proceed,
         epistemic_recommendation=rec,
         neural_signal=neural_sig,
+        q_hat=q_hat,
+        conformal_basis=conformal_basis,
     )

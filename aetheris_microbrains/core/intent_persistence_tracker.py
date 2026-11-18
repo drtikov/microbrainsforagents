@@ -19,6 +19,37 @@ from typing import Any, Dict, List, Optional, Set
 log = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"(?u)\b\w{3,}\b")
+_NEGATION_WORDS = {
+    "not", "don't", "dont", "didn't", "didnt", "never",
+    "avoid", "skip", "without", "no", "не", "без", "перестань",
+}
+
+
+def _extract_negated_terms(text: str, window: int = 3) -> Set[str]:
+    """Return keywords that are preceded by a negation particle within `window` tokens."""
+    low = str(text or "").lower()
+    raw_tokens = [m.group(0) for m in re.finditer(r"(?u)\b\w+(?:'\w+)?\b", low)]
+    negated: Set[str] = set()
+    for idx, tok in enumerate(raw_tokens):
+        if len(tok) >= 3:
+            prev = raw_tokens[max(0, idx - window):idx]
+            if any(p in _NEGATION_WORDS for p in prev):
+                negated.add(tok)
+    return negated
+
+
+def _trigram_cosine_similarity(a: str, b: str) -> float:
+    """Lightweight deterministic character-trigram similarity in [0, 1]."""
+    def _tris(s: str) -> Set[str]:
+        clean = re.sub(r"\s+", " ", s.lower().strip())
+        if len(clean) < 3:
+            return {clean} if clean else set()
+        return {clean[i:i + 3] for i in range(len(clean) - 2)}
+
+    ta, tb = _tris(a), _tris(b)
+    if not ta or not tb:
+        return 0.0
+    return float(len(ta & tb)) / ((len(ta) * len(tb)) ** 0.5)
 
 
 def _extract_keywords(text: str) -> Set[str]:
@@ -112,12 +143,21 @@ class IntentPersistenceTracker:
         self.action_history.append(action_summary[:120])
 
         current_terms = _extract_keywords(combined_current)
-        overlap = _stem_overlap(self.root_terms, current_terms)
+        negated_current = _extract_negated_terms(combined_current)
+        negated_roots = _stem_overlap(self.root_terms, negated_current)
+        positive_current = current_terms - negated_current
+        overlap = _stem_overlap(self.root_terms, positive_current)
 
-        # Baseline Semantic Distance (1.0 - Jaccard overlap on root keywords)
+        # Baseline Semantic Distance with negation penalty & paraphrase trigram floor
         if self.root_terms:
             overlap_ratio = len(overlap) / max(1, len(self.root_terms))
-            instant_drift = max(0.0, 1.0 - overlap_ratio)
+            if negated_roots:
+                instant_drift = min(1.0, max(0.55, 1.0 - overlap_ratio + 0.35 * (len(negated_roots) / max(1, len(self.root_terms)))))
+            else:
+                instant_drift = max(0.0, 1.0 - overlap_ratio)
+                if not overlap:
+                    sem_sim = _trigram_cosine_similarity(self.root_goal, combined_current)
+                    instant_drift = min(instant_drift, max(0.25, 1.0 - 1.5 * sem_sim))
         else:
             instant_drift = 0.0
 
@@ -149,11 +189,18 @@ class IntentPersistenceTracker:
                 if pre_drift
                 else ["action_vector_concordant", "context_amnesia_prevented"]
             )
-            from .brain_moe_orchestrator import consult_microbrain
+            try:
+                from .brain_moe_orchestrator import consult_microbrain
+            except ImportError:
+                from aetheris_microbrains.core.brain_moe_orchestrator import consult_microbrain
 
             res = consult_microbrain("intent_persistence_tracker", tokens)
             if isinstance(res, dict) and not res.get("abstained", False):
                 neural_sig = res.get("prediction")
+            drift_res = consult_microbrain("drift_detector", ["kl_divergence_spike"] if pre_drift else ["stable_distribution"])
+            if isinstance(drift_res, dict) and not drift_res.get("abstained", False) and drift_res.get("prediction"):
+                d_pred = str(drift_res["prediction"])
+                neural_sig = f"{neural_sig} | drift:{d_pred}" if neural_sig else f"drift:{d_pred}"
         except Exception as exc:
             log.debug("Intent neural consultation skipped: %s", exc)
 
@@ -174,8 +221,8 @@ class IntentPersistenceTracker:
             reanchor_directive = (
                 f"[DYNAMIC CONTEXT RE-ANCHORING DIRECTIVE]:\n"
                 f"1. Root Objective: \"{self.root_goal}\"\n"
-                f"2. Divergent Behavior: Currently chasing '{action_summary[:80]}'.\n"
-                f"3. Corrective Action: Abandon secondary rabbits. Re-center immediately on primary goal."
+                f"2. Observed Shift: Current step '{action_summary[:80]}' has low overlap with root keywords.\n"
+                f"3. Observation: Verify alignment with the primary objective or continue if this is an intentional sub-step."
             )
 
         return IntentDriftAssessment(

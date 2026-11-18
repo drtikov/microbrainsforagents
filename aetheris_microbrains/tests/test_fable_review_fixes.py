@@ -701,6 +701,139 @@ def test_fable_26_pretooluse_hook_cli():
     assert out["permissionDecision"] == "ask"
 
 
+def test_fable_27_mondrian_per_class_cal_sizing():
+    import json
+
+    meta_files = sorted((PKG_DIR / "memory" / "store" / "neuro_brains").glob("*_meta.json"))
+    assert len(meta_files) == 42
+    max_cal = 0
+    for mf in meta_files:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        n_cal = data.get("n_calibration_samples", 0)
+        assert n_cal >= 120, f"{mf.name} n_cal={n_cal}"
+        max_cal = max(max_cal, n_cal)
+    assert max_cal >= 200
+
+
+def test_fable_28_fit_from_traces_and_baseline_comparison():
+    import importlib.util
+
+    moe = mb.ToolRoutingMoE(d_model=256)
+    traces = [
+        {"query": "read source file config.py", "tool": "repo_read"},
+        {"query": "inspect lines in server.py", "tool": "repo_read"},
+        {"query": "commit staged bugfix changes", "tool": "git_commit"},
+        {"query": "run pytest unit tests", "tool": "run_tests"},
+        {"query": "execute shell command ls", "tool": "execute_shell"},
+    ] * 4
+    fit_rep = moe.fit_from_traces(traces)
+    assert fit_rep["n_traces"] == 20
+    assert fit_rep["train_top1_acc"] >= 0.80
+    assert moe.route("commit staged bugfix changes").selected_tool in {"git_commit", "repo_write"}
+
+    bench_path = PKG_DIR.parent / "examples" / "06_real_llm_ab_benchmark.py"
+    spec = importlib.util.spec_from_file_location("bench06_b", str(bench_path))
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rows = mod.evaluate_baselines_comparison(top_k=4)
+    assert len(rows) == 3
+    mb_row = next(r for r in rows if "Microbrains" in r["baseline"])
+    assert mb_row["recall_at_k_pct"] >= 95.0
+    assert mb_row["cp95_upper_drop_pct"] < 15.0
+
+
+def test_fable_29_non_python_yaml_js_hardening():
+    yaml_bad = mb.decide({
+        "tool": "edit_file",
+        "path": "config/deploy.yaml",
+        "diff": "payload: !!python/object/apply:os.system ['id']\n",
+    })
+    assert yaml_bad["decision"] == "deny"
+    assert yaml_bad["label"] == "yaml_unsafe_deserialization_tag"
+
+    js_bad = mb.decide({
+        "tool": "edit_file",
+        "path": "src/runner.ts",
+        "diff": "const cp = require('child_process'); cp.execSync(cmd);\n",
+    })
+    assert js_bad["decision"] == "deny"
+    assert js_bad["label"] == "js_dangerous_sink"
+
+
+def test_fable_30_conformal_set_valid_and_coverage_target():
+    res = mb.microbrain_consult("syntax error in AST parser during code edit")
+    assert res["conformal_set_valid"] is True
+    assert res["coverage_target"] == 0.95
+    assert res["conformal_guarantee_valid"] is True
+    assert isinstance(res["prediction_set"], list)
+
+
+def test_fable_31_active_inference_negation_protection():
+    from aetheris_microbrains.core.active_inference import _action_category
+
+    assert _action_category("build a new router") == "focused_execution"
+    assert _action_category("don't build it yet") == "generic_action"
+    assert _action_category("I don't need a full breakdown") == "generic_action"
+    assert _action_category("не анализируй это пока") == "generic_action"
+    assert _action_category("анализируй это") == "logical_breakdown"
+
+
+def test_fable_32_intent_tracker_negation_and_observational_directive():
+    from aetheris_microbrains.core.intent_persistence_tracker import IntentPersistenceTracker
+
+    tracker = IntentPersistenceTracker("почини баг логина")
+    # Negated refusal must NOT score 0.0 drift
+    neg_ru = tracker.register_step("не чини баг, просто отчитайся")
+    assert neg_ru.drift_score >= 0.40
+    assert "чини" not in neg_ru.overlapping_terms
+
+    tracker_en = IntentPersistenceTracker("fix the login bug")
+    neg_en = tracker_en.register_step("don't fix the bug, just report it")
+    assert neg_en.drift_score >= 0.40
+    assert "fix" not in neg_en.overlapping_terms
+
+    # Observational directive (no imperative 'Abandon secondary rabbits')
+    tracker_en.register_step("unrelated weather chat")
+    drift_turn = tracker_en.register_step("completely off-topic cooking recipe")
+    if drift_turn.reanchoring_directive:
+        assert "Abandon secondary rabbits" not in drift_turn.reanchoring_directive
+
+
+def test_fable_33_metacognitive_calibrator_q_hat_provenance():
+    from aetheris_microbrains.core.metacognitive_calibrator import calibrate_action_confidence
+
+    res = calibrate_action_confidence("regex_replace", raw_confidence=0.97, context_familiarity=0.3).to_dict()
+    assert "q_hat" in res
+    assert res["conformal_basis"] in {"held_out", "empirical_fallback"}
+    assert 0.0 < res["q_hat"] < 1.0
+
+
+def test_fable_34_cascade_escalation_payload_on_block_verdicts():
+    from aetheris_microbrains.core.cascade_ensemble import CascadeEnsembleRouter
+
+    router = CascadeEnsembleRouter()
+    blocked_const = router.evaluate_action_pipeline(
+        task_prompt="edit protected bible",
+        target_tool="write_file",
+        tool_args={"path": "memory/bible.md", "diff": "+# x\n"},
+    )
+    assert blocked_const.verdict == "BLOCKED_CONSTITUTIONAL"
+    assert blocked_const.escalation_payload is not None
+    assert blocked_const.escalation_payload["delegate_to"] == "HUMAN_SUPERVISOR"
+
+    blocked_suki = router.evaluate_action_pipeline(
+        task_prompt="run destructive shell",
+        target_tool="execute_shell",
+        tool_args={"cmd": "rm -rf /"},
+    )
+    assert blocked_suki.verdict == "BLOCKED_PRECONDITION_SUKI"
+    assert blocked_suki.escalation_payload is not None
+    assert blocked_suki.escalation_payload["delegate_to"] == "POLICY_REVIEWER"
+
+
+
+
 
 
 

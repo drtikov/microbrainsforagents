@@ -332,6 +332,83 @@ def run_live_llm_ab(
     }
 
 
+def evaluate_baselines_comparison(
+    top_k: int = 4,
+    context_tokens_per_retry: int = 1200,
+) -> List[Dict[str, Any]]:
+    """Compare Microbrains Top-K vs. Naive Keyword and Embedding+Ridge Baselines."""
+    import numpy as np
+
+    schemas = build_32_tool_schemas()
+    schema_by_name = {s["function"]["name"]: s for s in schemas}
+    all_names = list(schema_by_name.keys())
+    full_tokens = count_schema_tokens(schemas)
+    tasks = [t for t in build_external_40_tasks() if t["expected_tool"] != "OOD_NO_TOOL"]
+    descriptions = {s["function"]["name"]: s["function"]["description"] for s in schemas}
+
+    # Build Embedding + Ridge Classifier baseline trained solely on tool descriptions
+    moe = mb.get_tool_routing_moe()
+    X_train = np.stack([
+        moe._embed_context(re.findall(r"(?u)\b\w+\b", f"{n.replace('_', ' ')} {descriptions[n]}".lower()))
+        for n in all_names
+    ], axis=0).astype(np.float64)
+    Y_train = np.eye(len(all_names), dtype=np.float64)
+    W_ridge = np.linalg.solve(X_train.T @ X_train + 0.25 * np.eye(X_train.shape[1]), X_train.T @ Y_train)
+
+    def _run_selector(name: str, select_fn: Any) -> Dict[str, Any]:
+        dropped = 0
+        gross_toks = 0
+        retry_toks = 0
+        lat_ms: List[float] = []
+        for task in tasks:
+            t0 = time.perf_counter_ns()
+            cands = select_fn(task["query"])
+            lat_ms.append((time.perf_counter_ns() - t0) / 1_000_000.0)
+            gross_toks += count_schema_tokens([schema_by_name[c] for c in cands if c in schema_by_name])
+            if task["expected_tool"] not in cands:
+                dropped += 1
+                retry_toks += full_tokens + context_tokens_per_retry
+        n_tasks = len(tasks)
+        unfiltered = n_tasks * full_tokens
+        net_saved_pct = (1.0 - ((gross_toks + retry_toks) / float(unfiltered))) * 100.0
+        drop_pct = (dropped / float(n_tasks)) * 100.0
+        cp_upper = mb.AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(dropped, n_tasks, alpha=0.05) * 100.0
+        lat_ms.sort()
+        return {
+            "baseline": name,
+            "recall_at_k_pct": round(100.0 - drop_pct, 1),
+            "dropped": f"{dropped}/{n_tasks}",
+            "drop_rate_pct": round(drop_pct, 1),
+            "cp95_upper_drop_pct": round(cp_upper, 1),
+            "net_saved_pct": round(net_saved_pct, 1),
+            "p95_ms": round(lat_ms[int(len(lat_ms) * 0.95)], 3),
+        }
+
+    def _kw_select(q: str) -> List[str]:
+        q_toks = set(re.findall(r"(?u)\b\w+\b", q.lower()))
+        scored = []
+        for n in all_names:
+            d_toks = set(re.findall(r"(?u)\b\w+\b", f"{n.replace('_', ' ')} {descriptions[n]}".lower()))
+            scored.append((len(q_toks & d_toks), n))
+        scored.sort(key=lambda x: -x[0])
+        return [n for _, n in scored[:top_k]]
+
+    def _emb_ridge_select(q: str) -> List[str]:
+        q_vec = moe._embed_context(re.findall(r"(?u)\b\w+\b", q.lower()))
+        logits = q_vec @ W_ridge
+        top_idx = np.argsort(logits)[::-1][:top_k]
+        return [all_names[int(i)] for i in top_idx]
+
+    def _mb_select(q: str) -> List[str]:
+        return mb.narrow_tool_surface(q, available_tools=all_names, top_k=top_k, tool_descriptions=descriptions)["candidate_tools"]
+
+    return [
+        _run_selector("Naive Keyword Top-4", _kw_select),
+        _run_selector("Embedding + Ridge Top-4", _emb_ridge_select),
+        _run_selector("Microbrains Top-4 (Hybrid)", _mb_select),
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="External Tool-Drop Rate & Live-LLM A/B Benchmark")
     parser.add_argument("--live", action="store_true", help="Run real LLM A/B test via OpenAI-compatible API")
@@ -351,6 +428,15 @@ def main() -> None:
             f"| {row['top_k']} | {row['recall_at_k_pct']}% | {row['drop_rate_pct']}% ({row['dropped']}/{row['tasks']}) | "
             f"{row['escalated_full_count']}/{row['tasks']} | {row['ood_escalated']} | "
             f"{row['gross_saved_pct']}% | {row['net_saved_pct']}% | {row['p95_ms']:.3f} ms |"
+        )
+
+    print("\n=== Baseline Comparison (Top-4 on 38 External Tasks) ===")
+    print("| Architecture | Recall@4 | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for b in evaluate_baselines_comparison(top_k=4):
+        print(
+            f"| {b['baseline']} | {b['recall_at_k_pct']}% | {b['dropped']} | "
+            f"{b['drop_rate_pct']}% | <= {b['cp95_upper_drop_pct']}% | {b['net_saved_pct']}% | {b['p95_ms']:.3f} ms |"
         )
 
     if args.live:

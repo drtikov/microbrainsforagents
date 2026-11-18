@@ -351,8 +351,26 @@ class CascadeEnsembleRouter:
         escalation_payload: Optional[Dict[str, Any]] = None
         if not const_passed:
             verdict_str = "BLOCKED_CONSTITUTIONAL"
+            escalation_payload = {
+                "target_tool": target_tool,
+                "tool_args": tool_args,
+                "task_prompt": task_prompt,
+                "bottleneck_tier": "Tier3_ConstitutionalGate",
+                "bottleneck_confidence": bottleneck_conf,
+                "reasons": list(reasons),
+                "delegate_to": "HUMAN_SUPERVISOR",
+            }
         elif not suki_passed:
             verdict_str = "BLOCKED_PRECONDITION_SUKI"
+            escalation_payload = {
+                "target_tool": target_tool,
+                "tool_args": tool_args,
+                "task_prompt": task_prompt,
+                "bottleneck_tier": "Tier4_SukiFailureCheck",
+                "bottleneck_confidence": bottleneck_conf,
+                "reasons": list(reasons),
+                "delegate_to": "POLICY_REVIEWER",
+            }
         elif (not all_passed) or bottleneck_conf < 0.70:
             verdict_str = "DEGRADED_FALLBACK"
             all_passed = False
