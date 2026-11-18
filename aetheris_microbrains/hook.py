@@ -12,11 +12,16 @@ Usage (e.g. in Claude Code / Codex PreToolUse hook config):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
+import time
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+_DEFAULT_HOOK_JOURNAL_PATH = Path(__file__).resolve().parent / "memory" / "decision_journal.jsonl"
 
 _HOOK_REDACT_PATTERNS = (
     (re.compile(r"sk-proj-[A-Za-z0-9_\-]{12,}"), "[REDACTED_OPENAI_KEY]"),
@@ -33,6 +38,56 @@ def _redact_error_text(text: str) -> str:
     for pat, repl in _HOOK_REDACT_PATTERNS:
         out = pat.sub(repl, out)
     return out
+
+
+def _resolve_journal_path(journal_path: Optional[str] = None) -> Path:
+    """Resolve explicit CLI/argument journal path, env override, or default package journal."""
+    explicit = str(journal_path or "").strip()
+    if explicit:
+        return Path(explicit)
+    env_path = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
+    if env_path:
+        return Path(env_path)
+    return _DEFAULT_HOOK_JOURNAL_PATH
+
+
+def _append_shadow_error_journal(
+    reason_code: str,
+    error_detail: str,
+    host: str,
+    journal_path: Optional[str] = None,
+    raw_payload: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Append a stdlib-only redacted hook_error record so shadow errors are visible in the journal."""
+    redacted_detail = _redact_error_text(error_detail)
+    entry = {
+        "event_type": "hook_error",
+        "timestamp": round(time.time(), 6),
+        "decision": "error_passthrough",
+        "decision_kind": "hook_error",
+        "authorizes_execution": False,
+        "shadow_mode": True,
+        "shadow_decision": "error",
+        "shadow_reason_code": reason_code,
+        "reason_code": reason_code,
+        "label": redacted_detail,
+        "error": redacted_detail,
+        "host": host,
+        "input_sha256": hashlib.sha256((raw_payload or "").encode("utf-8")).hexdigest()[:16],
+    }
+    target = _resolve_journal_path(journal_path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not target.exists()
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if is_new and os.name != "nt":
+            os.chmod(target, 0o600)
+        return {"written": True, "path": str(target), "error": None}
+    except Exception as j_exc:
+        err_msg = _redact_error_text(f"{type(j_exc).__name__}:{j_exc}")
+        print(f"shadow_journal_write_failed:{err_msg}", file=sys.stderr)
+        return {"written": False, "path": str(target), "error": err_msg}
 
 
 def _load_decision_engine():
@@ -96,6 +151,7 @@ def evaluate_hook_payload(
     shadow_mode: bool = False,
     host: str = "claude",
     codex_escalate_deny: bool = False,
+    journal_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide = _load_decision_engine()
@@ -112,6 +168,9 @@ def evaluate_hook_payload(
         ctx["log_decisions"] = True
     if shadow_mode:
         ctx["shadow_mode"] = True
+    explicit_journal = str(journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
+    if explicit_journal:
+        ctx["journal_path"] = str(_resolve_journal_path(explicit_journal))
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
     reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
@@ -148,10 +207,11 @@ def evaluate_hook_payload(
                 "permissionDecisionReason": reason,
             }
         else:
-            # Codex PreToolUse does not accept permissionDecision="ask"; defer silently to host flow
+            # Codex PreToolUse does not accept permissionDecision="ask"; empty stdout leaves the
+            # decision to Codex's configured approval policy (does not force a prompt under auto-approve modes).
             perm = None
             exit_code = 0
-            host_action = "defer_to_host_approval"
+            host_action = "defer_to_host_policy"
             hook_specific = {"hookEventName": "PreToolUse"}
     elif resolved_host == "generic":
         perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
@@ -205,10 +265,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
     if host not in {"claude", "codex", "generic"}:
         host = "claude"
+    journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
+    raw: str = ""
     try:
         parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
         parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
         parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
+        parser.add_argument(
+            "--journal-path",
+            default=journal_path,
+            help="Override path for decision_journal.jsonl (or set AETHERIS_JOURNAL_PATH)",
+        )
         parser.add_argument(
             "--auto-allow",
             action="store_true",
@@ -228,7 +295,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.add_argument(
             "--codex-escalate-deny",
             action="store_true",
-            help="With --host codex, treat escalated actions as deny (exit 2) instead of deferring to Codex approval",
+            help="With --host codex, treat escalated actions as deny (exit 2) instead of emitting empty stdout (which leaves decisions to Codex's configured approval policy and does not prompt under auto-approve)",
         )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
@@ -236,10 +303,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
         host = str(args.host)
         codex_escalate_deny = bool(args.codex_escalate_deny)
+        journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
 
         raw = sys.stdin.read().strip()
         if not raw:
             if shadow_mode:
+                _append_shadow_error_journal(
+                    reason_code="empty_hook_payload",
+                    error_detail="empty_hook_payload",
+                    host=host,
+                    journal_path=journal_path,
+                    raw_payload="",
+                )
                 print("empty_hook_payload (shadow passthrough)", file=sys.stderr)
                 return 0
             if host == "codex":
@@ -275,6 +350,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             err_msg = _redact_error_text(f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})")
             print(err_msg, file=sys.stderr)
             if shadow_mode:
+                _append_shadow_error_journal(
+                    reason_code="invalid_hook_json",
+                    error_detail=err_msg,
+                    host=host,
+                    journal_path=journal_path,
+                    raw_payload=raw,
+                )
                 return 0
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
@@ -294,6 +376,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             err_msg = _redact_error_text("invalid_hook_payload:expected_json_object")
             print(err_msg, file=sys.stderr)
             if shadow_mode:
+                _append_shadow_error_journal(
+                    reason_code="invalid_hook_payload",
+                    error_detail=err_msg,
+                    host=host,
+                    journal_path=journal_path,
+                    raw_payload=raw,
+                )
                 return 0
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
@@ -316,6 +405,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             shadow_mode=shadow_mode,
             host=host,
             codex_escalate_deny=codex_escalate_deny,
+            journal_path=journal_path,
         )
         if shadow_mode:
             if result.get("journal_written") is False:
@@ -355,7 +445,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if result["hookSpecificOutput"] is not None:
                 print(_format_hook_stdout(result["hookSpecificOutput"]))
             return 2
-        if host == "codex" and result.get("host_action") == "defer_to_host_approval":
+        if host == "codex" and result.get("host_action") == "defer_to_host_policy":
             return 0
         if perm == "allow" and not auto_allow:
             # Silent pass-through: let host apply normal user permission rules
@@ -367,6 +457,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         err_msg = _redact_error_text(f"hook_internal_error:{type(exc).__name__}:{exc}")
         print(err_msg, file=sys.stderr)
         if shadow_mode:
+            _append_shadow_error_journal(
+                reason_code="hook_internal_error",
+                error_detail=err_msg,
+                host=host,
+                journal_path=journal_path,
+                raw_payload=raw,
+            )
             return 0
         if host == "generic":
             print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))

@@ -257,17 +257,17 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 
 **Key Hook Modes & CLI Flags:**
 * **Prefilter Mode (Default):** On safe operations, the hook exits `0` silently. It does **not** bypass Claude Code's native user confirmation dialogs—it only intercepts dangerous or broken calls before the prompt is shown.
-* **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to `memory/decision_journal.jsonl` without blocking live execution.
+* **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to `memory/decision_journal.jsonl` without blocking live execution. Empty stdin, malformed JSON, non-object payloads, and engine/import errors still return `0` with empty `stdout` **and** append a redacted stdlib-only `event_type: "hook_error"` entry to the journal so hook failures are never indistinguishable from unchecked calls.
+* **`--log-decisions` / `--journal-path` (`AETHERIS_LOG_DECISIONS=1`, `AETHERIS_JOURNAL_PATH`):** Persist hook telemetry (including shadow `hook_error` events) to a custom `decision_journal.jsonl` path across independent hook processes for pilot audits and drift detection.
 * **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
-* **Fail-Closed on Exceptions & Import Errors:** Unexpected runtime or import errors return exit code `2` with error details in `stderr`, preventing unsafe actions from running if the hook fails.
-* **`--log-decisions` (or `AETHERIS_LOG_DECISIONS=1`):** Records decision telemetry to `memory/decision_journal.jsonl` across independent hook processes, enabling cross-process drift detection.
+* **Fail-Closed on Exceptions & Import Errors (Non-Shadow):** Unexpected runtime or import errors return exit code `2` with redacted details in `stderr`, preventing unsafe actions from running if the hook fails.
 
-**Live Claude Code Acceptance Checklist (before production use):**
-1. **Normal call (`ls -la`):** exits `0` silently and preserves Claude Code's normal user permission prompt.
-2. **Escalation (`Read .env` or unknown MCP tool):** `ask` prompt reaches the user.
-3. **Denial (`rm -rf /`):** blocked before execution, reason shown via `stderr`.
-4. **Hook failure (`onFailure: "block"` on Claude Code ≥ `2.1.295`):** simulated hook crash blocks the tool call rather than failing open.
+**Live Claude Code & Codex Acceptance Checklist (before production use):**
+1. **Normal call (`ls -la`):** exits `0` silently and preserves the host's normal user permission prompt.
+2. **Escalation (`Read .env` or unknown MCP tool):** on Claude Code, `ask` prompt reaches the user; on **Codex** (`--host codex`), verify a harmless escalated call under **both** Codex approval settings (*prompt-on* vs. *auto-approve*), because exit `0` + empty `stdout` (`defer_to_host_policy`) leaves the decision to Codex's configured policy rather than forcing a prompt under auto-approve (enable `--codex-escalate-deny` if escalations must hard-block).
+3. **Denial (`rm -rf /`):** blocked before execution (`exit 2`), redacted reason shown via `stderr`.
+4. **Hook failure / `--shadow` error audit (`onFailure: "block"` on Claude Code ≥ `2.1.295`):** non-shadow hook errors fail closed; in `--shadow` pilots, confirm malformed/engine-error payloads record `event_type: "hook_error"` inside `decision_journal.jsonl`.
 
 ---
 
@@ -377,7 +377,7 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.3`: 253 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.3`: 254 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips in `test_robotics_stack.py` when `nir` or `onnx` are not installed):
 
@@ -451,14 +451,14 @@ python examples/07_swebench_lite_gate_benchmark.py
 | Coarse SWE core retention within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127** (`edit_file` / `repo_read`: **103 / 127**) |
 
 ### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI & HTTP Endpoints (`v0.7.0`–`v0.7.3`)
-Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` omits unsupported `"ask"` on escalations and defers cleanly to Codex's native approval flow, or pass `--codex-escalate-deny`), while fatal denials and invalid/non-object payloads write redacted reasons to `stderr` with exit code `2` (fail-closed):
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` omits unsupported `"ask"` on escalations, returning `host_action: "defer_to_host_policy"` with exit `0` and empty `stdout` so Codex applies its configured approval policy—which does **not** force a prompt under auto-approve modes unless `--codex-escalate-deny` is enabled), while fatal denials and non-shadow invalid/non-object payloads write redacted reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast
 echo '{"tool_name":"Bash","tool_input":{"command":"custom_cmd"}}' | python -m aetheris_microbrains.hook --host codex
 ```
 
-* **Prefilter-by-default & Strict Passive Shadow:** Safe `allow` verdicts exit `0` with empty `stdout` so host confirmation prompts still apply (`--auto-allow` opts out). Under `--shadow`, `evaluate_hook_payload()` and CLI stay passive (`exit 0`, `permissionDecision=None` regardless of `--host codex` flags), log `shadow_reason_code`, and warn on `stderr` if `journal_written` is `False`.
+* **Prefilter-by-default & Strict Passive Shadow (`--journal-path` / `AETHERIS_JOURNAL_PATH`):** Safe `allow` verdicts exit `0` with empty `stdout` so host confirmation prompts still apply (`--auto-allow` opts out). Under `--shadow`, `evaluate_hook_payload()` and CLI stay passive (`exit 0`, empty `stdout`, `permissionDecision=None` regardless of `--host codex` flags), log `shadow_reason_code` on valid payloads, and use a stdlib-only journal writer to record redacted `event_type: "hook_error"` entries on empty input, malformed JSON, non-object JSON, and engine/import errors (so hook failures are visible alongside `shadow_mode_observation` lines in `decision_journal.jsonl`), warning on `stderr` if journal persistence fails.
 * **Live `/dashboard`, Static `/demo/dashboard` & Server Extra (`pip install aetheris-microbrains[server]`):** Installs FastAPI, Uvicorn, and Pydantic. `/dashboard` and `/metrics` render live `MicrobrainTelemetry` data; static preview cards live on `/demo/dashboard`. `/microbrain/prefilter` fails closed (`status="error"`, `passed=False`) and `DSHMicrobrainClient` propagates server error statuses while validating Python syntax via `ast.parse` in its local fallback.
 * **Fail-closed recommendation:** Set `"onFailure": "block"` in Claude Code hook configs so import/environment errors block safely.
 
@@ -472,14 +472,21 @@ python examples/08_frozen_advisor_benchmark.py
 | Strategy | Recall@4 | Narrowed Recall | Narrowed | Dropped | 95% CP Upper Drop | Uncached Net Saved | Cache-Adjusted Net Saved | Local p95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Full 32-Tool Catalog (Baseline) | 100.0% | 100.0% | 0/120 | 0/120 | <= 2.5% | 0.0% | 0.0% | 0.001 ms |
-| Simple Name+Desc Keyword (Frozen Rule) | 94.2% | 92.9% | 98/120 | 7/120 | <= 10.7% | 79.5% | 48.8% | 0.220 ms |
-| Microbrains Top-4 (Per-Turn) | 100.0% | 100.0% | 78/120 | 0/120 | <= 2.5% | 52.9% | **4.1%** | 5.262 ms |
-| **Microbrains Top-4 (Session-Sticky)** | **100.0%** | **100.0%** | **78/120** | **0/120** | **<= 2.5%** | **56.8%** | **56.8%** | **5.024 ms** |
+| Simple Name+Desc Keyword (Frozen Rule) | 94.2% | 92.9% | 98/120 | 7/120 | <= 10.7% | 79.5% | 48.8% | 0.284 ms |
+| Microbrains Top-4 (Per-Turn) | 100.0% | 100.0% | 78/120 | 0/120 | <= 2.5% | 52.9% | **4.1%** | 7.412 ms |
+| **Microbrains Top-4 (Session-Sticky)** | **100.0%** | **100.0%** | **78/120** | **0/120** | **<= 2.5%** | **56.8%** | **56.8%** | **5.559 ms** |
 
-* **Agreed-Narrowed Error Check:** Even among `73` queries where both Keyword and Microbrains narrowed, `6` had drops in one selector (measured explicitly).
+**Equal-Escalation-Rate & Risk–Coverage AURC Comparison (`42/120` Matched Escalation Budget):**
+
+| Selector | Escalated | Narrowed | Dropped | Recall@4 | Narrowed Recall | 95% CP Upper Drop | AURC Drop Risk |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Simple Name+Desc Keyword | 42/120 (nat 22) | 78/120 | 2/120 | 98.3% | 97.4% | <= 5.1% | 0.0228 |
+| **Microbrains Top-4** | **42/120 (nat 42)** | **78/120** | **0/120** | **100.0%** | **100.0%** | **<= 2.5%** | **0.0000** |
+
+* **Agreed-Narrowed Error Check:** Even among `73` queries where both Keyword and Microbrains narrowed, `6` had drops in one selector (measured explicitly). When Keyword is forced to escalate its weakest `42/120` queries (matching Microbrains' `42/120` abstention budget), Keyword still drops `2/120` (`AURC = 0.0228`) vs `0/120` (`AURC = 0.0000`) for Microbrains.
 * **Prompt-Cache Effect:** Switching active tools every turn (`Per-Turn`) breaks prefix caching (`52.9%` raw → `4.1%` cache-adjusted); pinning tools per session with `SessionToolSurface` preserves `56.8%` net cache-adjusted savings. Decoupled `diagnose_patch()` matched `5/5` patch diagnostic cases with `authorizes_execution=False`.
 
-### 6. Bilingual SWE 5-Way Ablation (`aetheris_microbrains/tests/test_colony_swe_shadow.py`)
+### 6. Bilingual SWE 5-Way Ablation & Equal-Escalation Comparison (`aetheris_microbrains/tests/test_colony_swe_shadow.py`)
 Disjoint held-out conformal calibration (`in_sample=False`), tracking both missed mandatory escalations and benign false escalations / misclassifications:
 
 | Variant | 120 RU/EN Acc (RU) | Missed Esc. (95% CP Upper) | Syn-Bank Held-Out (20) | Zero-Overlap Morph Split (20) | Morph Missed Esc. |
@@ -490,7 +497,11 @@ Disjoint held-out conformal calibration (`in_sample=False`), tracking both misse
 | `2b.` Pure Neural (Weights Only, No Threshold) | 60/120 = 50.0% (56.7%) | 50/50 (`<= 100.0%`) | 12/20 (60.0%, `6/6` missed) | 8/20 (40.0%) | `6/6` (`<= 100.0%`) |
 | **`3.` Microbrain Hybrid (Weights + Conformal Gate)** | **104/120 = 86.7% (91.7%)** | **0/50 (`<= 5.82%`)** | **14/20 (70.0%, `0/6` missed)** | **8/20 (40.0%)** | **`0/6` (`<= 39.3%`)** |
 
-> *Honesty note:* Matching `1b`'s synonym vocabulary solves the old `20/20` synonym split, isolating why vocabulary expansion helped there; meanwhile, on the zero-overlap `FROZEN_UNSEEN_MORPH_QUERIES` split (`0/14` exact token overlap), char-3-gram subword coverage enables `40.0%` vs `30.0%` for exact matched rules (`1b`), while ablating the conformal threshold (`2b`) causes `50/50` missed escalations. None of these synthetic upper bounds transfer directly as field exchangeability guarantees.
+**Matched Escalation-Budget & Selective AURC (`compare_at_equal_escalation_rate()`):**
+* **`colony_120` (`63/120` escalated, `57` local):** Matched Rules (`1b`, natural `50/120`) drops from `89.2%` to **`100/120 (83.3%)`** with `3/50` missed escalations (`selective_error_rate_on_local = 0.0702`, `AURC = 0.0801`), vs. **Microbrain Hybrid (`3`)** at **`104/120 (86.7%)`** with `0/50` missed escalations (`selective_error_rate_on_local = 0.0526`, `AURC = 0.0959`).
+* **`frozen_morph_20` (zero exact-token overlap on routine items):** Matched Rules (`1b`) naturally escalates all `20/20` (`6/20 = 30.0%`, `AURC = 0.8518`), whereas **Microbrain Hybrid (`3`)** classifies `3` locally at `17/20` escalations (`8/20 = 40.0%`, `0/6` missed, `AURC = 0.6576`).
+
+> *Honesty note:* Matching `1b`'s synonym vocabulary solves the old `20/20` synonym split, isolating why vocabulary expansion helped there; on `colony_120`, Equal-Budget accuracy (`86.7%` vs `83.3%`, `0/50` vs `3/50` missed) favors Hybrid while overall Risk–Coverage `AURC` across confidence rankings slightly favors exact-keyword `1b` (`0.0801` vs `0.0959`); on `FROZEN_UNSEEN_MORPH_QUERIES` (`0/14` exact token overlap), char-3-gram coverage reduces `AURC` (`0.6576` vs `0.8518`), while ablating the conformal threshold (`2b`) causes `50/50` missed escalations. None of these synthetic upper bounds transfer directly as field exchangeability guarantees.
 
 ```python
 import aetheris_microbrains as mb
@@ -513,7 +524,7 @@ pytest aetheris_microbrains/tests/test_fable_review_fixes.py aetheris_microbrain
 ```
 
 ### Independent Audit & Hardening Coverage:
-* **`test_fable_review_fixes.py` (`test_fable_1`..`42`)**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha`, honest `ESCALATED_TO_LLM` without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems or leaked benchmark identifiers in `test_colony_swe_shadow.py`, `allow_pickle=False`, zero numbered placeholder vocab tokens across all active production models (41 clean-vocab domains; test artifacts isolated to `_archive/`), ridge-fitted `W_gate` + empirical per-expert quantiles + `evaluate_topk_holdout()` in `ToolRoutingMoE`, atomic `_versions/` snapshot commits via single-pointer `.manifest.json` (`strict_directory=True` and atomic rollback), persisted `calibration_data_origin`, non-polluting `save()` CWD hygiene, full-file patched AST verification, live `available_tools` enforcement, Clopper-Pearson upper bounds strictly from real measured eval sets (`null` + `unknown` otherwise), `authorizes_execution=False` + decoupled `rank_tools()` / `diagnose_patch()` / `SessionToolSurface`, host-contracted Claude/Codex hooks + passive `--shadow`, live `/dashboard` vs static `/demo/dashboard` + DSH AST fallback, zero legacy `Proposal N` comments, `n_cal = 120` expanded calibration, `08_frozen_advisor_benchmark.py`, and audit remediation (`fission_synthetic_anchors`, `synthetic_lexical_probes`, unobserved registry `null` telemetry, duplicate route/tree-sitter/redirection/variance-threshold fixes).
+* **`test_fable_review_fixes.py` (`test_fable_1`..`43`)**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha`, honest `ESCALATED_TO_LLM` without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems or leaked benchmark identifiers in `test_colony_swe_shadow.py`, `allow_pickle=False`, zero numbered placeholder vocab tokens across all active production models (41 clean-vocab domains; test artifacts isolated to `_archive/`), ridge-fitted `W_gate` + empirical per-expert quantiles + `evaluate_topk_holdout()` in `ToolRoutingMoE`, atomic `_versions/` snapshot commits via single-pointer `.manifest.json` (`strict_directory=True` and atomic rollback), persisted `calibration_data_origin`, non-polluting `save()` CWD hygiene, full-file patched AST verification, live `available_tools` enforcement, Clopper-Pearson upper bounds strictly from real measured eval sets (`null` + `unknown` otherwise), `authorizes_execution=False` + decoupled `rank_tools()` / `diagnose_patch()` / `SessionToolSurface`, host-contracted Claude/Codex hooks (`defer_to_host_policy`) + passive `--shadow` stdlib `hook_error` journaling (`--journal-path`), live `/dashboard` vs static `/demo/dashboard` + DSH AST fallback, zero legacy `Proposal N` comments, `n_cal = 120` expanded calibration, `08_frozen_advisor_benchmark.py` (including equal-escalation-rate & AURC comparisons), and audit remediation (`fission_synthetic_anchors`, `synthetic_lexical_probes`, unobserved registry `null` telemetry, duplicate route/tree-sitter/redirection/variance-threshold fixes).
 * **Split-Conformal & Mondrian Consistency Discipline (`conformal_collector.py`)**: Disjoint **Train**, **120 Calibration**, and **40 Validation** splits across **all active production models (41 clean-vocab domains; test artifacts isolated to `_archive/`)** (`calibration_data_origin: "synthetic_rule_consistency"` persisted in `*_meta.json` — verifying internal rule consistency rather than field user-distribution exchangeability) validated under strict prediction-set membership $Y \in C_\alpha(X)$, immutable `_versions/` snapshots with single-pointer `.manifest.json` commits, SHA-256 weight/meta checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Clopper-Pearson upper bounds & Rule-of-3 emitted strictly from real measured evaluation sets (`null` otherwise), sliding-window drift detection, and Gibbs-Candès ACI adaptation.
 * **Ablation, Baselines & Economics (`test_layer_ablation_and_baselines.py`, `test_end_to_end_economics_and_drift.py`)**: Layer 0 / 0+1 / 0+1+2 ablation, bilingual RU/EN routing vs. English keyword baseline, MCP-Zero Top-$K$ schema reduction ($\ge 75\%$), `< 2 ms` p95 decision latency, risk-class fail-closed error handling, `shadow_mode` journaling, and `_candidates/` $\to$ `_rollback/` continual learning.
 * **Adversarial & Probe Suites (`test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py`)**: Diverse obfuscated Python sinks & secret leaks, realistic indented/`except`/`elif`/comment/`.ts`/`.json`/`.yaml`/`.md` diffs, real weight-space surgical causal inversion (no `MagicMock`), allowlist-first `shlex` shell parsing, and 120 bilingual (60 RU / 60 EN) SWE queries (`0/50` missed escalations).

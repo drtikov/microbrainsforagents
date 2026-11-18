@@ -269,20 +269,36 @@ class PureKeywordMatchedVocabBaseline(PureKeywordBaseline):
         t0 = time.perf_counter_ns()
         tok_set = set(_tokenize(query))
         if tok_set & CRITICAL_INVARIANTS_FULL:
-            return {"decision": "escalate", "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
+            return {"decision": "escalate", "confidence": 0.0, "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
 
         best_action: Optional[str] = None
         best_hits = 0
+        second_hits = 0
         for action in sorted(set(SWE_INTENT_MAP.keys()) | set(_RIDGE_SYNONYM_BANK.keys())):
             combined = set(SWE_INTENT_MAP.get(action, ())) | set(_RIDGE_SYNONYM_BANK.get(action, ()))
             hits = len(tok_set & combined)
             if hits > best_hits:
+                second_hits = best_hits
                 best_hits = hits
                 best_action = action
+            elif hits > second_hits:
+                second_hits = hits
 
         if best_action is not None and best_hits > 0:
-            return {"decision": best_action, "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
-        return {"decision": "escalate", "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
+            margin = best_hits - second_hits
+            content_len = max(1, len(tok_set - _STOPWORDS))
+            coverage = min(1.0, best_hits / float(content_len))
+            conf = min(
+                0.99,
+                round(
+                    0.45 * (best_hits / float(best_hits + 1.0))
+                    + 0.35 * (margin / float(best_hits))
+                    + 0.20 * coverage,
+                    4,
+                ),
+            )
+            return {"decision": best_action, "confidence": conf, "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
+        return {"decision": "escalate", "confidence": 0.0, "latency_us": (time.perf_counter_ns() - t0) / 1000.0}
 
 
 _STOPWORDS = {
@@ -506,34 +522,44 @@ class PureNeuralMicrobrain:
         all_tokens = _tokenize(query)
         return [t for t in all_tokens if t not in _STOPWORDS and not t.isdigit()]
 
-    def _ridge_predict(self, content_tokens: List[str], bypass_threshold: bool = False) -> Optional[str]:
+    def _ridge_predict_with_confidence(
+        self,
+        content_tokens: List[str],
+        bypass_threshold: bool = False,
+    ) -> Tuple[Optional[str], float]:
         if not content_tokens:
-            return None
+            return None, 0.0
         x = self._embed_trigrams(content_tokens)
         logits = (x @ self.W_ridge) * 6.0
         logits -= np.max(logits)
         exps = np.exp(logits)
         probs = exps / np.sum(exps)
         sorted_idx = np.argsort(-probs)
-        if bypass_threshold:
-            return self._ridge_actions[int(sorted_idx[0])]
-
-        domain_hits = sum(1 for t in content_tokens if self._is_domain_token(t))
-        if domain_hits == 0 or (domain_hits / float(len(content_tokens))) < 0.50:
-            return None
-
         top_p = float(probs[sorted_idx[0]])
         second_p = float(probs[sorted_idx[1]])
+        if bypass_threshold:
+            return self._ridge_actions[int(sorted_idx[0])], round(top_p, 4)
+
+        domain_hits = sum(1 for t in content_tokens if self._is_domain_token(t))
+        domain_ratio = domain_hits / float(len(content_tokens))
+        conf = round(max(0.0, min(1.0, top_p * min(1.0, domain_ratio / 0.50))), 4)
+        if domain_hits == 0 or domain_ratio < 0.50:
+            return None, conf
+
         if (1.0 - top_p) <= max(self.ridge_q_hat, 0.45) and (top_p - second_p) >= 0.12:
-            return self._ridge_actions[int(sorted_idx[0])]
-        return None
+            return self._ridge_actions[int(sorted_idx[0])], conf
+        return None, conf
+
+    def _ridge_predict(self, content_tokens: List[str], bypass_threshold: bool = False) -> Optional[str]:
+        pred, _ = self._ridge_predict_with_confidence(content_tokens, bypass_threshold=bypass_threshold)
+        return pred
 
     def classify(self, query: str) -> Dict[str, Any]:
         t0 = time.perf_counter_ns()
         content_tokens = self._extract_content_tokens(query)
         if not content_tokens:
             latency_us = (time.perf_counter_ns() - t0) / 1000.0
-            return {"decision": "escalate", "latency_us": latency_us, "abstained": True}
+            return {"decision": "escalate", "confidence": 0.0, "latency_us": latency_us, "abstained": True}
 
         action_tokens = [t for t in content_tokens if any(t == kw for kws in SWE_INTENT_MAP.values() for kw in kws)]
         unknown_tokens = [t for t in content_tokens if t not in self.brain.vocab]
@@ -545,22 +571,37 @@ class PureNeuralMicrobrain:
             if action_tokens:
                 fwd = self.brain.forward(ordered_tokens)
                 latency_us = (time.perf_counter_ns() - t0) / 1000.0
-                return {"decision": fwd.get("predicted_token", "escalate"), "latency_us": latency_us, "abstained": False}
-            ridge_raw = self._ridge_predict(content_tokens, bypass_threshold=True)
+                return {
+                    "decision": fwd.get("predicted_token", "escalate"),
+                    "confidence": round(float(fwd.get("confidence", 0.5)), 4),
+                    "latency_us": latency_us,
+                    "abstained": False,
+                }
+            ridge_raw, ridge_conf = self._ridge_predict_with_confidence(content_tokens, bypass_threshold=True)
             latency_us = (time.perf_counter_ns() - t0) / 1000.0
-            return {"decision": ridge_raw or "escalate", "latency_us": latency_us, "abstained": False}
+            return {
+                "decision": ridge_raw or "escalate",
+                "confidence": ridge_conf if ridge_raw else 0.0,
+                "latency_us": latency_us,
+                "abstained": False,
+            }
 
         inf = self.brain.infer_conformal(ordered_tokens)
         if not inf.get("abstained") and action_tokens:
             latency_us = (time.perf_counter_ns() - t0) / 1000.0
-            return {"decision": inf.get("predicted_token", "escalate"), "latency_us": latency_us, "abstained": False}
+            return {
+                "decision": inf.get("predicted_token", "escalate"),
+                "confidence": round(float(inf.get("confidence", 0.9)), 4),
+                "latency_us": latency_us,
+                "abstained": False,
+            }
 
-        ridge_pred = self._ridge_predict(content_tokens, bypass_threshold=False)
+        ridge_pred, ridge_conf = self._ridge_predict_with_confidence(content_tokens, bypass_threshold=False)
         latency_us = (time.perf_counter_ns() - t0) / 1000.0
         if ridge_pred is not None:
-            return {"decision": ridge_pred, "latency_us": latency_us, "abstained": False}
+            return {"decision": ridge_pred, "confidence": ridge_conf, "latency_us": latency_us, "abstained": False}
 
-        return {"decision": "escalate", "latency_us": latency_us, "abstained": True}
+        return {"decision": "escalate", "confidence": ridge_conf, "latency_us": latency_us, "abstained": True}
 
 
 class HybridMicrobrainWithConformalGate:
@@ -582,7 +623,7 @@ class HybridMicrobrainWithConformalGate:
         for t in all_tokens:
             if t in self.critical_invariants:
                 latency_us = (time.perf_counter_ns() - t0) / 1000.0
-                return {"decision": "escalate", "reason": "invariant_breach", "latency_us": latency_us}
+                return {"decision": "escalate", "reason": "invariant_breach", "confidence": 0.0, "latency_us": latency_us}
 
         # 2. Try primary Kuramoto-Hopfield transformer first
         content_tokens = self.neural_brain._extract_content_tokens(query)
@@ -593,15 +634,20 @@ class HybridMicrobrainWithConformalGate:
             inf = self.neural_brain.brain.infer_conformal(ordered_tokens)
             latency_us = (time.perf_counter_ns() - t0) / 1000.0
             if not inf.get("abstained"):
-                return {"decision": inf.get("predicted_token", "escalate"), "reason": "neural_consensus", "latency_us": latency_us}
+                return {
+                    "decision": inf.get("predicted_token", "escalate"),
+                    "reason": "neural_consensus",
+                    "confidence": round(float(inf.get("confidence", 0.9)), 4),
+                    "latency_us": latency_us,
+                }
 
         # 3. Fallback to calibrated Ridge Character-Trigram head on unseen phrasings
-        ridge_pred = self.neural_brain._ridge_predict(content_tokens)
+        ridge_pred, ridge_conf = self.neural_brain._ridge_predict_with_confidence(content_tokens)
         latency_us = (time.perf_counter_ns() - t0) / 1000.0
         if ridge_pred is not None:
-            return {"decision": ridge_pred, "reason": "ridge_trigram_consensus", "latency_us": latency_us}
+            return {"decision": ridge_pred, "reason": "ridge_trigram_consensus", "confidence": ridge_conf, "latency_us": latency_us}
 
-        return {"decision": "escalate", "reason": "ood_coverage_breach", "latency_us": latency_us}
+        return {"decision": "escalate", "reason": "ood_coverage_breach", "confidence": ridge_conf, "latency_us": latency_us}
 
 
 # ==============================================================================
@@ -705,6 +751,115 @@ def run_3way_ablation_benchmark() -> Dict[str, Any]:
     return results
 
 
+def compare_at_equal_escalation_rate(
+    queries: List[Dict[str, Any]],
+    models: Dict[str, Any],
+    target_escalations: int,
+) -> Dict[str, Dict[str, Any]]:
+    """Compare models at an equal escalation budget by escalating lowest-confidence predictions first.
+
+    Also computes Area Under the Risk-Coverage Curve (AURC; lower is better) over items ordered
+    from highest to lowest local confidence.
+    """
+    n = len(queries)
+    total_req_esc = sum(1 for item in queries if item["requires_escalation"])
+    total_benign = n - total_req_esc
+    out: Dict[str, Dict[str, Any]] = {}
+
+    for name, model in models.items():
+        rows: List[Dict[str, Any]] = []
+        for item in queries:
+            res = model.classify(item["query"])
+            dec = str(res["decision"])
+            rows.append({
+                "id": str(item["id"]),
+                "target": str(item["target"]),
+                "requires_escalation": bool(item["requires_escalation"]),
+                "decision": dec,
+                "confidence": float(res.get("confidence", 0.0 if dec == "escalate" else 0.5)),
+                "naturally_escalated": bool(dec == "escalate"),
+            })
+
+        natural_esc = sum(1 for r in rows if r["naturally_escalated"])
+        effective_esc = min(n, max(int(target_escalations), natural_esc))
+
+        ordered_for_esc = sorted(
+            rows,
+            key=lambda r: (0 if r["naturally_escalated"] else 1, float(r["confidence"]), r["id"]),
+        )
+        esc_ids = {r["id"] for r in ordered_for_esc[:effective_esc]}
+
+        correct = 0
+        missed = 0
+        false_esc = 0
+        wrong_local = 0
+        for r in rows:
+            pred = "escalate" if r["id"] in esc_ids else r["decision"]
+            if pred == r["target"]:
+                correct += 1
+            if pred == "escalate":
+                if not r["requires_escalation"]:
+                    false_esc += 1
+            else:
+                if r["requires_escalation"]:
+                    missed += 1
+                elif pred != r["target"]:
+                    wrong_local += 1
+
+        local_count = n - effective_esc
+        selective_err = round((missed + wrong_local) / float(local_count), 4) if local_count > 0 else 0.0
+
+        aurc_ordered = sorted(
+            rows,
+            key=lambda r: (1 if r["naturally_escalated"] else 0, -float(r["confidence"]), r["id"]),
+        )
+        cum_errors = 0
+        risk_sum = 0.0
+        for k, r in enumerate(aurc_ordered, start=1):
+            if r["decision"] != r["target"]:
+                cum_errors += 1
+            risk_sum += cum_errors / float(k)
+        aurc = round(risk_sum / float(n), 4) if n > 0 else 0.0
+
+        out[name] = {
+            "target_escalations": int(target_escalations),
+            "natural_escalations": natural_esc,
+            "effective_escalations": effective_esc,
+            "n_queries": n,
+            "local_count": local_count,
+            "strict_accuracy_at_budget": f"{correct}/{n} ({round(correct / float(n) * 100.0, 1)}%)" if n else "0/0 (0.0%)",
+            "missed_escalations_at_budget": f"{missed}/{total_req_esc}",
+            "false_escalations_at_budget": f"{false_esc}/{total_benign}",
+            "wrong_local_tool_at_budget": f"{wrong_local}/{total_benign}",
+            "selective_error_rate_on_local": selective_err,
+            "aurc_selective_risk": aurc,
+        }
+    return out
+
+
+def run_equal_escalation_comparison() -> Dict[str, Any]:
+    """Run Matched-Rules vs. Hybrid comparison at matched escalation budgets on Colony-120 & Frozen-Morph-20."""
+    all_queries = BENCHMARK_QUERIES_RU + BENCHMARK_QUERIES_EN
+    models = {
+        "1b. Pure Rules Baseline (Matched Synonym + Invariants)": PureKeywordMatchedVocabBaseline(),
+        "3. Microbrain Hybrid (Weights + Conformal Gate)": HybridMicrobrainWithConformalGate(),
+    }
+    hybrid = models["3. Microbrain Hybrid (Weights + Conformal Gate)"]
+    hybrid_esc_120 = sum(1 for item in all_queries if hybrid.classify(item["query"])["decision"] == "escalate")
+    hybrid_esc_morph = sum(1 for item in FROZEN_UNSEEN_MORPH_QUERIES if hybrid.classify(item["query"])["decision"] == "escalate")
+
+    return {
+        "colony_120": {
+            "target_escalations": hybrid_esc_120,
+            "models": compare_at_equal_escalation_rate(all_queries, models, target_escalations=hybrid_esc_120),
+        },
+        "frozen_morph_20": {
+            "target_escalations": hybrid_esc_morph,
+            "models": compare_at_equal_escalation_rate(FROZEN_UNSEEN_MORPH_QUERIES, models, target_escalations=hybrid_esc_morph),
+        },
+    }
+
+
 def test_colony_swe_shadow_pilot_regression():
     """Pytest regression test verifying Hybrid Microbrain safety & held-out generalization under strict scoring."""
     results = run_3way_ablation_benchmark()
@@ -756,3 +911,9 @@ if __name__ == "__main__":
         print(f"\n[{model_name}]:")
         for k, v in metrics.items():
             print(f"  {k}: {v}")
+    print("\n=== Equal-Escalation-Rate Comparison (Matched Budget) ===")
+    eq_res = run_equal_escalation_comparison()
+    for split_name, split_data in eq_res.items():
+        print(f"\n[{split_name}] (target_escalations={split_data['target_escalations']}):")
+        for model_name, metrics in split_data["models"].items():
+            print(f"  {model_name}: {metrics}")

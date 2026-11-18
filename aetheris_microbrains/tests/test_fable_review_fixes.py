@@ -1733,6 +1733,137 @@ def test_fable_42_audit_remediation_fixes(tmp_path, monkeypatch):
     assert len(vsa_loaded.domain_weight_vectors) == len(live_metas)
 
 
+def test_fable_43_shadow_error_journal_equal_escalation_and_codex_contract(tmp_path, monkeypatch, capsys):
+    import importlib.util
+    import json
+    import sys
+
+    from aetheris_microbrains import hook as hook_mod
+    from aetheris_microbrains.tests import test_colony_swe_shadow as colony_bench
+
+    # 1. Shadow error journaling across all 4 error paths + normal shadow observation in one journal
+    j_path = tmp_path / "shadow_errors.jsonl"
+
+    # (a) Empty stdin
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: ""})())
+    rc_empty = hook_mod.main(["--shadow", "--host", "codex", "--journal-path", str(j_path)])
+    cap_empty = capsys.readouterr()
+    assert rc_empty == 0
+    assert cap_empty.out.strip() == ""
+    assert "empty_hook_payload" in cap_empty.err
+
+    # (b) Malformed JSON containing a secret -> redacted in stderr and journal
+    bad_secret = "sk-proj-1234567890abcdef1234567890"
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: f'{{"bad": "{bad_secret}"'})())
+    rc_bad = hook_mod.main(["--shadow", "--host", "codex", "--journal-path", str(j_path)])
+    cap_bad = capsys.readouterr()
+    assert rc_bad == 0
+    assert cap_bad.out.strip() == ""
+    assert bad_secret not in cap_bad.err
+
+    # (c) Non-object JSON
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: "[1, 2, 3]"})())
+    rc_nonobj = hook_mod.main(["--shadow", "--host", "codex", "--journal-path", str(j_path)])
+    cap_nonobj = capsys.readouterr()
+    assert rc_nonobj == 0
+    assert cap_nonobj.out.strip() == ""
+
+    # (d) Unavailable decision engine (import/load error) on valid JSON
+    def _raise_import_err():
+        raise ImportError("simulated_missing_numpy")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(hook_mod, "_load_decision_engine", _raise_import_err)
+        mp.setattr(sys, "stdin", type("S", (), {"read": lambda self: '{"tool_name":"Bash","tool_input":{"command":"ls"}}'})())
+        rc_engine = hook_mod.main(["--shadow", "--host", "codex", "--journal-path", str(j_path)])
+        cap_engine = capsys.readouterr()
+        assert rc_engine == 0
+        assert cap_engine.out.strip() == ""
+        assert "hook_internal_error" in cap_engine.err
+
+    # (e) Normal passive shadow evaluation logged to the exact same journal file
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        type("S", (), {"read": lambda self: '{"tool_name":"Read","tool_input":{"file_path":"README.md"}}'})(),
+    )
+    rc_ok = hook_mod.main(["--shadow", "--host", "codex", "--journal-path", str(j_path)])
+    cap_ok = capsys.readouterr()
+    assert rc_ok == 0
+    assert cap_ok.out.strip() == ""
+
+    raw_text = j_path.read_text(encoding="utf-8")
+    assert bad_secret not in raw_text
+    lines = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+    assert len(lines) == 5
+    error_entries = [row for row in lines if row.get("event_type") == "hook_error"]
+    assert [row["reason_code"] for row in error_entries] == [
+        "empty_hook_payload",
+        "invalid_hook_json",
+        "invalid_hook_payload",
+        "hook_internal_error",
+    ]
+    assert all(row["shadow_decision"] == "error" and row["authorizes_execution"] is False for row in error_entries)
+    assert lines[4]["reason_code"] == "shadow_mode_observation"
+
+    # 2. Codex policy contract precision (`defer_to_host_policy`)
+    codex_esc = hook_mod.evaluate_hook_payload(
+        {"tool_name": "NotebookEdit", "tool_input": {"path": "nb.ipynb"}},
+        host="codex",
+    )
+    assert codex_esc["host_action"] == "defer_to_host_policy"
+    assert codex_esc["permissionDecision"] is None
+    assert codex_esc["exit_code"] == 0
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        type("S", (), {"read": lambda self: '{"tool_name":"NotebookEdit","tool_input":{"path":"nb.ipynb"}}'})(),
+    )
+    rc_codex_defer = hook_mod.main(["--host", "codex"])
+    cap_codex_defer = capsys.readouterr()
+    assert rc_codex_defer == 0
+    assert cap_codex_defer.out.strip() == ""
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        type("S", (), {"read": lambda self: '{"tool_name":"NotebookEdit","tool_input":{"path":"nb.ipynb"}}'})(),
+    )
+    rc_codex_deny = hook_mod.main(["--host", "codex", "--codex-escalate-deny"])
+    cap_codex_deny = capsys.readouterr()
+    assert rc_codex_deny == 2
+    assert json.loads(cap_codex_deny.out.strip())["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # 3. Equal-escalation-rate comparisons (Colony SWE & Ex08 Frozen Advisor)
+    eq_colony = colony_bench.run_equal_escalation_comparison()
+    c120 = eq_colony["colony_120"]
+    for _mname, metrics in c120["models"].items():
+        assert metrics["effective_escalations"] == c120["target_escalations"]
+        assert 0.0 <= metrics["aurc_selective_risk"] <= 1.0
+
+    fm20 = eq_colony["frozen_morph_20"]
+    matched_fm = fm20["models"]["1b. Pure Rules Baseline (Matched Synonym + Invariants)"]
+    hybrid_fm = fm20["models"]["3. Microbrain Hybrid (Weights + Conformal Gate)"]
+    assert hybrid_fm["effective_escalations"] == fm20["target_escalations"]
+    assert matched_fm["effective_escalations"] >= fm20["target_escalations"]
+    assert 0.0 <= matched_fm["aurc_selective_risk"] <= 1.0
+    assert 0.0 <= hybrid_fm["aurc_selective_risk"] <= 1.0
+    assert hybrid_fm["aurc_selective_risk"] < matched_fm["aurc_selective_risk"]
+
+    ex08_path = PKG_DIR.parent / "examples" / "08_frozen_advisor_benchmark.py"
+    spec8 = importlib.util.spec_from_file_location("ex08_fable43", str(ex08_path))
+    assert spec8 is not None and spec8.loader is not None
+    mod8 = importlib.util.module_from_spec(spec8)
+    spec8.loader.exec_module(mod8)
+    rep8 = mod8.evaluate_frozen_advisor_benchmark()
+    eq8 = rep8["equal_escalation_comparison"]
+    assert len(eq8["rows"]) == 2
+    for row in eq8["rows"]:
+        assert row["effective_escalations"] == eq8["target_escalations"]
+        assert 0.0 <= row["aurc_drop_risk"] <= 1.0
+
+
 
 
 

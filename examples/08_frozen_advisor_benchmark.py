@@ -113,7 +113,7 @@ def evaluate_frozen_advisor_benchmark(
     assert all(set(t["acceptable_tools"]).issubset(all_set) for t in tasks)
     moe = mb.ToolRoutingMoE(d_model=256)
 
-    def _kw_frozen_select(q: str) -> Dict[str, Any]:
+    def _kw_scored(q: str) -> Dict[str, Any]:
         q_toks = set(re.findall(r"(?u)\b\w+\b", q.lower()))
         scored = []
         for n in all_names:
@@ -121,10 +121,20 @@ def evaluate_frozen_advisor_benchmark(
             scored.append((len(q_toks & d_toks), n))
         scored.sort(key=lambda kv: (-kv[0], kv[1]))
         top_sc = scored[0][0] if scored else 0
-        margin = top_sc - (scored[min(top_k, len(scored) - 1)][0] if scored else 0)
-        if top_sc < 2 or margin < 1:
-            return {"mode": "escalate_full_catalog", "candidate_tools": list(all_names)}
-        return {"mode": "narrowed", "candidate_tools": [n for _, n in scored[:top_k]]}
+        k_ref = scored[min(top_k, len(scored) - 1)][0] if scored else 0
+        margin = top_sc - k_ref
+        nat_esc = (top_sc < 2) or (margin < 1)
+        return {
+            "mode": "escalate_full_catalog" if nat_esc else "narrowed",
+            "candidate_tools": list(all_names) if nat_esc else [n for _, n in scored[:top_k]],
+            "top_k_tools": [n for _, n in scored[:top_k]],
+            "score": float(top_sc) + 0.5 * float(margin),
+            "naturally_escalated": nat_esc,
+        }
+
+    def _kw_frozen_select(q: str) -> Dict[str, Any]:
+        r = _kw_scored(q)
+        return {"mode": r["mode"], "candidate_tools": r["candidate_tools"]}
 
     def _mb_per_turn_select(q: str) -> Dict[str, Any]:
         return moe.narrow_tool_surface(q, available_tools=all_names, top_k=top_k, tool_descriptions=descriptions)
@@ -241,6 +251,92 @@ def evaluate_frozen_advisor_benchmark(
         sample_id="frozen_advisor_40",
     )
 
+    # Equal-escalation-rate & Risk-Coverage AURC comparison at matched escalation budget
+    kw_scored = []
+    mb_scored = []
+    for t in tasks:
+        kw_r = _kw_scored(t["query"])
+        kw_scored.append({
+            "id": t["id"],
+            "acceptable_tools": set(t["acceptable_tools"]),
+            "top_k_tools": list(kw_r["top_k_tools"]),
+            "score": float(kw_r["score"]),
+            "naturally_escalated": bool(kw_r["naturally_escalated"]),
+        })
+        mb_r = moe.rank_tools(
+            t["query"],
+            available_tools=all_names,
+            top_k=top_k,
+            tool_descriptions=descriptions,
+        )
+        mb_scored.append({
+            "id": t["id"],
+            "acceptable_tools": set(t["acceptable_tools"]),
+            "top_k_tools": list(mb_r["recommended_top_k"][:top_k]),
+            "score": float(mb_r["confidence"]),
+            "naturally_escalated": bool(mb_r["should_escalate_full_catalog"]),
+        })
+
+    target_escalations = sum(1 for x in mb_scored if x["naturally_escalated"])
+
+    def _eval_at_equal_esc(sel_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        n_items = len(items)
+        nat_esc = sum(1 for x in items if x["naturally_escalated"])
+        eff_esc = min(n_items, max(target_escalations, nat_esc))
+        ordered = sorted(
+            items,
+            key=lambda x: (0 if x["naturally_escalated"] else 1, float(x["score"]), x["id"]),
+        )
+        esc_ids = {x["id"] for x in ordered[:eff_esc]}
+
+        eq_dropped = 0
+        eq_narrowed = 0
+        eq_narrowed_hits = 0
+        for x in items:
+            if x["id"] in esc_ids:
+                continue
+            eq_narrowed += 1
+            if x["acceptable_tools"] & set(x["top_k_tools"]):
+                eq_narrowed_hits += 1
+            else:
+                eq_dropped += 1
+
+        aurc_ordered = sorted(
+            items,
+            key=lambda x: (1 if x["naturally_escalated"] else 0, -float(x["score"]), x["id"]),
+        )
+        cum_drops = 0
+        risk_sum = 0.0
+        for k_cov, x in enumerate(aurc_ordered, start=1):
+            cands_k = all_names if x["naturally_escalated"] else x["top_k_tools"]
+            if not (x["acceptable_tools"] & set(cands_k)):
+                cum_drops += 1
+            risk_sum += cum_drops / float(k_cov)
+        aurc_drop_risk = round(risk_sum / float(n_items), 4) if n_items else 0.0
+
+        eq_drop_pct = (eq_dropped / float(n_items)) * 100.0 if n_items else 0.0
+        eq_cp95 = mb.AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(eq_dropped, n_items, alpha=0.05) * 100.0
+        return {
+            "selector": sel_name,
+            "target_escalations": target_escalations,
+            "natural_escalations": nat_esc,
+            "effective_escalations": eff_esc,
+            "narrowed": f"{eq_narrowed}/{n_items}",
+            "dropped": f"{eq_dropped}/{n_items}",
+            "recall_at_k_pct": round(100.0 - eq_drop_pct, 1),
+            "narrowed_recall_pct": round((eq_narrowed_hits / float(eq_narrowed)) * 100.0, 1) if eq_narrowed else 100.0,
+            "cp95_upper_drop_pct": round(eq_cp95, 1),
+            "aurc_drop_risk": aurc_drop_risk,
+        }
+
+    equal_esc_comparison = {
+        "target_escalations": target_escalations,
+        "rows": [
+            _eval_at_equal_esc("Simple Name+Desc Keyword", kw_scored),
+            _eval_at_equal_esc("Microbrains Top-4", mb_scored),
+        ],
+    }
+
     return {
         "n_tasks": len(tasks),
         "turns_per_session": turns_per_session,
@@ -249,6 +345,7 @@ def evaluate_frozen_advisor_benchmark(
         "agreed_narrowed_total": agreed_narrowed_total,
         "agreed_narrowed_drops": agreed_narrowed_drops,
         "rows": rows,
+        "equal_escalation_comparison": equal_esc_comparison,
         "moe_topk_holdout_report": holdout_report,
     }
 
@@ -288,6 +385,16 @@ def main() -> None:
             f"| {r['strategy']} | {r['recall_at_k_pct']}% | {r['narrowed_recall_pct']}% | "
             f"{r['narrowed']} | {r['dropped']} | <= {r['cp95_upper_drop_pct']}% | "
             f"{r['uncached_net_saved_pct']}% | {r['cache_adjusted_net_saved_pct']}% | {r['p95_ms']:.3f} ms |"
+        )
+    eq = rep["equal_escalation_comparison"]
+    print(f"\n=== Equal-Escalation-Rate Comparison (Matched Budget: {eq['target_escalations']}/120 escalated) ===")
+    print("| Selector | Escalated | Narrowed | Dropped | Recall@4 | Narrowed Recall | 95% CP Upper Drop | AURC Drop Risk |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for r in eq["rows"]:
+        print(
+            f"| {r['selector']} | {r['effective_escalations']}/120 (nat {r['natural_escalations']}) | "
+            f"{r['narrowed']} | {r['dropped']} | {r['recall_at_k_pct']}% | "
+            f"{r['narrowed_recall_pct']}% | <= {r['cp95_upper_drop_pct']}% | {r['aurc_drop_risk']:.4f} |"
         )
     print("\n=== Decoupled Patch Diagnostic Advisor Check ===")
     patch_rep = run_patch_advisor_check()
