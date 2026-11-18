@@ -114,6 +114,9 @@ class PolicyConfig:
     protected_patterns: Tuple[str, ...] = DEFAULT_PROTECTED_PATTERNS
     require_approval_for_external: bool = False
     require_approval_for_irreversible: bool = True
+    require_full_source_for_allow: bool = False
+    escalation_timeout_sec: int = 300
+    default_on_escalation_timeout: str = "deny"
     max_diff_lines: int = 480
     strict_ast_allowlist: bool = False
     allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
@@ -1254,14 +1257,38 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
     }
 
 
+_REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sk-proj-[A-Za-z0-9_\-]{12,}"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Mask known credential/token patterns before logging or printing errors."""
+    out = str(text or "")
+    for pat, repl in _REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
 def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] = None) -> None:
     """Record structured decision telemetry into ring buffer and optional JSONL journal."""
-    _DECISION_RING_BUFFER.append(dict(entry))
+    sanitized = dict(entry)
+    if isinstance(sanitized.get("label"), str):
+        sanitized["label"] = redact_secrets(sanitized["label"])
+    _DECISION_RING_BUFFER.append(sanitized)
     target = journal_path or DEFAULT_JOURNAL_PATH
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not target.exists()
         with open(target, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
+        if is_new and os.name != "nt":
+            os.chmod(target, 0o600)
     except Exception:
         pass
 
@@ -1357,6 +1384,7 @@ def decide(
         reason_code: str,
         layer: int,
         conformal_bound: Optional[float] = None,
+        calibration_basis: Optional[str] = None,
     ) -> Dict[str, Any]:
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
@@ -1374,7 +1402,7 @@ def decide(
 
         out: Dict[str, Any] = {
             "decision": decision,
-            "label": label,
+            "label": redact_secrets(label),
             "prediction_set": pred_set,
             "reason_code": reason_code,
             "layer": layer,
@@ -1384,8 +1412,15 @@ def decide(
             "input_sha256": input_sha256,
             "shadow_mode": shadow_mode,
             "upper_error_bound_95": upper_error_bound_95,
+            "calibration_basis": calibration_basis or "deterministic_rule",
             "drift_detected": drift_detected,
         }
+        if decision == "escalate":
+            out["escalation_contract"] = {
+                "recipient": "human_or_llm_supervisor",
+                "timeout_sec": cfg.escalation_timeout_sec,
+                "default_on_timeout": cfg.default_on_escalation_timeout,
+            }
         if shadow_mode:
             out["shadow_decision"] = decision
             out["shadow_reason_code"] = reason_code
@@ -1429,7 +1464,12 @@ def decide(
                     1,
                 )
 
+        hunk_only_checked = False
         if diff_text is not None:
+            is_hunk_without_source = (
+                original_source is None
+                and ("@@" in diff_text or diff_text.lstrip().startswith(("diff --git", "--- ", "+++ ")))
+            )
             diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source)
             if not diff_res["security_clean"]:
                 return _finish("deny", diff_res["findings"][0], ["deny"], "layer1_ast_security_veto", 1)
@@ -1439,6 +1479,10 @@ def decide(
                 return _finish("deny", "syntax_error", ["deny"], "layer1_ast_syntax_error", 1)
             if diff_res["line_count"] > cfg.max_diff_lines:
                 return _finish("escalate", "high_blast_radius", ["allow", "deny"], "layer1_diff_scale_exceeded", 1)
+            if is_hunk_without_source and cfg.require_full_source_for_allow:
+                return _finish("escalate", "partial_hunk_without_source", ["allow", "deny"], "layer1_partial_hunk_without_source", 1)
+            if is_hunk_without_source:
+                hunk_only_checked = True
             if cfg.strict_ast_allowlist and diff_res.get("language") == "python":
                 allowed_mods = set(cfg.allowed_ast_imports)
                 unapproved = [m for m in diff_res.get("imported_modules", []) if m not in allowed_mods]
@@ -1465,7 +1509,8 @@ def decide(
         if tool_name and not query_text:
             is_verified = bool(cmd_str) or (diff_text is not None) or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
             if is_verified:
-                return _finish("allow", tool_name, [tool_name], "layer1_structural_verified", 1)
+                ok_code = "layer1_hunk_only_checked" if hunk_only_checked else "layer1_structural_verified"
+                return _finish("allow", tool_name, [tool_name], ok_code, 1)
             return _finish("escalate", tool_name, ["allow", "deny"], "layer1_uninspected_tool", 1)
 
     except Exception as exc:
@@ -1479,11 +1524,14 @@ def decide(
             from .tool_routing_moe import get_tool_routing_moe
             moe = get_tool_routing_moe()
             moe_res = moe.route(query_text, available_tools=available_tools)
-            cal_bound = (
-                moe.calibration_report().get("upper_error_bound_95")
-                if hasattr(moe, "calibration_report")
-                else round(1.0 - (0.05 ** (1.0 / 120.0)), 4)
-            )
+            cal_rep = moe.calibration_report() if hasattr(moe, "calibration_report") else {}
+            cal_bound = cal_rep.get("upper_error_bound_95", round(1.0 - (0.05 ** (1.0 / 120.0)), 4))
+            if cal_rep.get("recalibrated"):
+                cal_basis = "recalibrated_journal"
+            elif cal_rep.get("n_calibration_samples", 0) > 0:
+                cal_basis = "measured_holdout"
+            else:
+                cal_basis = "default_fallback"
             if not moe_res.conformal_passed:
                 return _finish(
                     "escalate",
@@ -1492,6 +1540,7 @@ def decide(
                     "layer2_conformal_abstention_ood",
                     2,
                     conformal_bound=cal_bound,
+                    calibration_basis=cal_basis,
                 )
             return _finish(
                 "allow",
@@ -1500,13 +1549,14 @@ def decide(
                 "layer2_conformal_singleton",
                 2,
                 conformal_bound=cal_bound,
+                calibration_basis=cal_basis,
             )
         except Exception as exc:
             # Fail safe: escalate to Layer 3 LLM rather than returning a fake constant
-            return _finish("escalate", "unknown", [], f"layer2_unavailable:{type(exc).__name__}", 3)
+            return _finish("escalate", "unknown", [], f"layer2_unavailable:{type(exc).__name__}", 3, calibration_basis="unavailable_fallback")
 
     # --- Layer 3: Fallback Escalation ---
-    return _finish("escalate", "ambiguous", [], "layer3_default_escalation", 3)
+    return _finish("escalate", "ambiguous", [], "layer3_default_escalation", 3, calibration_basis="unavailable_fallback")
 
 
 def recalibrate_from_decision_journal(

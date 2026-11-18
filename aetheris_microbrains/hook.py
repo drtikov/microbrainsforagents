@@ -14,8 +14,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, Optional
+
+_HOOK_REDACT_PATTERNS = (
+    (re.compile(r"sk-proj-[A-Za-z0-9_\-]{12,}"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+)
+
+
+def _redact_error_text(text: str) -> str:
+    out = str(text or "")
+    for pat, repl in _HOOK_REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
 
 
 def _load_decision_engine():
@@ -155,7 +172,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            err_msg = f"invalid_hook_json:{exc}"
+            err_msg = f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})"
             print(err_msg, file=sys.stderr)
             print(
                 _format_hook_stdout(
@@ -189,7 +206,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(_format_hook_stdout(result["hookSpecificOutput"]))
         return exit_code
     except Exception as exc:
-        err_msg = f"hook_internal_error:{type(exc).__name__}:{exc}"
+        err_msg = _redact_error_text(f"hook_internal_error:{type(exc).__name__}:{exc}")
         print(err_msg, file=sys.stderr)
         print(
             _format_hook_stdout(

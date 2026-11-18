@@ -1005,6 +1005,51 @@ def test_fable_38_lazy_init_hook_import_fail_closed_and_shadow(monkeypatch, caps
     assert shadow_proc.stdout.strip() == ""
 
 
+def test_fable_39_praxis_hardening_journal_escalation_hunk_and_basis(tmp_path):
+    from aetheris_microbrains.core.layered_decision_engine import PolicyConfig, redact_secrets
+    from aetheris_microbrains.core.cascade_ensemble import CascadeEnsembleRouter
+
+    # 1. Secret redaction in journal/error telemetry
+    raw_secret = "failed with key sk-proj-1234567890abcdef1234567890abcdef and ghp_abcdefghijklmnopqrstuvwx"
+    redacted = redact_secrets(raw_secret)
+    assert "sk-proj-" not in redacted
+    assert "ghp_" not in redacted
+    assert "[REDACTED_OPENAI_KEY]" in redacted
+    assert "[REDACTED_GITHUB_TOKEN]" in redacted
+
+    # 2. Escalation contract on decide() and CascadeEnsembleRouter
+    esc = mb.decide({"tool": "NotebookEdit", "path": "nb.ipynb"})
+    assert esc["decision"] == "escalate"
+    assert esc["escalation_contract"]["default_on_timeout"] == "deny"
+    assert esc["escalation_contract"]["timeout_sec"] == 300
+
+    router = CascadeEnsembleRouter()
+    blocked = router.evaluate_action_pipeline(
+        task_prompt="edit protected bible",
+        target_tool="write_file",
+        tool_args={"path": "memory/bible.md", "diff": "+# x\n"},
+    )
+    assert blocked.escalation_payload["default_on_timeout"] == "deny"
+    assert blocked.escalation_payload["timeout_sec"] == 300
+
+    # 3. Honest hunk-only status vs require_full_source_for_allow
+    hunk = "@@ -10,2 +10,3 @@\n+x = 1\n"
+    res_hunk = mb.decide({"tool": "edit_file", "path": "src/a.py", "diff": hunk})
+    assert res_hunk["decision"] == "allow"
+    assert res_hunk["reason_code"] == "layer1_hunk_only_checked"
+
+    strict_src_pol = PolicyConfig(require_full_source_for_allow=True)
+    res_strict = mb.decide({"tool": "edit_file", "path": "src/a.py", "diff": hunk}, policy=strict_src_pol)
+    assert res_strict["decision"] == "escalate"
+    assert res_strict["reason_code"] == "layer1_partial_hunk_without_source"
+
+    # 4. calibration_basis provenance
+    l1_res = mb.decide({"tool": "read_file", "path": "src/a.py"})
+    assert l1_res["calibration_basis"] == "deterministic_rule"
+    l2_res = mb.decide("read file src/app.py")
+    assert l2_res["calibration_basis"] in {"measured_holdout", "recalibrated_journal", "default_fallback"}
+
+
 
 
 

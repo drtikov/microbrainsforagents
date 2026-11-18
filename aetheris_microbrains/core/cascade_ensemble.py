@@ -359,6 +359,8 @@ class CascadeEnsembleRouter:
                 "bottleneck_confidence": bottleneck_conf,
                 "reasons": list(reasons),
                 "delegate_to": "HUMAN_SUPERVISOR",
+                "timeout_sec": 300,
+                "default_on_timeout": "deny",
             }
         elif not suki_passed:
             verdict_str = "BLOCKED_PRECONDITION_SUKI"
@@ -370,6 +372,8 @@ class CascadeEnsembleRouter:
                 "bottleneck_confidence": bottleneck_conf,
                 "reasons": list(reasons),
                 "delegate_to": "POLICY_REVIEWER",
+                "timeout_sec": 300,
+                "default_on_timeout": "deny",
             }
         elif (not all_passed) or bottleneck_conf < 0.70:
             verdict_str = "DEGRADED_FALLBACK"
@@ -387,6 +391,8 @@ class CascadeEnsembleRouter:
                 "bottleneck_confidence": bottleneck_conf,
                 "reasons": list(reasons),
                 "delegate_to": "LLM_CASCADE_ROUTER",
+                "timeout_sec": 300,
+                "default_on_timeout": "deny",
             }
         else:
             verdict_str = "AUTHORIZED"
