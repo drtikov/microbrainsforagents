@@ -74,13 +74,29 @@ class TestMetricsHonesty:
         line = [l for l in text.splitlines() if 'domain="probe_domain_a"' in l and "coverage" in l][0]
         assert line.strip().endswith("1.0")
 
-    def test_dashboard_page_carries_demo_banner(self):
+    def test_dashboard_page_carries_demo_banner(self, monkeypatch, tmp_path):
         from aetheris_microbrains.core import microbrain_server
+        from aetheris_microbrains.core import microbrain_telemetry as mt
 
-        resp = asyncio.run(microbrain_server.telemetry_dashboard())
-        body = resp.body.decode("utf-8")
-        assert "STATIC DEMO" in body
-        assert "/metrics" in body
+        fresh = mt.MicrobrainTelemetry(
+            log_path=tmp_path / "tel.jsonl",
+            dashboard_path=tmp_path / "dash.json",
+        )
+        monkeypatch.setattr(mt, "_telemetry_singleton", fresh)
+
+        live_resp = asyncio.run(microbrain_server.telemetry_dashboard())
+        live_body = live_resp.body.decode("utf-8")
+        assert "No telemetry events recorded yet" in live_body
+        assert "0.28 ms" not in live_body
+        assert "98.5%" not in live_body
+        assert "GT 710" not in live_body
+        assert "/metrics" in live_body
+        assert "/demo/dashboard" in live_body
+
+        demo_resp = asyncio.run(microbrain_server.demo_dashboard())
+        demo_body = demo_resp.body.decode("utf-8")
+        assert "STATIC DEMO" in demo_body
+        assert "/metrics" in demo_body
 
 
 # ---------------------------------------------------------------------------

@@ -2,8 +2,8 @@
 
 Addresses the key metric for MCP-Zero Top-K tool narrowing:
   1. Real serialized OpenAI JSON tool schemas (32 tools) rather than a flat constant.
-  2. Needed-Tool Drop Rate (1 - Recall@K) across K in {2, 4, 6, 8} on 40 diverse
-     SWE-bench / BFCL-style tasks not copied from detector rules.
+  2. Needed-Tool Drop Rate (1 - Recall@K) across K in {2, 4, 6, 8} on 40 handcrafted
+     SWE / DevOps-style queries (38 in-domain, 2 OOD; not an official BFCL dataset split).
   3. Net Token Savings *after* Retry Penalty (re-prompting with the full 32-tool
      catalog + context whenever Top-K drops the required tool).
   4. Optional live-LLM A/B mode (`--live`) using the `openai` SDK against any
@@ -411,31 +411,19 @@ def evaluate_baselines_comparison(
     def _mb_select(q: str) -> List[str]:
         return mb.narrow_tool_surface(q, available_tools=all_names, top_k=top_k, tool_descriptions=descriptions)["candidate_tools"]
 
-    # Match full-catalog escalation budget of Microbrains via a numeric (margin, top_score) cutoff,
-    # and score every query INSIDE _kw_matched_select so latency comparison is apples-to-apples.
-    mb_escalated_queries = sum(1 for t in tasks if len(_mb_select(t["query"])) >= len(all_names))
-    kw_margins = []
-    for t in tasks:
-        sc = _kw_scored(t["query"])
-        margin = sc[0][0] - sc[min(top_k, len(sc) - 1)][0]
-        kw_margins.append((margin, sc[0][0]))
-    kw_margins.sort()
-    if mb_escalated_queries > 0 and kw_margins:
-        cutoff_idx = min(len(kw_margins) - 1, mb_escalated_queries - 1)
-        margin_thresh, top_score_thresh = kw_margins[cutoff_idx]
-    else:
-        margin_thresh, top_score_thresh = (-1, -1)
-
-    def _kw_matched_select(q: str) -> List[str]:
+    # Pre-frozen deterministic escalation rule (never fitted/calibrated on test queries):
+    # escalate to the full catalog when lexical overlap is weak or ambiguous (top_score < 2 or margin < 1).
+    def _kw_frozen_esc_select(q: str) -> List[str]:
         sc = _kw_scored(q)
-        margin = sc[0][0] - sc[min(top_k, len(sc) - 1)][0]
-        if (margin, sc[0][0]) <= (margin_thresh, top_score_thresh):
+        top_score = sc[0][0] if sc else 0
+        margin = top_score - (sc[min(top_k, len(sc) - 1)][0] if sc else 0)
+        if top_score < 2 or margin < 1:
             return list(all_names)
         return [n for _, n in sc[:top_k]]
 
     return [
         _run_selector("Naive Keyword Top-4", _kw_select),
-        _run_selector("Naive Keyword Top-4 (Matched Esc.)", _kw_matched_select),
+        _run_selector("Naive Keyword Top-4 (Frozen Esc.)", _kw_frozen_esc_select),
         _run_selector("Embedding + Ridge Top-4", _emb_ridge_select),
         _run_selector("Microbrains Top-4 (Hybrid)", _mb_select),
     ]

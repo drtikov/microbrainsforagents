@@ -189,6 +189,8 @@ class ToolRoutingMoE:
         self.calibration_alpha: float = 0.05
         self.recalibrated_from_journal: bool = False
         self.calibration_sample_id: Optional[str] = None
+        self.error_metric: str = "unmeasured"
+        self.last_topk_eval_report: Optional[Dict[str, Any]] = None
 
         # Synthetic per-expert self-consistency probes (n = 22 per expert, derived from keywords/stems)
         self.per_expert_quantiles: Dict[str, float] = {}
@@ -213,13 +215,17 @@ class ToolRoutingMoE:
                 alpha=0.05,
             )
 
-        return {
+        err_metric = self.error_metric if self.verified_episodes > 0 else "unmeasured"
+        if self.verified_episodes > 0 and err_metric == "unmeasured":
+            err_metric = "top1_routing_mismatch"
+
+        rep: Dict[str, Any] = {
             "calibration_basis": self.calibration_basis,
             "recalibrated": bool(self.recalibrated_from_journal),
             "n_calibration_samples": len(self.per_expert_quantiles) * 22,
             "verified_episodes": int(self.verified_episodes),
             "verified_errors": int(self.verified_errors),
-            "error_metric": "top1_routing_mismatch" if self.verified_episodes > 0 else "unmeasured",
+            "error_metric": err_metric,
             "confidence_level": round(1.0 - float(self.calibration_alpha), 4),
             "alpha": float(self.calibration_alpha),
             "sample_id": self.calibration_sample_id,
@@ -227,6 +233,9 @@ class ToolRoutingMoE:
             "upper_error_bound_95": upper_bound_95,
             "statistical_confidence_status": "verified" if self.verified_episodes > 0 else "unknown",
         }
+        if self.last_topk_eval_report is not None:
+            rep["topk_evaluation"] = dict(self.last_topk_eval_report)
+        return rep
 
     def _fit_ridge_gate(self, l2_reg: float = 0.25) -> np.ndarray:
         """Fit gating projection W_gate analytically via L2-regularized ridge regression."""
@@ -691,6 +700,270 @@ class ToolRoutingMoE:
             "semantic_hybrid": bool(tool_descriptions or embed_fn is not None),
         }
 
+    def rank_tools(
+        self,
+        task_description: str,
+        available_tools: Optional[Sequence[str]] = None,
+        top_k: int = 4,
+        context_tags: Optional[List[str]] = None,
+        tool_descriptions: Optional[Dict[str, str]] = None,
+        embed_fn: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Advisory non-mutating tool ranker (never removes tools or authorizes execution)."""
+        all_catalog = (
+            list(dict.fromkeys(str(t) for t in available_tools if t))
+            if available_tools is not None
+            else [t for tools in self.EXPERT_TOOLS.values() for t in tools]
+        )
+        decision = self.route(
+            task_description,
+            context_tags=context_tags,
+            available_tools=all_catalog if available_tools is not None else None,
+        )
+        tokens = [t for t in re.findall(r"(?u)\b\w+\b", str(task_description or "").lower()) if len(t) > 1]
+        if context_tags:
+            tokens.extend(t.lower() for t in context_tags if t)
+        top_expert = decision.top_experts[0][0] if decision.top_experts else None
+        lexical_ranked = self._score_candidate_tools(all_catalog, tokens, expert=top_expert)
+        sem_scores = (
+            self._semantic_description_scores(
+                task_description,
+                all_catalog,
+                tool_descriptions=tool_descriptions,
+                embed_fn=embed_fn,
+            )
+            if (tool_descriptions or embed_fn is not None)
+            else {}
+        )
+        combined = sorted(
+            ((name, round(float(score) + 3.0 * float(sem_scores.get(name, 0.0)), 4)) for name, score in lexical_ranked),
+            key=lambda kv: (-kv[1], kv[0]),
+        )
+        ranked_tools = [
+            {"tool": name, "score": sc, "rank": idx + 1}
+            for idx, (name, sc) in enumerate(combined)
+        ]
+        nar = self.narrow_tool_surface(
+            task_description,
+            available_tools=all_catalog,
+            top_k=top_k,
+            context_tags=context_tags,
+            tool_descriptions=tool_descriptions,
+            embed_fn=embed_fn,
+        )
+        return {
+            "ranked_tools": ranked_tools,
+            "recommended_top_k": list(nar["candidate_tools"][: max(1, int(top_k))]) if nar["mode"] == "narrowed" else [r["tool"] for r in ranked_tools[: max(1, int(top_k))]],
+            "should_escalate_full_catalog": nar["mode"] != "narrowed",
+            "confidence": round(float(decision.confidence), 4),
+            "authorizes_execution": False,
+            "mutates_catalog": False,
+            "calibration_report": self.calibration_report(),
+        }
+
+    def evaluate_topk_holdout(
+        self,
+        traces: Sequence[Dict[str, Any]],
+        top_k: int = 4,
+        available_tools: Optional[Sequence[str]] = None,
+        tool_descriptions: Optional[Dict[str, str]] = None,
+        alpha: float = 0.05,
+        sample_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Measure actual Top-K tool retention and Top-1 mismatch rates on labeled holdout traces.
+
+        Supports both single-label (`tool`/`expected_tool`/`selected_tool`) and multi-label
+        (`acceptable_tools`) traces and updates `calibration_report()` with genuine measured counts.
+        """
+        from .analytical_micro_transformer import AnalyticalMicroTransformer
+
+        eff_alpha = float(alpha)
+        k = max(1, int(top_k))
+        n_eval = 0
+        top1_mismatches = 0
+        topk_drops = 0
+        escalated_count = 0
+        narrowed_count = 0
+        narrowed_drops = 0
+
+        for tr in traces:
+            if not isinstance(tr, dict):
+                continue
+            q = str(tr.get("query") or tr.get("task_prompt") or "").strip()
+            acc_raw = tr.get("acceptable_tools")
+            if acc_raw is not None:
+                acceptable = {str(t).strip() for t in acc_raw if str(t).strip()}
+            else:
+                single = str(tr.get("expected_tool") or tr.get("tool") or tr.get("selected_tool") or "").strip()
+                acceptable = {single} if single else set()
+            if not q or not acceptable:
+                continue
+
+            nar = self.narrow_tool_surface(
+                q,
+                available_tools=available_tools,
+                top_k=k,
+                tool_descriptions=tool_descriptions,
+            )
+            cands = list(nar.get("candidate_tools", []))
+            top1_tool = str(nar.get("selected_tool") or (cands[0] if cands else ""))
+            n_eval += 1
+            if top1_tool not in acceptable:
+                top1_mismatches += 1
+            missed_topk = not any(t in cands for t in acceptable)
+            if missed_topk:
+                topk_drops += 1
+            if nar.get("mode") == "narrowed":
+                narrowed_count += 1
+                if missed_topk:
+                    narrowed_drops += 1
+            else:
+                escalated_count += 1
+
+        resolved_sid = sample_id or f"holdout_topk_{n_eval}"
+        if n_eval == 0:
+            self.verified_episodes = 0
+            self.verified_errors = 0
+            self.error_metric = "unmeasured"
+            self.calibration_sample_id = resolved_sid
+            report = {
+                "n_evaluated": 0,
+                "top_k": k,
+                "top1_mismatches": 0,
+                "top1_mismatch_cp95_upper": None,
+                "topk_drops": 0,
+                "topk_drop_rate": None,
+                "topk_drop_cp95_upper": None,
+                "topk_drop_bound": None,
+                "escalated_count": 0,
+                "escalation_rate": None,
+                "narrowed_count": 0,
+                "narrowed_drops": 0,
+                "narrowed_topk_recall": None,
+                "alpha": eff_alpha,
+                "confidence_level": round(1.0 - eff_alpha, 4),
+                "sample_id": resolved_sid,
+            }
+            self.last_topk_eval_report = report
+            return report
+
+        top1_cp95 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(top1_mismatches, n_eval, alpha=0.05)
+        topk_cp95 = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(topk_drops, n_eval, alpha=0.05)
+        topk_alpha_bound = AnalyticalMicroTransformer.compute_clopper_pearson_upper_bound(topk_drops, n_eval, alpha=eff_alpha)
+        narrowed_recall = round((narrowed_count - narrowed_drops) / float(narrowed_count), 4) if narrowed_count > 0 else None
+
+        report = {
+            "n_evaluated": n_eval,
+            "top_k": k,
+            "top1_mismatches": top1_mismatches,
+            "top1_mismatch_cp95_upper": top1_cp95,
+            "topk_drops": topk_drops,
+            "topk_drop_rate": round(topk_drops / float(n_eval), 4),
+            "topk_drop_cp95_upper": topk_cp95,
+            "topk_drop_bound": topk_alpha_bound,
+            "escalated_count": escalated_count,
+            "escalation_rate": round(escalated_count / float(n_eval), 4),
+            "narrowed_count": narrowed_count,
+            "narrowed_drops": narrowed_drops,
+            "narrowed_topk_recall": narrowed_recall,
+            "alpha": eff_alpha,
+            "confidence_level": round(1.0 - eff_alpha, 4),
+            "sample_id": resolved_sid,
+        }
+        self.verified_episodes = n_eval
+        self.verified_errors = topk_drops
+        self.calibration_alpha = eff_alpha
+        self.calibration_basis = "measured_holdout"
+        self.recalibrated_from_journal = False
+        self.calibration_sample_id = resolved_sid
+        self.error_metric = f"topk_tool_drop_k{k}"
+        self.last_topk_eval_report = dict(report)
+        return report
+
+
+class SessionToolSurface:
+    """Prompt-cache-friendly sticky tool surface manager for multi-turn agent sessions.
+
+    Narrows tools once per session (unless refreshed or monotonically expanded to full on
+    failure) so LLM prompt prefixes stay cacheable across turns without prefix invalidation.
+    """
+
+    def __init__(
+        self,
+        available_tools: Sequence[str],
+        top_k: int = 4,
+        tool_descriptions: Optional[Dict[str, str]] = None,
+        embed_fn: Optional[Any] = None,
+        moe: Optional[ToolRoutingMoE] = None,
+    ):
+        self.full_catalog: List[str] = list(dict.fromkeys(str(t) for t in available_tools if t))
+        self.top_k: int = max(1, int(top_k))
+        self.tool_descriptions: Optional[Dict[str, str]] = tool_descriptions
+        self.embed_fn: Optional[Any] = embed_fn
+        self.moe: ToolRoutingMoE = moe or get_tool_routing_moe()
+        self.active_tools: Optional[List[str]] = None
+        self.expanded_to_full: bool = False
+        self.turns: int = 0
+        self.cache_hits: int = 0
+        self.cache_invalidations: int = 0
+
+    def select_for_turn(
+        self,
+        task_description: str,
+        context_tags: Optional[List[str]] = None,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        self.turns += 1
+        if self.active_tools is not None and not force_refresh:
+            self.cache_hits += 1
+            return {
+                "mode": "sticky_reuse",
+                "candidate_tools": list(self.active_tools),
+                "cache_prefix_preserved": True,
+                "expanded_to_full": self.expanded_to_full,
+                "reduction_ratio": round(max(0.0, 1.0 - (len(self.active_tools) / float(max(1, len(self.full_catalog))))), 4),
+            }
+
+        prev = list(self.active_tools) if self.active_tools is not None else None
+        nar = self.moe.narrow_tool_surface(
+            task_description,
+            available_tools=self.full_catalog,
+            top_k=self.top_k,
+            context_tags=context_tags,
+            tool_descriptions=self.tool_descriptions,
+            embed_fn=self.embed_fn,
+        )
+        new_cands = list(nar["candidate_tools"])
+        self.active_tools = new_cands
+        self.expanded_to_full = len(new_cands) >= len(self.full_catalog)
+        if prev is not None and new_cands != prev:
+            self.cache_invalidations += 1
+        return {
+            "mode": str(nar.get("mode", "narrowed")),
+            "candidate_tools": list(self.active_tools),
+            "cache_prefix_preserved": prev is None or new_cands == prev,
+            "expanded_to_full": self.expanded_to_full,
+            "reduction_ratio": float(nar.get("reduction_ratio", 0.0)),
+        }
+
+    def expand_to_full(self) -> List[str]:
+        if self.active_tools != self.full_catalog:
+            if self.active_tools is not None:
+                self.cache_invalidations += 1
+            self.active_tools = list(self.full_catalog)
+        self.expanded_to_full = True
+        return list(self.active_tools)
+
+    def stats(self) -> Dict[str, Any]:
+        return {
+            "turns": self.turns,
+            "cache_hits": self.cache_hits,
+            "cache_invalidations": self.cache_invalidations,
+            "active_tool_count": len(self.active_tools) if self.active_tools is not None else len(self.full_catalog),
+            "full_tool_count": len(self.full_catalog),
+            "expanded_to_full": self.expanded_to_full,
+        }
+
 
 _moe_singleton: Optional[ToolRoutingMoE] = None
 
@@ -701,6 +974,25 @@ def get_tool_routing_moe() -> ToolRoutingMoE:
     if _moe_singleton is None:
         _moe_singleton = ToolRoutingMoE(d_model=256)
     return _moe_singleton
+
+
+def rank_tools(
+    task_description: str,
+    available_tools: Optional[Sequence[str]] = None,
+    top_k: int = 4,
+    context_tags: Optional[List[str]] = None,
+    tool_descriptions: Optional[Dict[str, str]] = None,
+    embed_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Convenience entrypoint for non-mutating advisory tool ranking."""
+    return get_tool_routing_moe().rank_tools(
+        task_description=task_description,
+        available_tools=available_tools,
+        top_k=top_k,
+        context_tags=context_tags,
+        tool_descriptions=tool_descriptions,
+        embed_fn=embed_fn,
+    )
 
 
 def narrow_tool_surface(

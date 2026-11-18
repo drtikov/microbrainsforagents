@@ -114,15 +114,26 @@ def evaluate_hook_payload(
         ctx["shadow_mode"] = True
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
-    reason = f"{verdict['reason_code']}: {verdict['label']}"
+    reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
+    host_contract = {
+        "claude": "claude_pretooluse_v1",
+        "codex": "codex_pretooluse_no_ask_v1",
+        "generic": "generic_v1",
+    }[resolved_host]
 
     perm: Optional[str]
-    if resolved_host == "codex":
+    if shadow_mode:
+        # Strict passive shadow mode: never block or inject host allow/deny regardless of host
+        perm = None
+        exit_code = 0
+        host_action = "shadow_observe"
+        hook_specific = None
+    elif resolved_host == "codex":
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
             exit_code = 2
             host_action = "deny"
-            hook_specific: Optional[Dict[str, Any]] = {
+            hook_specific = {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
@@ -160,7 +171,9 @@ def evaluate_hook_payload(
     out: Dict[str, Any] = {
         "hookSpecificOutput": hook_specific,
         "host": resolved_host,
+        "host_contract": host_contract,
         "host_action": host_action,
+        "authorizes_execution": False,
         "decision": dec,
         "decision_kind": verdict.get("decision_kind"),
         "permissionDecision": perm,
@@ -277,6 +290,25 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+        if not isinstance(payload, dict):
+            err_msg = _redact_error_text("invalid_hook_payload:expected_json_object")
+            print(err_msg, file=sys.stderr)
+            if shadow_mode:
+                return 0
+            if host == "generic":
+                print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+                return 2
+            print(
+                _format_hook_stdout(
+                    {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": err_msg,
+                    }
+                )
+            )
+            return 2
+
         result = evaluate_hook_payload(
             payload,
             strict_ast=args.strict_ast,
@@ -286,6 +318,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             codex_escalate_deny=codex_escalate_deny,
         )
         if shadow_mode:
+            if result.get("journal_written") is False:
+                j_err = _redact_error_text(str(result.get("journal_error") or "unknown"))
+                print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
         exit_code = int(result["exit_code"])
@@ -295,6 +330,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for k in (
                     "decision",
                     "decision_kind",
+                    "authorizes_execution",
+                    "host_contract",
                     "label",
                     "reason_code",
                     "layer",

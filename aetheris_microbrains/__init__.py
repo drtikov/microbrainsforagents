@@ -16,6 +16,8 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Tuple
 
+__version__ = "0.7.3"
+
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # Hook
     "evaluate_hook_payload": (".hook", "evaluate_hook_payload"),
@@ -24,6 +26,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "analyze_code_diff": (".core.layered_decision_engine", "analyze_code_diff"),
     "analyze_shell_command": (".core.layered_decision_engine", "analyze_shell_command"),
     "decide": (".core.layered_decision_engine", "decide"),
+    "diagnose_patch": (".core.layered_decision_engine", "diagnose_patch"),
     "evaluate_layer0_policy": (".core.layered_decision_engine", "evaluate_layer0_policy"),
     "get_recent_decision_journal": (".core.layered_decision_engine", "get_recent_decision_journal"),
     "is_protected_path": (".core.layered_decision_engine", "is_protected_path"),
@@ -75,8 +78,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "get_weight_space_vsa": (".core.weight_space_vsa", "get_weight_space_vsa"),
     "ToolRoutingMoE": (".core.tool_routing_moe", "ToolRoutingMoE"),
     "MoERoutingDecision": (".core.tool_routing_moe", "MoERoutingDecision"),
+    "SessionToolSurface": (".core.tool_routing_moe", "SessionToolSurface"),
     "get_tool_routing_moe": (".core.tool_routing_moe", "get_tool_routing_moe"),
     "narrow_tool_surface": (".core.tool_routing_moe", "narrow_tool_surface"),
+    "rank_tools": (".core.tool_routing_moe", "rank_tools"),
     "CriticalEnsemble": (".core.critical_ensemble_abstention", "CriticalEnsemble"),
     "CriticalConsensusResult": (".core.critical_ensemble_abstention", "CriticalConsensusResult"),
     "EnsembleVote": (".core.critical_ensemble_abstention", "EnsembleVote"),
@@ -128,7 +133,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "VLActionGate": (".core.vla_gating", "VLActionGate"),
 }
 
-__all__ = list(_LAZY_EXPORTS.keys())
+__all__ = ["__version__", *list(_LAZY_EXPORTS.keys())]
 
 
 def __getattr__(name: str) -> Any:

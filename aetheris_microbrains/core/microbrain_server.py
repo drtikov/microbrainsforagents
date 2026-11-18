@@ -7,6 +7,7 @@ and intent classification.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import sys
@@ -18,6 +19,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+try:
+    from .. import __version__ as _PKG_VERSION
+except Exception:
+    _PKG_VERSION = "0.7.3"
 
 log = logging.getLogger("microbrain_server")
 log.setLevel(logging.INFO)
@@ -73,6 +79,9 @@ class IntentResponse(BaseModel):
     intent: str
     confidence: float
     alternatives: List[Dict[str, Any]] = []
+    status: str = "ok"
+    source: str = "microbrain"
+    error: Optional[str] = None
 
 
 class ValidationRequest(BaseModel):
@@ -253,8 +262,8 @@ def _load_brain(brain_name: str) -> Any:
 
 app = FastAPI(
     title="Aetheris Microbrain HTTP Server",
-    description="HTTP API for Aetheris GPU-accelerated microbrains (DSH integration)",
-    version="1.0.0",
+    description="HTTP API for Aetheris microbrains (AST/shell preflight, intent, robotics gating)",
+    version=_PKG_VERSION,
     lifespan=lifespan,
 )
 
@@ -364,18 +373,133 @@ async def prometheus_metrics():
 
 @app.get("/dashboard")
 async def telemetry_dashboard():
-    """Observability dashboard page.
+    """Live observability dashboard backed by MicrobrainTelemetry (zero hardcoded showcase numbers)."""
+    from fastapi.responses import HTMLResponse
 
-    Honesty note (2026-11-18): the card/table values below are STATIC DEMO
-    content, not live measurements. Machine-readable live numbers are served
-    at /metrics; this page exists for layout preview only.
+    uptime = time.time() - _start_time
+    gpu_available = bool(_accelerator and getattr(_accelerator, "available", False))
+    accel_label = "OpenCL GPU (Active)" if gpu_available else "CPU Only (No Active GPU)"
+
+    report = None
+    tel_error: Optional[str] = None
+    try:
+        from .microbrain_telemetry import get_microbrain_telemetry
+
+        report = get_microbrain_telemetry().generate_dashboard(window_size=100)
+    except Exception as exc:
+        tel_error = f"{type(exc).__name__}: {exc}"
+
+    if tel_error:
+        status_banner = f'<div class="warn-banner">Telemetry unavailable: {html.escape(tel_error)}</div>'
+    elif report is None or report.total_events == 0:
+        status_banner = (
+            '<div class="empty-banner">No telemetry events recorded yet &mdash; '
+            'gauges omitted rather than fabricated. Live Prometheus feed: '
+            '<a href="/metrics">/metrics</a> | Static layout demo: <a href="/demo/dashboard">/demo/dashboard</a></div>'
+        )
+    else:
+        status_banner = (
+            f'<div class="ok-banner">Live telemetry active ({report.total_events} events). '
+            f'Prometheus: <a href="/metrics">/metrics</a> | Layout demo: <a href="/demo/dashboard">/demo/dashboard</a></div>'
+        )
+
+    total_ev = str(report.total_events) if report is not None else "0"
+    cov_str = f"{report.conformal_empirical_coverage:.1%}" if (report and report.total_events > 0) else "N/A (0 events)"
+    win_str = f"{report.sliding_window_coverage:.1%}" if (report and report.total_events > 0) else "N/A (0 events)"
+    esc_str = f"{report.escalation_rate:.1%}" if (report and report.total_events > 0) else "N/A (0 events)"
+    ece_str = f"{report.expected_calibration_error:.4f}" if (report and report.total_events > 0) else "N/A"
+
+    domain_rows = []
+    if report and report.total_events > 0 and report.domain_breakdown:
+        for dom, st in sorted(report.domain_breakdown.items()):
+            domain_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(dom))}</td>"
+                f"<td>{int(st.get('events', 0))}</td>"
+                f"<td>{float(st.get('conformal_coverage', 0.0)):.3f}</td>"
+                f"<td>{float(st.get('mean_latency_ms', 0.0)):.3f} ms</td>"
+                "</tr>"
+            )
+    if not domain_rows:
+        domain_rows.append('<tr><td colspan="4">No domain telemetry events recorded yet.</td></tr>')
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Aetheris Microbrains Observability Dashboard</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }}
+        .empty-banner {{ background: #1e293b; border: 1px solid #475569; color: #e2e8f0; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }}
+        .ok-banner {{ background: #064e3b; color: #a7f3d0; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }}
+        .warn-banner {{ background: #7f1d1d; color: #fecaca; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }}
+        a {{ color: #38bdf8; }}
+        h1 {{ color: #38bdf8; font-size: 24px; margin-bottom: 8px; }}
+        .subtitle {{ color: #94a3b8; margin-bottom: 24px; font-size: 14px; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }}
+        .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 18px; }}
+        .card-title {{ color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; }}
+        .card-value {{ font-size: 24px; font-weight: bold; color: #38bdf8; margin: 8px 0 4px 0; }}
+        .card-sub {{ font-size: 12px; color: #cbd5e1; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }}
+        th, td {{ text-align: left; padding: 10px; border-bottom: 1px solid #334155; }}
+        th {{ color: #94a3b8; }}
+    </style>
+</head>
+<body>
+    <h1>Aetheris Microbrains Observability Dashboard</h1>
+    <div class="subtitle">Version {html.escape(_PKG_VERSION)} &bull; Uptime {uptime:.1f}s &bull; Brains loaded: {len(_brain_cache)} / available: {len(_available_brains)}</div>
+    {status_banner}
+    <div class="grid">
+        <div class="card">
+            <div class="card-title">Compute Backend</div>
+            <div class="card-value">{html.escape(accel_label)}</div>
+            <div class="card-sub">Runtime hardware check</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Recorded Events</div>
+            <div class="card-value">{total_ev}</div>
+            <div class="card-sub">ECE: {ece_str}</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Live Conformal Coverage</div>
+            <div class="card-value">{cov_str}</div>
+            <div class="card-sub">Sliding window: {win_str}</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Live Abstention Rate</div>
+            <div class="card-value">{esc_str}</div>
+            <div class="card-sub">Escalated to caller / LLM</div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-title">Live Domain Breakdown</div>
+        <table>
+            <thead>
+                <tr><th>Domain</th><th>Events</th><th>Conformal Coverage</th><th>Mean Latency</th></tr>
+            </thead>
+            <tbody>
+                {"".join(domain_rows)}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/demo/dashboard")
+async def demo_dashboard():
+    """Static layout preview page containing illustrative placeholder numbers only.
+
+    Live measurements are served on `/metrics` and `/dashboard`.
     """
     from fastapi.responses import HTMLResponse
     html_content = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Ouroboros Microbrain Observability Dashboard</title>
+    <title>Aetheris Microbrains Static Demo Dashboard</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
         .demo-banner { background: #7f1d1d; color: #fecaca; padding: 10px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; }
@@ -393,33 +517,33 @@ async def telemetry_dashboard():
     </style>
 </head>
 <body>
-    <div class="demo-banner">&#9888; STATIC DEMO CONTENT &mdash; the numbers on this page are illustrative placeholders, not live measurements. Live machine-readable metrics: <a style="color:#fecaca" href="/metrics">/metrics</a></div>
-    <h1>Ouroboros Microbrain Observability Stack</h1>
-    <div class="subtitle">Live Telemetry & Conformal Calibration (Port 8080)</div>
+    <div class="demo-banner">&#9888; STATIC DEMO CONTENT &mdash; the numbers on this page are illustrative placeholders, not live measurements. Live telemetry: <a style="color:#fecaca" href="/dashboard">/dashboard</a> | Prometheus: <a style="color:#fecaca" href="/metrics">/metrics</a></div>
+    <h1>Aetheris Microbrains Observability Stack (Demo Layout)</h1>
+    <div class="subtitle">Illustrative UI Preview Only</div>
     <div class="grid">
         <div class="card">
             <div class="card-title">Hardware Accelerator</div>
             <div class="card-value">OpenCL GPU</div>
-            <div class="card-sub">NVIDIA GeForce GT 710 (Active)</div>
+            <div class="card-sub">Example OpenCL Backend Card</div>
         </div>
         <div class="card">
-            <div class="card-title">Intent Triage Latency</div>
+            <div class="card-title">Intent Triage Latency (Example)</div>
             <div class="card-value">0.28 ms</div>
-            <div class="card-sub">3,575 QPS (~6,400x vs Remote LLM)</div>
+            <div class="card-sub">Illustrative throughput placeholder</div>
         </div>
         <div class="card">
-            <div class="card-title">Empirical Coverage</div>
+            <div class="card-title">Empirical Coverage (Example)</div>
             <div class="card-value">98.5%</div>
-            <div class="card-sub">Held-out Guarantees (Target &ge; 90%)</div>
+            <div class="card-sub">Illustrative coverage card</div>
         </div>
         <div class="card">
-            <div class="card-title">Selective Abstention Rate</div>
+            <div class="card-title">Selective Abstention Rate (Example)</div>
             <div class="card-value">3.5%</div>
-            <div class="card-sub">Disagreement &sigma; &gt; 0.30 &rarr; LLM Fallback</div>
+            <div class="card-sub">Illustrative escalation card</div>
         </div>
     </div>
     <div class="card">
-        <div class="card-title">Active High-Capacity Microbrain Registry</div>
+        <div class="card-title">Example Microbrain Registry Layout</div>
         <table>
             <thead>
                 <tr>
@@ -431,12 +555,9 @@ async def telemetry_dashboard():
                 </tr>
             </thead>
             <tbody>
-                <tr><td>tool_routing_v3</td><td>MoE Top-2 (d=256)</td><td>151 tokens</td><td>held_out (q=0.012)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
-                <tr><td>constitutional_guardian</td><td>Analytical (d=128)</td><td>57 tokens</td><td>held_out (q=0.0125)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
-                <tr><td>tool_failure_classifier</td><td>Analytical (d=128)</td><td>43 tokens</td><td>held_out (q=0.0125)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
-                <tr><td>speculative_tool_drafter</td><td>Analytical (d=128)</td><td>68 tokens</td><td>held_out (q=0.0125)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
-                <tr><td>patch_quality_predictor</td><td>Analytical (d=128)</td><td>30 tokens</td><td>held_out (q=0.0125)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
-                <tr><td>drift_detector</td><td>Analytical (d=64)</td><td>42 tokens</td><td>held_out (q=0.0125)</td><td><span class="badge">ACTIVE_CORE</span></td></tr>
+                <tr><td>tool_routing_v3</td><td>MoE Top-2 (d=256)</td><td>151 tokens</td><td>synthetic_rule_consistency</td><td><span class="badge">DEMO_ROW</span></td></tr>
+                <tr><td>constitutional_guardian</td><td>Analytical (d=128)</td><td>57 tokens</td><td>synthetic_rule_consistency</td><td><span class="badge">DEMO_ROW</span></td></tr>
+                <tr><td>tool_failure_classifier</td><td>Analytical (d=128)</td><td>43 tokens</td><td>synthetic_rule_consistency</td><td><span class="badge">DEMO_ROW</span></td></tr>
             </tbody>
         </table>
     </div>
@@ -454,19 +575,28 @@ async def classify_intent(req: IntentRequest):
         if hasattr(brain, "forward"):
             result = brain.forward(tokens)
             if isinstance(result, dict):
-                intent = result.get("prediction") or result.get("top_candidate") or _simple_intent_classify(req.text)
-                conf = float(result.get("confidence", 0.85))
-                return IntentResponse(
-                    intent=str(intent),
-                    confidence=conf,
-                    alternatives=[]
-                )
+                raw_pred = result.get("prediction") or result.get("top_candidate")
+                if raw_pred:
+                    return IntentResponse(
+                        intent=str(raw_pred),
+                        confidence=float(result.get("confidence", 0.85)),
+                        alternatives=[],
+                        status="ok",
+                        source="microbrain",
+                    )
         intent = _simple_intent_classify(req.text)
-        return IntentResponse(intent=intent, confidence=0.75, alternatives=[])
+        return IntentResponse(intent=intent, confidence=0.75, alternatives=[], status="fallback", source="fallback_keyword")
     except Exception as e:
         log.warning(f"Intent classification failed: {e}")
         intent = _simple_intent_classify(req.text)
-        return IntentResponse(intent=intent, confidence=0.5, alternatives=[])
+        return IntentResponse(
+            intent=intent,
+            confidence=0.5,
+            alternatives=[],
+            status="fallback_on_error",
+            source="fallback_keyword",
+            error=f"{type(e).__name__}: {e}",
+        )
 
 
 def _simple_intent_classify(text: str) -> str:
@@ -539,7 +669,7 @@ async def validate_code(req: ValidationRequest):
 
 @app.post("/microbrain/prefilter", response_model=PrefilterResponse)
 async def prefilter_candidates(req: PrefilterRequest):
-    """Batch prefilter evolution candidates using surrogate model & AST verification."""
+    """Batch prefilter evolution candidates via Python `ast.parse` and structural heuristics."""
     results = []
     import ast
     try:

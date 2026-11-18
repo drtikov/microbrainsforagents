@@ -932,7 +932,7 @@ def analyze_code_diff(
             "syntax_valid": False,
             "partial_hunk_needs_source": partial_needs_source,
             "security_clean": len(line_findings) == 0,
-            "findings": list(dict.fromkeys(["syntax_tree_malformed"] + line_findings)),
+            "findings": list(dict.fromkeys(line_findings + ["syntax_tree_malformed"])),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1390,12 +1390,14 @@ def decide(
         reason_code: str,
         layer: int,
         conformal_bound: Optional[float] = None,
+        upper_error_bound: Optional[float] = None,
         calibration_basis: Optional[str] = None,
         verified_episodes: int = 0,
         verified_errors: int = 0,
         confidence_level: Optional[float] = None,
         sample_id: Optional[str] = None,
         decision_kind: Optional[str] = None,
+        error_metric: Optional[str] = None,
     ) -> Dict[str, Any]:
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
@@ -1414,13 +1416,22 @@ def decide(
         denom = max(1, len(recent) + 1)
         drift_detected = bool(denom >= 10 and (ood_hits / float(denom)) > 0.60)
         upper_error_bound_95 = round(float(conformal_bound), 4) if conformal_bound is not None else None
+        active_upper_bound = (
+            round(float(upper_error_bound), 4)
+            if upper_error_bound is not None
+            else upper_error_bound_95
+        )
         resolved_kind = decision_kind or (
             "structural_gate" if layer in (0, 1) else ("routing_recommendation" if layer == 2 else "fallback_escalation")
+        )
+        resolved_error_metric = error_metric or (
+            "deterministic_structural_rule" if layer in (0, 1) else "unmeasured"
         )
 
         out: Dict[str, Any] = {
             "decision": decision,
             "decision_kind": resolved_kind,
+            "authorizes_execution": False,
             "label": redact_secrets(label),
             "prediction_set": pred_set,
             "reason_code": reason_code,
@@ -1430,8 +1441,10 @@ def decide(
             "latency_ms": latency_ms,
             "input_sha256": input_sha256,
             "shadow_mode": shadow_mode,
+            "upper_error_bound": active_upper_bound,
             "upper_error_bound_95": upper_error_bound_95,
             "statistical_confidence_status": "verified" if upper_error_bound_95 is not None else "unknown",
+            "error_metric": resolved_error_metric,
             "verified_episodes": int(verified_episodes),
             "verified_errors": int(verified_errors),
             "confidence_level": confidence_level,
@@ -1552,11 +1565,13 @@ def decide(
             moe = get_tool_routing_moe()
             moe_res = moe.route(query_text, available_tools=available_tools)
             cal_rep = moe.calibration_report() if hasattr(moe, "calibration_report") else {}
-            cal_bound = cal_rep.get("upper_error_bound_95")
+            cal_bound_95 = cal_rep.get("upper_error_bound_95")
+            cal_bound_active = cal_rep.get("upper_error_bound")
             verified_eps = int(cal_rep.get("verified_episodes", 0) or 0)
             verified_errs = int(cal_rep.get("verified_errors", 0) or 0)
             conf_level = cal_rep.get("confidence_level")
             sample_id = cal_rep.get("sample_id")
+            err_metric = cal_rep.get("error_metric")
             if cal_rep.get("recalibrated") and verified_eps > 0:
                 cal_basis = "recalibrated_journal"
             elif verified_eps > 0:
@@ -1572,13 +1587,15 @@ def decide(
                     [moe_res.selected_tool, moe_res.secondary_tool],
                     "layer2_conformal_abstention_ood",
                     2,
-                    conformal_bound=cal_bound,
+                    conformal_bound=cal_bound_95,
+                    upper_error_bound=cal_bound_active,
                     calibration_basis=cal_basis,
                     verified_episodes=verified_eps,
                     verified_errors=verified_errs,
                     confidence_level=conf_level,
                     sample_id=sample_id,
                     decision_kind="routing_recommendation",
+                    error_metric=err_metric,
                 )
             return _finish(
                 "allow",
@@ -1586,13 +1603,15 @@ def decide(
                 [moe_res.selected_tool],
                 "layer2_conformal_singleton",
                 2,
-                conformal_bound=cal_bound,
+                conformal_bound=cal_bound_95,
+                upper_error_bound=cal_bound_active,
                 calibration_basis=cal_basis,
                 verified_episodes=verified_eps,
                 verified_errors=verified_errs,
                 confidence_level=conf_level,
                 sample_id=sample_id,
                 decision_kind="routing_recommendation",
+                error_metric=err_metric,
             )
         except Exception as exc:
             # Fail safe: escalate to Layer 3 LLM rather than returning a fake constant
@@ -1606,6 +1625,8 @@ def recalibrate_from_decision_journal(
     journal_entries: Optional[Sequence[Dict[str, Any]]] = None,
     alpha: float = 0.05,
     journal_path: Optional[Path] = None,
+    error_metric: str = "verified_decision_error",
+    sample_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Consume logged decision episodes to compute operational telemetry, failure bounds,
     and updated split-conformal quantiles when labeled nonconformity feedback is present.
@@ -1688,6 +1709,9 @@ def recalibrate_from_decision_journal(
         except Exception:
             router_updated = False
 
+    resolved_sample_id = sample_id or (
+        f"journal_{verified_total}" if verified_total > 0 else (f"journal_scores_{len(nonconf_scores)}" if nonconf_scores else None)
+    )
     if verified_total > 0 or router_updated:
         try:
             from .tool_routing_moe import get_tool_routing_moe
@@ -1698,9 +1722,8 @@ def recalibrate_from_decision_journal(
             moe.calibration_alpha = float(alpha)
             moe.recalibrated_from_journal = bool(router_updated)
             moe.calibration_basis = "recalibrated_journal" if router_updated else "measured_journal"
-            moe.calibration_sample_id = (
-                f"journal_{verified_total}" if verified_total > 0 else f"journal_scores_{len(nonconf_scores)}"
-            )
+            moe.calibration_sample_id = resolved_sample_id
+            moe.error_metric = str(error_metric) if verified_total > 0 else "unmeasured"
         except Exception:
             pass
 
@@ -1717,8 +1740,97 @@ def recalibrate_from_decision_journal(
         "upper_error_bound_95": upper_bound_95,
         "confidence_level": round(1.0 - float(alpha), 4),
         "statistical_confidence_status": conf_status,
-        "error_metric": "verified_decision_error",
+        "error_metric": str(error_metric) if verified_total > 0 else "unmeasured",
+        "sample_id": resolved_sample_id,
         "recalibrated_q_hat": recalibrated_q_hat,
         "router_updated": router_updated,
         "alpha": float(alpha),
+    }
+
+
+def diagnose_patch(
+    path: Optional[str],
+    diff_text: str,
+    original_source: Optional[str] = None,
+    policy: Optional[PolicyConfig] = None,
+) -> Dict[str, Any]:
+    """Decoupled structural & security diagnostic advisor for proposed code diffs.
+
+    Inspects protected paths, Python/JSON/JS/YAML syntax & security sinks, interface
+    hazards, hunk completeness, and optional strict AST allowlists without emitting an
+    authorization verdict (`authorizes_execution=False`).
+    """
+    t0 = time.perf_counter_ns()
+    cfg = policy or DEFAULT_POLICY
+    diff_str = str(diff_text or "")
+    protected = is_protected_path(path, cfg)
+
+    if not diff_str.strip():
+        return {
+            "status": "policy_blocked_path" if protected else "empty_diff",
+            "authorizes_execution": False,
+            "path": path,
+            "protected_path": protected,
+            "syntax_valid": True,
+            "security_clean": not protected,
+            "hunk_only_checked": False,
+            "line_count": 0,
+            "findings": ["protected_path"] if protected else [],
+            "interface_hazards": [],
+            "imported_modules": [],
+            "dynamic_calls": [],
+            "strict_ast_warnings": [],
+            "latency_ms": round((time.perf_counter_ns() - t0) / 1_000_000.0, 4),
+        }
+
+    is_hunk_without_source = (
+        original_source is None
+        and ("@@" in diff_str or diff_str.lstrip().startswith(("diff --git", "--- ", "+++ ")))
+    )
+    diff_res = analyze_code_diff(path, diff_str, original_source=original_source)
+    findings = [redact_secrets(f) for f in diff_res.get("findings", [])]
+    if protected and "protected_path" not in findings:
+        findings.insert(0, "protected_path")
+
+    strict_warnings: List[str] = []
+    if cfg.strict_ast_allowlist and diff_res.get("language") == "python":
+        allowed_mods = set(cfg.allowed_ast_imports)
+        for mod in diff_res.get("imported_modules", []):
+            if mod not in allowed_mods:
+                strict_warnings.append(f"unapproved_import:{mod}")
+        for dyn in diff_res.get("dynamic_calls", []):
+            strict_warnings.append(f"dynamic_call:{dyn}")
+
+    hunk_only_checked = bool(is_hunk_without_source and not diff_res.get("patched_file_ast_verified", False))
+    needs_source = bool(diff_res.get("partial_hunk_needs_source") or (is_hunk_without_source and cfg.require_full_source_for_allow))
+
+    if protected:
+        status = "policy_blocked_path"
+    elif not diff_res.get("security_clean", True) or not diff_res.get("syntax_valid", True):
+        status = "findings_detected"
+    elif needs_source:
+        status = "needs_full_source"
+    elif diff_res.get("line_count", 0) > cfg.max_diff_lines or strict_warnings or diff_res.get("interface_hazards"):
+        status = "warnings_detected"
+    else:
+        status = "clean"
+
+    return {
+        "status": status,
+        "authorizes_execution": False,
+        "path": path,
+        "language": diff_res.get("language", "unknown"),
+        "protected_path": protected,
+        "syntax_valid": bool(diff_res.get("syntax_valid", True)),
+        "security_clean": bool(diff_res.get("security_clean", True)) and not protected,
+        "hunk_only_checked": hunk_only_checked,
+        "patched_file_ast_verified": bool(diff_res.get("patched_file_ast_verified", False)),
+        "line_count": int(diff_res.get("line_count", 0)),
+        "findings": findings,
+        "interface_hazards": list(diff_res.get("interface_hazards", [])),
+        "imported_modules": list(diff_res.get("imported_modules", [])),
+        "dynamic_calls": list(diff_res.get("dynamic_calls", [])),
+        "strict_ast_warnings": strict_warnings,
+        "is_static_data_or_doc": bool(diff_res.get("is_static_data_or_doc", False)),
+        "latency_ms": round((time.perf_counter_ns() - t0) / 1_000_000.0, 4),
     }

@@ -512,7 +512,7 @@ class ConformalCalibrationReport:
     passed_coverage_gate: bool
     conformal_guarantee_valid: bool = False
     coverage_std_error: float = 0.0
-    upper_error_bound_rule_of_3: float = 0.0
+    upper_error_bound_rule_of_3: Optional[float] = None
     min_per_class_cal_samples: int = 0
     per_class_quantiles: Dict[str, float] = field(default_factory=dict)
     calibration_data_origin: str = "synthetic_rule_consistency"
@@ -531,7 +531,11 @@ class ConformalCalibrationReport:
             "min_per_class_cal_samples": self.min_per_class_cal_samples,
             "empirical_coverage": round(self.empirical_coverage, 3),
             "coverage_std_error": round(self.coverage_std_error, 4),
-            "upper_error_bound_rule_of_3": round(self.upper_error_bound_rule_of_3, 4),
+            "upper_error_bound_rule_of_3": (
+                round(self.upper_error_bound_rule_of_3, 4)
+                if self.upper_error_bound_rule_of_3 is not None
+                else None
+            ),
             "passed_gate": self.passed_coverage_gate,
             "conformal_set_valid": self.conformal_guarantee_valid,
             "conformal_guarantee_valid": self.conformal_guarantee_valid,
@@ -767,7 +771,12 @@ def calibrate_auxiliary_fleet(
             for i, (toks, tgt) in enumerate(val_anchors)
         ]
 
-        brain.calibrate_conformal(cal_data, alpha=alpha, in_sample=False)
+        brain.calibrate_conformal(
+            cal_data,
+            alpha=alpha,
+            in_sample=False,
+            data_origin="synthetic_rule_consistency",
+        )
         brain.save(target_store)
 
         val_hits = 0
@@ -778,7 +787,7 @@ def calibrate_auxiliary_fleet(
 
         empirical_cov = val_hits / float(len(val_data))
         cov_std = math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(len(cal_data) + 2))
-        upper_r3 = 3.0 / float(len(val_data))
+        upper_r3 = round(3.0 / float(len(val_data)), 4) if (val_data and val_hits == len(val_data)) else None
 
         cls_counts: Dict[str, int] = {}
         for _, tgt in cal_data:
@@ -798,7 +807,7 @@ def calibrate_auxiliary_fleet(
                 passed_coverage_gate=empirical_cov >= (1.0 - float(alpha) - 0.05),
                 conformal_guarantee_valid=len(cal_data) >= min_req,
                 coverage_std_error=round(cov_std, 4),
-                upper_error_bound_rule_of_3=round(upper_r3, 4),
+                upper_error_bound_rule_of_3=upper_r3,
                 min_per_class_cal_samples=min_cls_cal,
                 per_class_quantiles=dict(getattr(brain, "per_class_quantiles", {})),
             )
@@ -885,9 +894,14 @@ def run_conformal_calibration_pipeline(
         nursery.active_brains[brain.name] = brain
         core_model_names.add(brain.name)
 
-        # Build exchangeable calibration data using strictly unseen cal_data
+        # Build calibration split using synthetic rule-consistency probes
         formatted_cal = [(s[0], s[1]) for s in cal_data]
-        brain.calibrate_conformal(formatted_cal, alpha=alpha, in_sample=False)
+        brain.calibrate_conformal(
+            formatted_cal,
+            alpha=alpha,
+            in_sample=False,
+            data_origin="synthetic_rule_consistency",
+        )
         brain.save(target_store)
 
         # Validate empirical set coverage strictly on unseen validation set
@@ -902,7 +916,7 @@ def run_conformal_calibration_pipeline(
         empirical_cov = val_hits / total_val if total_val > 0 else 1.0
         guarantee_valid = len(cal_data) >= min_req
         cov_std = math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(max(1, len(cal_data) + 2)))
-        upper_r3 = (3.0 / float(total_val)) if total_val > 0 else 1.0
+        upper_r3 = round(3.0 / float(total_val), 4) if (total_val > 0 and val_hits == total_val) else None
 
         rep = ConformalCalibrationReport(
             domain=domain,
@@ -916,7 +930,7 @@ def run_conformal_calibration_pipeline(
             passed_coverage_gate=empirical_cov >= (1.0 - alpha - 0.05),
             conformal_guarantee_valid=guarantee_valid,
             coverage_std_error=round(cov_std, 4),
-            upper_error_bound_rule_of_3=round(upper_r3, 4),
+            upper_error_bound_rule_of_3=upper_r3,
             per_class_quantiles=dict(getattr(brain, "per_class_quantiles", {})),
         )
         reports.append(rep)

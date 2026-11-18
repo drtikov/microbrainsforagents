@@ -106,9 +106,11 @@ class AnalyticalMicroTransformer:
         self.eval_errors: int = 0
         self.eval_sample_id: Optional[str] = None
         self.weights_sha256: Optional[str] = None
+        self.revision_id: Optional[str] = None
         # How the current conformal_quantile was obtained — honest provenance
         # for the quantile, which otherwise looks calibrated no matter what.
         self.conformal_basis: str = "uncalibrated"
+        self.calibration_data_origin: str = "uncalibrated"
         # Rolling runtime telemetry for live distribution-shift / abstention drift monitoring
         self._live_nonconformity_window: deque = deque(maxlen=50)
         self._live_abstention_window: deque = deque(maxlen=50)
@@ -445,14 +447,16 @@ class AnalyticalMicroTransformer:
         calibration_data: List[Tuple[List[str], str]],
         alpha: float = 0.10,
         in_sample: bool = False,
+        data_origin: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Calibrate split-conformal and Mondrian (per-class) prediction thresholds
         at miscoverage level alpha.
 
         Finite-sample coverage P(y* in C(x)) >= 1 - alpha holds ONLY for exchangeable
-        held-out calibration data. Also reports coverage standard error
-        sqrt(alpha*(1-alpha)/(n+2)) and Rule-of-3 upper bound 3/n on zero errors.
+        measured held-out calibration data (`data_origin="measured_holdout"`). Also reports
+        coverage standard error sqrt(alpha*(1-alpha)/(n+2)) and measured Clopper-Pearson bounds
+        only when an explicit evaluation set is recorded (never fabricated from n_cal).
         """
         if not calibration_data:
             return {"status": "error", "reason": "empty_calibration_data"}
@@ -483,18 +487,22 @@ class AnalyticalMicroTransformer:
         min_required = max(1, math.ceil(1.0 / max(1e-6, float(alpha))) - 1)
         guarantee_valid = (not in_sample) and (n >= min_required)
         cov_std_err = round(math.sqrt(max(0.0, float(alpha) * (1.0 - float(alpha))) / float(n + 2)), 4)
-        upper_bound_rule3 = round(3.0 / float(max(1, n)), 4)
 
         eval_n = int(getattr(self, "eval_samples", 0) or 0)
         eval_k = int(getattr(self, "eval_errors", 0) or 0)
         if eval_n > 0:
             upper_bound = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, float(alpha))
             upper_bound_95 = self.compute_clopper_pearson_upper_bound(eval_k, eval_n, 0.05)
+            upper_bound_rule3 = round(3.0 / float(eval_n), 4) if eval_k == 0 else None
             bound_status = "measured_eval"
         else:
             upper_bound = None
             upper_bound_95 = None
+            upper_bound_rule3 = None
             bound_status = "unknown_no_eval_set"
+
+        resolved_origin = str(data_origin or ("in_sample_auto" if in_sample else "measured_holdout"))
+        field_certified = bool(resolved_origin == "measured_holdout" and guarantee_valid)
 
         self.conformal_quantile = q_hat
         self.per_class_quantiles = per_class_quantiles
@@ -505,6 +513,7 @@ class AnalyticalMicroTransformer:
         self.coverage_std_error = cov_std_err
         self.conformal_guarantee_valid = guarantee_valid
         self.conformal_basis = "in_sample_auto" if in_sample else "held_out"
+        self.calibration_data_origin = resolved_origin
 
         return {
             "status": "calibrated",
@@ -512,6 +521,8 @@ class AnalyticalMicroTransformer:
             "n_calibration_samples": n,
             "min_required_samples": min_required,
             "conformal_guarantee_valid": guarantee_valid,
+            "calibration_data_origin": resolved_origin,
+            "field_exchangeability_certified": field_certified,
             "alpha": float(alpha),
             "confidence_level": round(1.0 - float(alpha), 4),
             "target_coverage": 1.0 - float(alpha),
@@ -700,6 +711,12 @@ class AnalyticalMicroTransformer:
             upper_bound_95 = None
             bound_status = "unknown_no_eval_set"
 
+        data_origin = "uncalibrated_default" if uncalibrated else str(
+            getattr(self, "calibration_data_origin", None)
+            or ("synthetic_rule_consistency" if self.conformal_basis == "held_out" else self.conformal_basis)
+        )
+        field_certified = bool(data_origin == "measured_holdout" and guarantee_valid)
+
         return {
             "prediction_set": prediction_set,
             "set_size": set_size,
@@ -725,6 +742,8 @@ class AnalyticalMicroTransformer:
             "drift_detected": drift_info["drift_detected"],
             "calibrated": not uncalibrated,
             "calibration_basis": "uncalibrated_default" if uncalibrated else self.conformal_basis,
+            "calibration_data_origin": data_origin,
+            "field_exchangeability_certified": field_certified,
             "n_calibration_samples": n_cal,
             "conformal_set_valid": guarantee_valid,
             "coverage_target": round(1.0 - float(effective_alpha), 4),
@@ -734,14 +753,26 @@ class AnalyticalMicroTransformer:
             "model_name": self.name,
         }
 
+    @staticmethod
+    def _atomic_publish_compat(src_file: Path, dst_file: Path) -> None:
+        """Publish a flat compatibility file by hardlink (preferred) or atomic tmp+replace."""
+        import shutil
+
+        tmp_compat = dst_file.parent / f".tmp_{dst_file.name}_{os.getpid()}"
+        try:
+            if tmp_compat.exists():
+                tmp_compat.unlink()
+            os.link(src_file, tmp_compat)
+        except OSError:
+            shutil.copy2(src_file, tmp_compat)
+        tmp_compat.replace(dst_file)
+
     def save(self, directory: Optional[Path] = None):
         target_dir = directory or STORE_DIR
         target_dir.mkdir(parents=True, exist_ok=True)
         weights_file = target_dir / f"{self.name}_weights.npz"
         meta_file = target_dir / f"{self.name}_meta.json"
         manifest_file = target_dir / f"{self.name}.manifest.json"
-        tmp_weights = target_dir / f"tmp_{self.name}_weights.npz"
-        tmp_meta = target_dir / f"tmp_{self.name}_meta.json"
         tmp_manifest = target_dir / f"tmp_{self.name}.manifest.json"
 
         arrays = {
@@ -756,10 +787,19 @@ class AnalyticalMicroTransformer:
             arrays["hopfield_keys"] = np.stack(self.hopfield_keys, axis=0)
             arrays["hopfield_values"] = np.stack(self.hopfield_values, axis=0)
 
-        # Stage both tmp files and compute SHA-256 digests before touching live artifacts
-        np.savez_compressed(tmp_weights, **arrays)
-        weights_sha256 = hashlib.sha256(tmp_weights.read_bytes()).hexdigest()
+        # Stage compressed weights into temp path first to compute immutable revision ID
+        tmp_stage_weights = target_dir / f".stage_{self.name}_{os.getpid()}.npz"
+        np.savez_compressed(tmp_stage_weights, **arrays)
+        weights_sha256 = hashlib.sha256(tmp_stage_weights.read_bytes()).hexdigest()
         self.weights_sha256 = weights_sha256
+        updated_at = time.time()
+        rev_id = f"rev_{int(updated_at * 1_000_000)}_{weights_sha256[:12]}"
+
+        ver_dir = target_dir / "_versions" / self.name / rev_id
+        ver_dir.mkdir(parents=True, exist_ok=True)
+        ver_weights = ver_dir / f"{self.name}_weights.npz"
+        ver_meta = ver_dir / f"{self.name}_meta.json"
+        tmp_stage_weights.replace(ver_weights)
 
         n_cal = getattr(self, "n_calibration_samples", len(self.conformal_scores))
         cov_std = round(
@@ -767,7 +807,12 @@ class AnalyticalMicroTransformer:
             or (math.sqrt(max(0.0, self.conformal_alpha * (1.0 - self.conformal_alpha)) / float(max(1, n_cal + 2))) if n_cal > 0 else 0.0),
             4,
         )
-        updated_at = time.time()
+        resolved_origin = str(
+            getattr(self, "calibration_data_origin", None)
+            or ("synthetic_rule_consistency" if self.conformal_basis == "held_out" else self.conformal_basis)
+        )
+        guarantee_valid = bool(getattr(self, "conformal_guarantee_valid", False))
+        field_certified = bool(resolved_origin == "measured_holdout" and guarantee_valid)
 
         meta = {
             "name": self.name,
@@ -784,25 +829,34 @@ class AnalyticalMicroTransformer:
             "conformal_scores": self.conformal_scores,
             "n_calibration_samples": n_cal,
             "coverage_std_error": cov_std,
-            "conformal_guarantee_valid": getattr(self, "conformal_guarantee_valid", False),
+            "conformal_guarantee_valid": guarantee_valid,
             "conformal_basis": self.conformal_basis,
+            "calibration_data_origin": resolved_origin,
+            "field_exchangeability_certified": field_certified,
             "eval_samples": int(getattr(self, "eval_samples", 0) or 0),
             "eval_errors": int(getattr(self, "eval_errors", 0) or 0),
             "eval_sample_id": getattr(self, "eval_sample_id", None),
             "weights_sha256": weights_sha256,
+            "revision_id": rev_id,
             "hopfield_rules_count": len(self.hopfield_keys),
             "induction_heads": list(getattr(self, "induction_heads", [])),
             "updated_at": updated_at,
         }
 
-        with open(tmp_meta, "w", encoding="utf-8") as f:
+        tmp_ver_meta = ver_dir / f".tmp_{self.name}_meta.json"
+        with open(tmp_ver_meta, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
-        meta_sha256 = hashlib.sha256(tmp_meta.read_bytes()).hexdigest()
+        tmp_ver_meta.replace(ver_meta)
+        meta_sha256 = hashlib.sha256(ver_meta.read_bytes()).hexdigest()
 
+        rel_weights = f"_versions/{self.name}/{rev_id}/{self.name}_weights.npz"
+        rel_meta = f"_versions/{self.name}/{rev_id}/{self.name}_meta.json"
         manifest = {
+            "schema_version": 2,
             "name": self.name,
-            "weights_file": weights_file.name,
-            "meta_file": meta_file.name,
+            "revision_id": rev_id,
+            "weights_file": rel_weights,
+            "meta_file": rel_meta,
             "weights_sha256": weights_sha256,
             "meta_sha256": meta_sha256,
             "updated_at": updated_at,
@@ -810,10 +864,13 @@ class AnalyticalMicroTransformer:
         with open(tmp_manifest, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-        # Promote staged artifacts together and commit via companion .manifest.json
-        tmp_weights.replace(weights_file)
-        tmp_meta.replace(meta_file)
+        # Single atomic pointer swap commits the immutable versioned snapshot
         tmp_manifest.replace(manifest_file)
+        self.revision_id = rev_id
+
+        # Refresh flat compatibility files via hardlink (or atomic tmp+replace) for legacy globs
+        self._atomic_publish_compat(ver_weights, weights_file)
+        self._atomic_publish_compat(ver_meta, meta_file)
 
         # Mirror only to other canonical roots that ALREADY exist on disk (never mkdir inside arbitrary CWD)
         if directory is None:
@@ -821,9 +878,17 @@ class AnalyticalMicroTransformer:
             for alt_dir in CANONICAL_STORE_DIRS:
                 if alt_dir.exists() and alt_dir.resolve() != target_dir.resolve():
                     try:
-                        shutil.copy2(weights_file, alt_dir / weights_file.name)
-                        shutil.copy2(meta_file, alt_dir / meta_file.name)
-                        shutil.copy2(manifest_file, alt_dir / manifest_file.name)
+                        alt_ver_dir = alt_dir / "_versions" / self.name / rev_id
+                        alt_ver_dir.mkdir(parents=True, exist_ok=True)
+                        alt_vw = alt_ver_dir / f"{self.name}_weights.npz"
+                        alt_vm = alt_ver_dir / f"{self.name}_meta.json"
+                        shutil.copy2(ver_weights, alt_vw)
+                        shutil.copy2(ver_meta, alt_vm)
+                        alt_tmp_man = alt_dir / f"tmp_{self.name}.manifest.json"
+                        shutil.copy2(manifest_file, alt_tmp_man)
+                        alt_tmp_man.replace(alt_dir / manifest_file.name)
+                        self._atomic_publish_compat(alt_vw, alt_dir / weights_file.name)
+                        self._atomic_publish_compat(alt_vm, alt_dir / meta_file.name)
                     except Exception:
                         pass
 
@@ -846,10 +911,30 @@ class AnalyticalMicroTransformer:
         weights_file = None
         meta_file = None
         chosen_dir: Optional[Path] = None
+        active_manifest: Optional[Dict[str, Any]] = None
+
         for d in search_dirs:
             if d is None:
                 continue
             dp = Path(d)
+            man_path = dp / f"{name}.manifest.json"
+            if man_path.exists():
+                try:
+                    cand_man = json.loads(man_path.read_text(encoding="utf-8"))
+                    rel_w = cand_man.get("weights_file")
+                    rel_m = cand_man.get("meta_file")
+                    if rel_w and rel_m:
+                        dp_resolved = dp.resolve()
+                        mwf = (dp / str(rel_w)).resolve()
+                        mmf = (dp / str(rel_m)).resolve()
+                        if mwf.is_relative_to(dp_resolved) and mmf.is_relative_to(dp_resolved) and mwf.exists() and mmf.exists():
+                            weights_file = mwf
+                            meta_file = mmf
+                            chosen_dir = dp
+                            active_manifest = cand_man
+                            break
+                except Exception:
+                    return None
             wf = dp / f"{name}_weights.npz"
             mf = dp / f"{name}_meta.json"
             if wf.exists() and mf.exists():
@@ -875,12 +960,15 @@ class AnalyticalMicroTransformer:
                         name, weights_file, expected_sha[:12], actual_sha[:12],
                     )
                     return None
-                manifest_file = chosen_dir / f"{name}.manifest.json"
-                if manifest_file.exists():
-                    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+                manifest_obj = active_manifest
+                if manifest_obj is None:
+                    manifest_file = chosen_dir / f"{name}.manifest.json"
+                    if manifest_file.exists():
+                        manifest_obj = json.loads(manifest_file.read_text(encoding="utf-8"))
+                if manifest_obj is not None:
                     if (
-                        manifest.get("weights_sha256") != actual_sha
-                        or manifest.get("meta_sha256") != actual_meta_sha
+                        manifest_obj.get("weights_sha256") != actual_sha
+                        or manifest_obj.get("meta_sha256") != actual_meta_sha
                     ):
                         log.warning(
                             "Manifest pair mismatch for microbrain '%s' in %s",
@@ -926,6 +1014,11 @@ class AnalyticalMicroTransformer:
             obj.n_calibration_samples = int(meta.get("n_calibration_samples", len(obj.conformal_scores)))
             obj.coverage_std_error = float(meta.get("coverage_std_error", 0.0))
             obj.conformal_basis = str(meta.get("conformal_basis", "uncalibrated"))
+            obj.calibration_data_origin = str(
+                meta.get("calibration_data_origin")
+                or ("synthetic_rule_consistency" if obj.conformal_basis == "held_out" else obj.conformal_basis)
+            )
+            obj.revision_id = (active_manifest.get("revision_id") if active_manifest else None) or meta.get("revision_id")
             obj.eval_samples = int(meta.get("eval_samples", 0) or 0)
             obj.eval_errors = int(meta.get("eval_errors", 0) or 0)
             obj.eval_sample_id = meta.get("eval_sample_id")

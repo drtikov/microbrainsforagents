@@ -58,6 +58,8 @@ class PrefilterResponse:
     results: List[Dict[str, Any]]
     filtered_count: int
     total_count: int
+    status: str = "ok"
+    error: Optional[str] = None
 
 
 class DSHMicrobrainClient:
@@ -197,9 +199,9 @@ class DSHMicrobrainClient:
         return ValidationResult(success=True, issues=[], metrics={"lines": len(code.splitlines())})
     
     def prefilter_candidates(self, candidates: List[Dict[str, Any]], max_results: int = 10, threshold: float = 0.5) -> PrefilterResponse:
-        """Batch prefilter evolution candidates using GPU-accelerated surrogate model."""
+        """Batch prefilter evolution candidates using HTTP AST/structural prefilter endpoint (or local AST fallback)."""
         if not self.config.enabled:
-            return self._fallback_prefilter(candidates, max_results, threshold)
+            return self._fallback_prefilter(candidates, max_results, threshold, status="fallback_disabled")
         
         try:
             result = self._request("POST", "/microbrain/prefilter", {
@@ -211,29 +213,60 @@ class DSHMicrobrainClient:
                 results=result.get("results", []),
                 filtered_count=result.get("filtered_count", 0),
                 total_count=result.get("total_count", 0),
+                status=result.get("status", "ok"),
+                error=result.get("error"),
             )
         except Exception as e:
             log.warning(f"Prefilter failed: {e}, using fallback")
-            return self._fallback_prefilter(candidates, max_results, threshold)
+            return self._fallback_prefilter(
+                candidates,
+                max_results,
+                threshold,
+                status="fallback_on_http_error",
+                error=f"{type(e).__name__}: {e}",
+            )
     
-    def _fallback_prefilter(self, candidates: List[Dict[str, Any]], max_results: int, threshold: float) -> PrefilterResponse:
-        """Simple heuristic fallback for prefiltering."""
+    def _fallback_prefilter(
+        self,
+        candidates: List[Dict[str, Any]],
+        max_results: int,
+        threshold: float,
+        status: str = "fallback_local",
+        error: Optional[str] = None,
+    ) -> PrefilterResponse:
+        """Fail-closed local Python AST + structural heuristic fallback when HTTP prefilter is unavailable."""
+        import ast
+
         results = []
         for i, cand in enumerate(candidates[:max_results]):
-            code = cand.get("code", "")
+            code = str(cand.get("code", "") or "")
+            cand_id = cand.get("id", f"cand_{i}")
             score = 0.5
-            if "def " in code and "def test_" in code:
-                score = 0.8
-            elif "def " in code:
-                score = 0.6
-            elif "import" in code:
-                score = 0.4
-            
+            passed = True
+            reason = "fallback_ast_syntax_ok"
+
+            try:
+                ast.parse(code)
+                if "def " in code and "def test_" in code:
+                    score = 0.85
+                elif "def " in code:
+                    score = 0.70
+                elif "import" in code:
+                    score = 0.45
+            except SyntaxError as syn_err:
+                score = 0.10
+                passed = False
+                reason = f"fallback_syntax_error: {syn_err.msg}"
+            except Exception as exc:
+                score = 0.0
+                passed = False
+                reason = f"fallback_error:{type(exc).__name__}"
+
             results.append({
-                "candidate_id": cand.get("id", f"cand_{i}"),
+                "candidate_id": cand_id,
                 "score": score,
-                "passed": score >= threshold,
-                "reason": "fallback_heuristic",
+                "passed": bool(passed and (score >= threshold)),
+                "reason": reason,
             })
         
         filtered = sum(1 for r in results if r["passed"])
@@ -241,6 +274,8 @@ class DSHMicrobrainClient:
             results=results,
             filtered_count=filtered,
             total_count=len(results),
+            status=status,
+            error=error,
         )
     
     def list_brains(self) -> Dict[str, Any]:
@@ -299,11 +334,20 @@ class DSHMicrobrainIntegration:
             "alternatives": result.alternatives,
         }
     
+    def prefilter_evolution_candidates_detailed(
+        self,
+        candidates: List[Dict[str, Any]],
+        threshold: float = 0.5,
+    ) -> PrefilterResponse:
+        """Filter evolution candidates and return full PrefilterResponse including status/error."""
+        return self.client.prefilter_candidates(candidates, threshold=threshold)
+
     def prefilter_evolution_candidates(self, candidates: List[Dict[str, Any]], threshold: float = 0.5) -> List[Dict[str, Any]]:
-        """Filter evolution candidates using microbrain surrogate model."""
-        response = self.client.prefilter_candidates(candidates, threshold=threshold)
-        # Return only passed candidates
-        return [cand for cand in response.results if cand["passed"]]
+        """Filter evolution candidates using AST/structural prefilter; fails closed on server errors."""
+        response = self.prefilter_evolution_candidates_detailed(candidates, threshold=threshold)
+        if getattr(response, "status", "ok") == "error":
+            log.warning("Evolution prefilter reported error status=%s error=%s", response.status, response.error)
+        return [cand for cand in response.results if cand.get("passed")]
     
     def is_available(self) -> bool:
         """Check if microbrain server is available."""

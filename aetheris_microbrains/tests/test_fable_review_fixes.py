@@ -1319,6 +1319,220 @@ def test_fable_40_review_hardening_honest_bounds_consult_cl_hook_and_prefilter(t
     assert len(kept) == 1
 
 
+def test_fable_41_critic_round2_fixes(tmp_path, monkeypatch, capsys):
+    import asyncio
+    import importlib.util
+    import json
+    import sys
+    from aetheris_microbrains import hook as hook_mod
+    from aetheris_microbrains.core import microbrain_server
+    from aetheris_microbrains.core.layered_decision_engine import (
+        PolicyConfig,
+        diagnose_patch,
+        recalibrate_from_decision_journal,
+    )
+    from aetheris_microbrains.core.tool_routing_moe import (
+        SessionToolSurface,
+        ToolRoutingMoE,
+        rank_tools,
+    )
+    from aetheris_microbrains.evolution.dsh_microbrain_client import (
+        DSHMicrobrainClient,
+        MicrobrainConfig,
+    )
+    from aetheris_microbrains.tools import microbrain as mb_tools
+
+    # 10. Package version & server version parity
+    assert mb.__version__ == "0.7.3"
+    assert microbrain_server.app.version == "0.7.3"
+
+    # 1. Atomic versioned snapshot save/load & flat-absent load & single-pointer rollback
+    b = AnalyticalMicroTransformer("tmp_atomic_brain", d_model=32, n_heads=2, d_mlp=64)
+    b.compile_logic_association("ping_tok", "pong_lbl")
+    cal_rep = b.calibrate_conformal(
+        [(["file", "code", "ping_tok"], "pong_lbl")] * 20,
+        alpha=0.10,
+        in_sample=False,
+        data_origin="synthetic_rule_consistency",
+    )
+    assert cal_rep["calibration_data_origin"] == "synthetic_rule_consistency"
+    assert cal_rep["field_exchangeability_certified"] is False
+    assert cal_rep["upper_error_bound_rule_of_3"] is None
+
+    v_store = tmp_path / "atomic_store"
+    b.save(v_store)
+    rev1 = b.revision_id
+    assert rev1 is not None
+    man1 = json.loads((v_store / "tmp_atomic_brain.manifest.json").read_text(encoding="utf-8"))
+    assert man1["schema_version"] == 2
+    assert "_versions/" in man1["weights_file"]
+
+    # Delete flat compatibility files and verify manifest-driven load works
+    (v_store / "tmp_atomic_brain_weights.npz").unlink()
+    (v_store / "tmp_atomic_brain_meta.json").unlink()
+    loaded_v1 = AnalyticalMicroTransformer.load("tmp_atomic_brain", v_store, verify_checksum=True, strict_directory=True)
+    assert loaded_v1 is not None
+    assert loaded_v1.revision_id == rev1
+    assert loaded_v1.calibration_data_origin == "synthetic_rule_consistency"
+
+    # Second revision preserves v1 immutable directory
+    b.compile_logic_association("ping2_tok", "pong_lbl")
+    b.save(v_store)
+    assert b.revision_id != rev1
+    assert (v_store / "_versions" / "tmp_atomic_brain" / rev1 / "tmp_atomic_brain_weights.npz").exists()
+
+    # Rollback switches pointer atomically back to rev1 when backed up via pipeline
+    cl_store = tmp_path / "atomic_cl"
+    b1 = AnalyticalMicroTransformer("neuro_atomic_dom", d_model=32, n_heads=2, d_mlp=64)
+    b1.compile_logic_association("tok_a", "lbl_a")
+    b1.calibrate_conformal([(["file", "code", "tok_a"], "lbl_a")] * 20, alpha=0.05, in_sample=False)
+    b1.save(cl_store)
+    orig_rev = b1.revision_id
+    pipe = ContinualLearningPipeline(store_dir=cl_store, audit_log_path=tmp_path / "atomic_cl_audit.json")
+    pipe.apply_plasticity_feedback("atomic_dom", ["tok_b"], holdout_data=[(["file", "code", "tok_a"], "lbl_a")] * 12, promote=False)
+    prom = pipe.verify_and_promote_candidate("atomic_dom", [(["file", "code", "tok_a"], "lbl_a")] * 12, min_coverage=0.90)
+    assert prom.promoted is True
+    assert pipe.rollback_domain("atomic_dom") is True
+    restored_cl = AnalyticalMicroTransformer.load("neuro_atomic_dom", cl_store, verify_checksum=True, strict_directory=True)
+    assert restored_cl is not None
+    assert restored_cl.revision_id == orig_rev
+
+    # 2. Honest statistical provenance in decide(), recalibrate, diagnose_patch
+    dec_l1 = mb.decide({"tool": "read_file", "path": "src/a.py"})
+    assert dec_l1["authorizes_execution"] is False
+    assert dec_l1["error_metric"] == "deterministic_structural_rule"
+    assert "upper_error_bound" in dec_l1
+
+    j_res = recalibrate_from_decision_journal(
+        [{"decision": "allow", "layer": 2, "latency_ms": 0.2, "verified_correct": True}] * 25,
+        alpha=0.10,
+        error_metric="topk_tool_drop_k4",
+        sample_id="holdout_25_test",
+    )
+    assert j_res["error_metric"] == "topk_tool_drop_k4"
+    assert j_res["sample_id"] == "holdout_25_test"
+    assert j_res["confidence_level"] == 0.9
+    assert j_res["upper_error_bound"] != j_res["upper_error_bound_95"]
+
+    diag = diagnose_patch(
+        "src/runner.py",
+        "@@ -0,0 +1,2 @@\n+import subprocess\n+subprocess.run(x, shell=True)\n",
+        policy=PolicyConfig(),
+    )
+    assert diag["status"] == "findings_detected"
+    assert diag["authorizes_execution"] is False
+    assert "subprocess_shell_true" in diag["findings"]
+
+    # Reset singleton MoE metrics changed by recalibrate_from_decision_journal above
+    from aetheris_microbrains.core.tool_routing_moe import get_tool_routing_moe
+    moe_s = get_tool_routing_moe()
+    moe_s.verified_episodes = 0
+    moe_s.verified_errors = 0
+    moe_s.error_metric = "unmeasured"
+    moe_s.calibration_alpha = 0.05
+    moe_s.calibration_basis = "synthetic_self_consistency"
+    moe_s.recalibrated_from_journal = False
+
+    # 5. microbrain_consult explicit domain, unknown domain, and error honesty
+    exp_res = mb_tools.microbrain_consult("syntax error in AST parser", domain="code_edit_verifier")
+    assert exp_res["success"] is True
+    assert exp_res["expert_selection"]["explicit_domain"] is True
+    assert exp_res["selected_brain"] == "neuro_code_edit_verifier"
+    assert exp_res["expert_prediction"]["confidence"] == exp_res["calibrated_confidence"]
+    assert exp_res["confidence"] == exp_res["calibrated_confidence"]
+    assert exp_res["calibration_data_origin"] == "synthetic_rule_consistency"
+
+    unk_dom = mb_tools.microbrain_consult("syntax error", domain="nonexistent_domain_xyz")
+    assert unk_dom["success"] is False
+    assert "unknown domain" in unk_dom["error"]
+
+    orig_loader = mb_tools._load_brain
+    sample_brain = orig_loader("neuro_code_edit_verifier")
+
+    class _ErrProxy:
+        def __getattr__(self, k):
+            return getattr(sample_brain, k)
+
+        def infer_conformal(self, seq):
+            raise RuntimeError("boom_conformal")
+
+    monkeypatch.setattr(mb_tools, "_load_brain", lambda _n: _ErrProxy())
+    err_consult = mb_tools.microbrain_consult("syntax error in AST parser during code edit")
+    assert err_consult["success"] is False
+    assert err_consult["abstained"] is True
+    assert err_consult["calibrated_confidence"] == 0.0
+    assert err_consult["confidence"] == 0.0
+    assert "error" in err_consult
+    monkeypatch.setattr(mb_tools, "_load_brain", orig_loader)
+
+    # 6. Hook shadow_mode + codex safety, non-dict JSON, shadow journal write failure
+    shadow_codex = hook_mod.evaluate_hook_payload(
+        {"tool_name": "NotebookEdit", "tool_input": {"path": "nb.ipynb"}},
+        shadow_mode=True,
+        host="codex",
+        codex_escalate_deny=True,
+    )
+    assert shadow_codex["exit_code"] == 0
+    assert shadow_codex["permissionDecision"] is None
+    assert shadow_codex["host_action"] == "shadow_observe"
+    assert shadow_codex["authorizes_execution"] is False
+
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: "[1, 2, 3]"})())
+    rc_list = hook_mod.main(["--host", "claude"])
+    cap_list = capsys.readouterr()
+    assert rc_list == 2
+    assert "invalid_hook_payload:expected_json_object" in cap_list.err
+
+    # 4. Live vs Demo dashboard & DSH client AST fallback + server error propagation
+    dash_live = asyncio.run(microbrain_server.telemetry_dashboard()).body.decode("utf-8")
+    dash_demo = asyncio.run(microbrain_server.demo_dashboard()).body.decode("utf-8")
+    assert "Aetheris Microbrains Observability Dashboard" in dash_live
+    assert "STATIC DEMO CONTENT" in dash_demo
+
+    client = DSHMicrobrainClient(MicrobrainConfig(enabled=False))
+    fb = client.prefilter_candidates(
+        [{"id": "ok", "code": "def f():\n    return 1\n"}, {"id": "bad", "code": "def broken(:\n"}],
+        threshold=0.5,
+    )
+    assert fb.status == "fallback_disabled"
+    assert fb.results[0]["passed"] is True
+    assert fb.results[1]["passed"] is False
+    assert "fallback_syntax_error" in fb.results[1]["reason"]
+
+    # 7 & 9. rank_tools, evaluate_topk_holdout, SessionToolSurface, Ex08 frozen advisor
+    fresh_moe = ToolRoutingMoE(d_model=256)
+    rt = rank_tools("read repository file settings.py", available_tools=["repo_read", "edit_file", "run_tests"], top_k=2)
+    assert rt["authorizes_execution"] is False and rt["mutates_catalog"] is False
+
+    ev = fresh_moe.evaluate_topk_holdout(
+        [{"query": "read source file app.py", "acceptable_tools": ["repo_read", "grep_search"]}] * 20,
+        top_k=2,
+        sample_id="unit_eval_20",
+    )
+    assert ev["n_evaluated"] == 20
+    assert fresh_moe.calibration_report()["error_metric"] == "topk_tool_drop_k2"
+
+    sticky = SessionToolSurface(["repo_read", "edit_file", "run_tests", "git_status", "docker_ps"], top_k=2, moe=fresh_moe)
+    t1 = sticky.select_for_turn("read source file app.py")
+    t2 = sticky.select_for_turn("now edit another file")
+    assert t2["mode"] == "sticky_reuse"
+    assert t2["cache_prefix_preserved"] is True
+    assert sticky.stats()["cache_hits"] == 1
+
+    ex08_path = PKG_DIR.parent / "examples" / "08_frozen_advisor_benchmark.py"
+    spec8 = importlib.util.spec_from_file_location("ex08_test", str(ex08_path))
+    assert spec8 is not None and spec8.loader is not None
+    mod8 = importlib.util.module_from_spec(spec8)
+    spec8.loader.exec_module(mod8)
+    rep8 = mod8.evaluate_frozen_advisor_benchmark()
+    full_row = next(r for r in rep8["rows"] if "Full 32-Tool" in r["strategy"])
+    per_turn_row = next(r for r in rep8["rows"] if "Per-Turn" in r["strategy"])
+    sticky_row = next(r for r in rep8["rows"] if "Session-Sticky" in r["strategy"])
+    assert full_row["recall_at_k_pct"] == 100.0
+    assert sticky_row["cache_adjusted_net_saved_pct"] > per_turn_row["cache_adjusted_net_saved_pct"]
+    assert mod8.run_patch_advisor_check()["expected_status_matched"] == 5
+
+
 
 
 

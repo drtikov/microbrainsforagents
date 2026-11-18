@@ -218,8 +218,9 @@ def microbrain_consult(text: str = "", tokens: Optional[List[str]] = None,
                        domain: str = "auto") -> Dict[str, Any]:
     """Consult the trained microbrain fleet with a token sequence.
 
-    Routes to the brain whose training vocabulary best matches the input,
-    returns its prediction set and conformal verdict.
+    Routes to the explicitly requested ``domain`` (or best-matching brain by
+    vocabulary overlap when ``domain="auto"``) and returns its single-source
+    conformal prediction set and verdict.
     """
     if _disabled():
         return {"success": False, "error": "microbrain tools disabled "
@@ -232,9 +233,45 @@ def microbrain_consult(text: str = "", tokens: Optional[List[str]] = None,
         return {"success": False, "error": "no tokens to consult on: pass "
                 "text=<string> or tokens=<list of strings>"}
 
-    route = _route(tokens)
-    if route.get("abstained"):
-        return route
+    req_domain = str(domain or "auto").strip()
+    explicit_domain = bool(req_domain and req_domain.lower() != "auto")
+    if explicit_domain:
+        metas = _list_brain_metas()
+        req_low = req_domain.lower()
+        req_pref = req_low if req_low.startswith(NAME_PREFIX) else f"{NAME_PREFIX}{req_low}"
+        matched = next(
+            (
+                m for m in metas
+                if str(m.get("_name") or "").lower() in {req_low, req_pref}
+            ),
+            None,
+        )
+        if matched is None:
+            return {
+                "success": False,
+                "abstained": True,
+                "router_abstained": True,
+                "domain": req_domain,
+                "error": f"unknown domain: {domain}",
+                "available_domains": [str(m.get("_name") or "?") for m in metas],
+            }
+        expanded, pos_groups = _expand_query_tokens(tokens)
+        vocab = _brain_vocab(matched)
+        hits = sum(1 for grp in pos_groups if any(cand in vocab for cand in grp))
+        overlap = hits / max(1, len(tokens))
+        route = {
+            "success": True,
+            "abstained": False,
+            "domain": matched,
+            "expanded_tokens": expanded,
+            "overlap": round(overlap, 3),
+            "explicit_domain": True,
+        }
+    else:
+        route = _route(tokens)
+        if route.get("abstained"):
+            return route
+
     meta = route["domain"]
     name = str(meta.get("_name") or meta.get("name") or "")
     brain = _load_brain(name)
@@ -246,10 +283,6 @@ def microbrain_consult(text: str = "", tokens: Optional[List[str]] = None,
     in_vocab_seq = [t for t in candidate_tokens if t in getattr(brain, "vocab", {})]
     seq = in_vocab_seq if in_vocab_seq else [t if t in getattr(brain, "vocab", {}) else "<unk>" for t in tokens]
     seq = seq[: int(getattr(brain, "max_seq_len", 16) or 16)]
-    try:
-        fwd = brain.forward(seq)
-    except Exception as e:
-        return {"success": False, "error": f"forward pass failed: {e}"}
 
     conf: Dict[str, Any] = {}
     conformal_error: Optional[str] = None
@@ -262,43 +295,90 @@ def microbrain_consult(text: str = "", tokens: Optional[List[str]] = None,
         conformal_abstained = True
         conformal_reason = f"conformal_inference_error:{type(exc).__name__}"
 
-    calibrated_conf = round(float(conf.get("confidence") or fwd.get("confidence") or 0.0), 4)
-    pred_set = list(conf.get("prediction_set", [])) if not conformal_error else []
-    selected_prediction = "<abstain>" if conformal_abstained else (conf.get("predicted_token") or fwd.get("predicted_token"))
-    result = {
-        "success": True,
+    if conformal_error is not None:
+        calibrated_conf = 0.0
+        pred_set: List[str] = []
+        selected_prediction = "<abstain>"
+        top_candidate = "<abstain>"
+    else:
+        calibrated_conf = round(float(conf.get("confidence") or 0.0), 4)
+        pred_set = list(conf.get("prediction_set", []))
+        top_candidate = str(conf.get("top_candidate") or conf.get("predicted_token") or "<abstain>")
+        selected_prediction = "<abstain>" if conformal_abstained else str(conf.get("predicted_token") or top_candidate)
+
+    short_domain = name[len(NAME_PREFIX):] if name.startswith(NAME_PREFIX) else name
+    basis_str = str(conf.get("calibration_basis") or meta.get("conformal_basis") or "uncalibrated")
+    data_origin = str(
+        conf.get("calibration_data_origin")
+        or meta.get("calibration_data_origin")
+        or ("synthetic_rule_consistency" if basis_str == "held_out" else basis_str)
+    )
+    set_valid = bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))) and (conformal_error is None)
+    eval_samples = int(conf.get("eval_samples", meta.get("eval_samples", 0)) or 0)
+    eval_errors = int(conf.get("eval_errors", meta.get("eval_errors", 0)) or 0)
+    upper_95 = conf.get("upper_error_bound_95")
+    stat_status = "verified" if upper_95 is not None else "unknown"
+
+    expert_selection = {
+        "domain": short_domain,
+        "selected_brain": name,
+        "router_abstained": False,
+        "explicit_domain": explicit_domain,
+        "overlap": route.get("overlap"),
+    }
+    expert_prediction = {
+        "success": conformal_error is None,
+        "abstained": bool(conformal_abstained),
+        "predicted_token": selected_prediction,
+        "top_candidate": top_candidate,
+        "confidence": calibrated_conf,
+        "prediction_set": pred_set,
+        "set_size": len(pred_set),
+        "reason_code": conformal_reason,
+        "error": conformal_error,
+    }
+
+    result: Dict[str, Any] = {
+        "success": conformal_error is None,
         "abstained": bool(conformal_abstained),
         "router_abstained": False,
-        "domain": name[len(NAME_PREFIX):] if name.startswith(NAME_PREFIX) else name,
+        "domain": short_domain,
         "selected_brain": name,
+        "expert_selection": expert_selection,
+        "expert_prediction": expert_prediction,
         "calibrated_confidence": calibrated_conf,
+        "confidence": calibrated_conf,
         "overlap": route.get("overlap"),
         "predicted_token": selected_prediction,
-        "raw_forward_token": fwd.get("predicted_token"),
-        "confidence": fwd.get("confidence"),
+        "top_candidate": top_candidate,
         "prediction_set": pred_set,
         "set_size": len(pred_set),
         "reason_code": conformal_reason,
         "conformal_abstained": conformal_abstained,
         "conformal_reason": conformal_reason,
-        "conformal_basis": str(conf.get("calibration_basis") or meta.get("conformal_basis") or "uncalibrated"),
+        "conformal_basis": basis_str,
+        "calibration_data_origin": data_origin,
         "n_calibration_samples": int(conf.get("n_calibration_samples", len(meta.get("conformal_scores", [])))),
-        "conformal_set_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))) and (conformal_error is None),
+        "eval_samples": eval_samples,
+        "eval_errors": eval_errors,
+        "statistical_confidence_status": stat_status,
+        "conformal_set_valid": set_valid,
         "coverage_target": round(1.0 - float(meta.get("conformal_alpha", 0.05) or 0.05), 4),
-        "upper_error_bound_95": conf.get("upper_error_bound_95"),
-        "conformal_guarantee_valid": bool(conf.get("conformal_guarantee_valid", meta.get("conformal_guarantee_valid", False))) and (conformal_error is None),
+        "upper_error_bound_95": upper_95,
+        "conformal_guarantee_valid": set_valid,
         "model": name,
     }
     if conformal_error is not None:
         result["conformal_error"] = conformal_error
+        result["error"] = f"conformal inference failed: {conformal_error}"
     log.debug(
         "microbrain_consult domain=%s selected_brain=%s predicted=%r conf=%.3f overlap=%.2f conformal_abstained=%s",
-        result["domain"],
+        short_domain,
         name,
-        result.get("predicted_token"),
+        selected_prediction,
         calibrated_conf,
         float(route.get("overlap") or 0.0),
-        result["conformal_abstained"],
+        conformal_abstained,
     )
     return result
 

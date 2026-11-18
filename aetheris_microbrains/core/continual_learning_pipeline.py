@@ -188,6 +188,20 @@ class ContinualLearningPipeline:
             src = self.store_dir / f"{model_name}{suffix}"
             if src.exists():
                 shutil.copy2(src, self.rollback_dir / f"{model_name}{suffix}")
+        man_path = self.store_dir / f"{model_name}.manifest.json"
+        if man_path.exists():
+            try:
+                man = json.loads(man_path.read_text(encoding="utf-8"))
+                for key in ("weights_file", "meta_file"):
+                    rel = man.get(key)
+                    if rel:
+                        src_v = (self.store_dir / str(rel)).resolve()
+                        if src_v.exists() and src_v.is_relative_to(self.store_dir.resolve()):
+                            dst_v = self.rollback_dir / str(rel)
+                            dst_v.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(src_v, dst_v)
+            except Exception:
+                pass
 
     def apply_plasticity_feedback(
         self,
@@ -418,15 +432,54 @@ class ContinualLearningPipeline:
         if not self.rollback_dir.exists():
             return False
         for prefix in (f"neuro_{domain}", domain):
+            man_bak = self.rollback_dir / f"{prefix}.manifest.json"
+            man_dst = self.store_dir / f"{prefix}.manifest.json"
             w_bak = self.rollback_dir / f"{prefix}_weights.npz"
             m_bak = self.rollback_dir / f"{prefix}_meta.json"
+
+            # Versioned atomic rollback when backup includes a manifest pointing to _versions/
+            if man_bak.exists():
+                try:
+                    man = json.loads(man_bak.read_text(encoding="utf-8"))
+                    rel_w = man.get("weights_file")
+                    rel_m = man.get("meta_file")
+                    if rel_w and rel_m:
+                        bak_vw = (self.rollback_dir / str(rel_w)).resolve()
+                        bak_vm = (self.rollback_dir / str(rel_m)).resolve()
+                        if bak_vw.exists() and bak_vm.exists():
+                            dst_vw = self.store_dir / str(rel_w)
+                            dst_vm = self.store_dir / str(rel_m)
+                            dst_vw.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(bak_vw, dst_vw)
+                            shutil.copy2(bak_vm, dst_vm)
+                            tmp_man = self.store_dir / f".tmp_rb_{prefix}.manifest.json"
+                            shutil.copy2(man_bak, tmp_man)
+                            tmp_man.replace(man_dst)
+                            AnalyticalMicroTransformer._atomic_publish_compat(dst_vw, self.store_dir / f"{prefix}_weights.npz")
+                            AnalyticalMicroTransformer._atomic_publish_compat(dst_vm, self.store_dir / f"{prefix}_meta.json")
+                            return (
+                                AnalyticalMicroTransformer.load(
+                                    prefix,
+                                    self.store_dir,
+                                    verify_checksum=True,
+                                    strict_directory=True,
+                                )
+                                is not None
+                            )
+                except Exception:
+                    pass
+
             if w_bak.exists() and m_bak.exists():
-                shutil.copy2(w_bak, self.store_dir / w_bak.name)
-                shutil.copy2(m_bak, self.store_dir / m_bak.name)
-                man_bak = self.rollback_dir / f"{prefix}.manifest.json"
-                man_dst = self.store_dir / f"{prefix}.manifest.json"
+                tmp_w = self.store_dir / f".tmp_rb_{w_bak.name}"
+                tmp_m = self.store_dir / f".tmp_rb_{m_bak.name}"
+                shutil.copy2(w_bak, tmp_w)
+                shutil.copy2(m_bak, tmp_m)
+                tmp_w.replace(self.store_dir / w_bak.name)
+                tmp_m.replace(self.store_dir / m_bak.name)
                 if man_bak.exists():
-                    shutil.copy2(man_bak, man_dst)
+                    tmp_man = self.store_dir / f".tmp_rb_{man_bak.name}"
+                    shutil.copy2(man_bak, tmp_man)
+                    tmp_man.replace(man_dst)
                 elif man_dst.exists():
                     man_dst.unlink()
                 return (

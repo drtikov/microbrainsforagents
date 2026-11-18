@@ -75,10 +75,11 @@ Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destruct
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
 Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.2`)
+### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.3`)
 - **Safe Timeout Contracts:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission.
-- **Zero-Fabrication Error Bounds:** `decide()` and telemetry emit `upper_error_bound_95: null` (`statistical_confidence_status: "unknown"`) whenever verified observations are absent, rather than inventing bounds from unlabelled counts. `decision_kind` separates deterministic `"structural_gate"` verdicts from `"routing_recommendation"` suggestions.
-- **Clean Audit Journals:** Decision logs on disk (`decision_journal.jsonl`) redact secrets, surface write failures (`journal_written`), preserve drift detection under `--shadow`, and set owner-only permissions (`0600`).
+- **Zero-Fabrication Error Bounds:** `decide()`, `calibrate_conformal()`, and `infer_conformal()` emit `upper_error_bound_95: null` and `upper_error_bound_rule_of_3: null` (`statistical_confidence_status: "unknown"`) unless measured on an explicit labeled evaluation set. `decision_kind` separates `"structural_gate"` from `"routing_recommendation"`, `authorizes_execution` is always `False`, `error_metric` specifies exact failure semantics, and models persist `calibration_data_origin` + `field_exchangeability_certified` on disk.
+- **Decoupled Advisors & Cache-Safe Sessions:** Standalone non-authorizing entrypoints `diagnose_patch()` (patch diagnostics) and `rank_tools()` / `SessionToolSurface` (sticky per-session Top-K narrowing that avoids LLM prompt-cache invalidation across turns), plus `evaluate_topk_holdout()` for real Top-K recall audits.
+- **Atomic Versioned Storage & Live Telemetry:** `AnalyticalMicroTransformer.save()` commits immutable `_versions/{name}/{rev_id}/` snapshots via a single atomic `.manifest.json` pointer swap; `/dashboard` renders live `MicrobrainTelemetry` (with illustrative preview isolated on `/demo/dashboard`), and `decision_journal.jsonl` redacts secrets and surfaces `journal_written` / `journal_error`.
 - **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows whether it inspected complete file context.
 
 ---
@@ -307,9 +308,16 @@ print("Selected within surface:", res.selected_tool) # -> "edit_file"
 # MCP-Zero hierarchical Top-K catalog narrowing (escalates full catalog on OOD)
 narrowed = mb.narrow_tool_surface("fix bug and write repository patch", top_k=4)
 print(narrowed["mode"], narrowed["candidate_tools"], narrowed["reduction_ratio"])
+
+# Decoupled non-authorizing advisors & cache-safe sticky session narrowing (v0.7.3)
+ranked = mb.rank_tools("inspect source file settings.py", available_tools=["repo_read", "edit_file", "run_tests"], top_k=2)
+patch_diag = mb.diagnose_patch("src/app.py", "def ok():\n    return 1\n")
+session = mb.SessionToolSurface(["repo_read", "edit_file", "run_tests", "git_status", "docker_ps"], top_k=3)
+turn1 = session.select_for_turn("read config source file")
+turn2 = session.select_for_turn("check line 20") # reuses sticky prefix -> cache_prefix_preserved=True
 ```
 
-### 8. Mondrian Conformal Quantiles, SHA-256 Checksums & Staged Plasticity
+### 8. Mondrian Conformal Quantiles, Atomic Versioned Checksums & Staged Plasticity
 
 ```python
 import aetheris_microbrains as mb
@@ -317,16 +325,16 @@ import aetheris_microbrains as mb
 # Load weights with automatic SHA-256 integrity verification (`verify_checksum=True`)
 brain = mb.AnalyticalMicroTransformer.load("neuro_code_edit_verifier")
 inf = brain.infer_conformal(["syntax_tree_valid", "ast_node_function_def"], alpha=0.05, mondrian=True)
-print("Mondrian Quantiles:", inf["per_class_quantiles"], "Std Err:", inf["coverage_std_error"])
+print("Origin:", inf["calibration_data_origin"], "Std Err:", inf["coverage_std_error"])
 
-# Staged continual plasticity: writes to `_candidates/`, requires holdout gate, supports `_rollback/`
+# Staged continual plasticity: writes to `_candidates/`, requires holdout gate, atomic `_rollback/`
 pipeline = mb.ContinualLearningPipeline()
 staged = pipeline.apply_plasticity_feedback("code_edit_verifier", ["new_ast_pattern"], promote=False)
 # prom = pipeline.verify_and_promote_candidate("code_edit_verifier", holdout_data, min_coverage=0.95)
 # pipeline.rollback_domain("code_edit_verifier")
 ```
 
-### 8. AST Signature Blast Radius, Sliding-Window Drift & Adaptive Conformal (ACI)
+### 9. AST Signature Blast Radius, Sliding-Window Drift & Adaptive Conformal (ACI)
 
 ```python
 import aetheris_microbrains as mb
@@ -367,16 +375,16 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.6.8`: 17 Suites — 203 Passed, 0 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.3`: 252 Passed, 2 Skipped)
 
-Run the full verification suite (zero monolith runtime skips):
+Run the full verification suite (zero failures; 2 optional-dependency skips in `test_robotics_stack.py` when `nir` or `onnx` are not installed):
 
 ```bash
 pytest aetheris_microbrains/tests -q
 ```
 
 ### 1. External Tool-Drop Rate, Baseline Comparison & Live-LLM A/B (`examples/06_real_llm_ab_benchmark.py`)
-Evaluates `narrow_tool_surface(top_k=K)` across 40 diverse external SWE/DevOps/BFCL-style tasks using real serialized 32-tool OpenAI JSON schemas (**`2,589` tokens/step**):
+Evaluates `narrow_tool_surface(top_k=K)` across **40 handcrafted SWE / DevOps-style queries (38 in-domain, 2 OOD; not an official BFCL split)** using real serialized 32-tool OpenAI JSON schemas (**`2,589` tokens/step**):
 
 ```bash
 python examples/06_real_llm_ab_benchmark.py
@@ -386,35 +394,37 @@ python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
 
 | Top-K | Recall@K | Needed-Tool Drop Rate | Escalated to Full | OOD Escalated | Gross Saved | Net Saved (After Retries) | Local p95 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 92.1% | 7.9% (3/38) | 19/38 | 1/2 | 46.7% | 35.1% | 1.132 ms |
-| **4** | **97.4%** | **2.6% (1/38)** | **19/38** | **1/2** | **43.5%** | **39.7%** | **0.900 ms** |
-| 6 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 40.5% | 36.6% | 0.906 ms |
-| 8 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 37.5% | 33.6% | 0.916 ms |
+| 2 | 92.1% | 7.9% (3/38) | 19/38 | 1/2 | 46.7% | 35.1% | 1.864 ms |
+| **4** | **97.4%** | **2.6% (1/38)** | **19/38** | **1/2** | **43.5%** | **39.7%** | **1.272 ms** |
+| 6 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 40.5% | 36.6% | 1.141 ms |
+| 8 | 97.4% | 2.6% (1/38) | 19/38 | 1/2 | 37.5% | 33.6% | 1.246 ms |
 
-**Baseline Comparison (Top-4 on 38 External Tasks, including Matched-Escalation Keyword Baseline):**
+**Baseline Comparison (Top-4 on 38 In-Domain Handcrafted Queries, with Pre-Frozen Keyword Escalation Rule):**
 
 | Architecture | Recall@4 | Escalated | Dropped | Drop Rate | 95% CP Upper Drop | Net Saved (After Retries) | Local p95 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Naive Keyword Top-4 | 76.3% | 0/38 | 9/38 | 23.7% | <= 37.7% | 52.1% | 0.740 ms |
-| Naive Keyword Top-4 (Matched Esc.) | 97.4% | 19/38 | 1/38 | 2.6% | <= 11.9% | 39.6% | 0.612 ms |
-| Embedding + Ridge Top-4 | 73.7% | 0/38 | 10/38 | 26.3% | <= 40.5% | 49.0% | 0.349 ms |
-| **Microbrains Top-4 (Hybrid)** | **97.4%** | **19/38** | **1/38** | **2.6%** | **<= 11.9%** | **39.6%** | **6.495 ms** |
+| Naive Keyword Top-4 | 76.3% | 0/38 | 9/38 | 23.7% | <= 37.7% | 52.1% | 0.195 ms |
+| Naive Keyword Top-4 (Frozen Esc.) | 84.2% | 8/38 | 6/38 | 15.8% | <= 28.8% | 45.5% | 5.119 ms |
+| Embedding + Ridge Top-4 | 73.7% | 0/38 | 10/38 | 26.3% | <= 40.5% | 49.0% | 0.478 ms |
+| **Microbrains Top-4 (Hybrid)** | **97.4%** | **19/38** | **1/38** | **2.6%** | **<= 11.9%** | **39.6%** | **8.435 ms** |
 
-### 2. Local 25-Step Regression & Token-Accounting Smoke Test (`examples/05_reproducible_25step_benchmark.py`)
-Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (no live LLM called):
+> *Honesty note:* Using a pre-frozen lexical cutoff (`top_score < 2 or margin < 1`) with zero test-set tuning, Keyword reaches 84.2% Recall@4 while Microbrains reaches 97.4% by escalating half the queries to the full catalog (`--live` retries rely strictly on runtime invalid/missing tool calls, never oracle ground-truth labels).
+
+### 2. Local 25-Step Regression & Schema-Token Smoke Test (`examples/05_reproducible_25step_benchmark.py`)
+Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (measures **tool-schema tokens only**, excluding conversation history and LLM prompt caching; see Section 5 for cache-adjusted multi-turn metrics):
 
 ```bash
 python examples/05_reproducible_25step_benchmark.py
 ```
 
-| Architecture | 25-Step Schema Tokens | Prefill Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
+| Architecture | 25-Step Schema Tokens | Schema Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Unfiltered 32-Tool Agent | 64,800 | 0.0% | — (runs unfiltered) | 0 | — (not measured) |
 | Naive Keyword Baseline | 64,800 | 0.0% | 8 | 4 | 0.002 ms |
-| **Aetheris Microbrains v0.6.8** | **12,312** | **81.0%** | **0** | **0** | **0.962 ms** |
+| **Aetheris Microbrains v0.7.3** | **12,312** | **81.0%** | **0** | **0** | **1.977 ms** |
 
 ### 3. External SWE-bench Lite (300 Real GitHub Issues) Zero-LLM Gate Benchmark (`examples/07_swebench_lite_gate_benchmark.py`)
-Evaluates `decide()` and `narrow_tool_surface(top_k=4)` against all **300 real issues and gold patches** in `princeton-nlp/SWE-bench_Lite` (Astropy, Django, Matplotlib, Pytest, scikit-learn, SymPy, etc.):
+Evaluates `decide()` and `narrow_tool_surface(top_k=4)` against all **300 real issues and gold patches** in `princeton-nlp/SWE-bench_Lite`:
 
 ```bash
 python examples/07_swebench_lite_gate_benchmark.py
@@ -422,33 +432,63 @@ python examples/07_swebench_lite_gate_benchmark.py
 
 **Patch Gate (300 Real Gold File Diffs):**
 
-| Metric (Denominator: 300 File Diffs / 60 Mutated Diffs) | Result |
+| Metric (Denominator: 300 File Diffs / 60 Top-Level Mutated Pairs) | Result |
 | --- | ---: |
-| Gold file diffs allowed (`layer1_structural_verified`) | **213 / 300 (71.0%)** |
+| Gold file diffs allowed (`layer1_hunk_only_checked`) | **213 / 300 (71.0%)** |
 | Partial hunks escalated without full `original_source` | **82 / 300 (27.3%)** |
 | Gold file diff false-deny rate (`AST syntax FP: 0`) | **5 / 300 (1.67%)** |
-| Synthetic mutation templates caught (6 patterns: syntax / secrets / `getattr` / `eval` / `shell=True` / `__builtins__`) | **60 / 60 (100.0%)** |
-| Diff gate local latency (`p50` / `p95`) | **1.660 ms / 8.773 ms** |
+| Paired causal mutation flips (verifies expected `reason_code` **and** rule-specific `label`) | **58 / 58 non-deny** (`39 / 39` strictly allowed originals; `60 / 60` raw) |
+| Diff gate local latency (`p50` / `p95`) | **1.474 ms / 3.968 ms** |
 
-**Tool-Surface Narrowing (300 Issue Prompts):**
+**Tool-Surface Narrowing Smoke-Test (300 Issue Prompts — Coarse `any(5 SWE core tools)` Criterion):**
 
 | Metric (Denominator: 300 Issues / 127 Narrowed Prompts) | Result |
 | --- | ---: |
 | Prompts narrowed to Top-4 vs. full-catalog escalation | **127 / 300 narrowed**, **173 / 300 full-catalog** |
-| SWE core tool retained across all prompts (including full-catalog) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
-| Any SWE core tool retained within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `repo_read`: **103 / 127**) |
+| Coarse SWE core retention across all 300 prompts vs. Pre-Frozen Keyword smoke | **297 / 300** vs. **286 / 300** (`36.7%` schema tokens saved, `p95 = 14.487 ms`) |
+| Coarse SWE core retention within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127** (`edit_file` / `repo_read`: **103 / 127**) |
 
-### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.7.0`–`v0.7.2`)
-Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses official `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` avoids unsupported `"ask"` on escalations and defers cleanly to Codex's native approval flow, or pass `--codex-escalate-deny`), while fatal denials and internal errors write redacted reasons to `stderr` with exit code `2` (fail-closed):
+### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI & HTTP Endpoints (`v0.7.0`–`v0.7.3`)
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output adapts per host via `--host claude|codex|generic` (Claude Code uses `hookSpecificOutput` `allow`/`ask`/`deny`; `--host codex` omits unsupported `"ask"` on escalations and defers cleanly to Codex's native approval flow, or pass `--codex-escalate-deny`), while fatal denials and invalid/non-object payloads write redacted reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast
 echo '{"tool_name":"Bash","tool_input":{"command":"custom_cmd"}}' | python -m aetheris_microbrains.hook --host codex
 ```
 
-* **Prefilter-by-default & Passive Shadow:** On safe `allow` verdicts, the hook exits `0` with empty `stdout` so host user permission prompts still apply (pass `--auto-allow` only if you explicitly want to bypass prompts). Reading protected files (`.env`, `.ssh/id_rsa`, `credentials.json`) escalates safely. With `--shadow`, the hook stays strictly passive (exit `0`) even on malformed input or internal errors, and logs `shadow_reason_code` so live OOD drift detection works during shadow rollouts.
-* **Server Extra (`pip install aetheris-microbrains[server]`):** Installs FastAPI, Uvicorn, and Pydantic for the optional local HTTP server (`/microbrain/prefilter` fails closed with `status: "error"` on internal errors).
-* **Fail-closed recommendation:** Set `"onFailure": "block"` in your Claude Code hook configuration so environment/import errors also block safely.
+* **Prefilter-by-default & Strict Passive Shadow:** Safe `allow` verdicts exit `0` with empty `stdout` so host confirmation prompts still apply (`--auto-allow` opts out). Under `--shadow`, `evaluate_hook_payload()` and CLI stay passive (`exit 0`, `permissionDecision=None` regardless of `--host codex` flags), log `shadow_reason_code`, and warn on `stderr` if `journal_written` is `False`.
+* **Live `/dashboard`, Static `/demo/dashboard` & Server Extra (`pip install aetheris-microbrains[server]`):** Installs FastAPI, Uvicorn, and Pydantic. `/dashboard` and `/metrics` render live `MicrobrainTelemetry` data; static preview cards live on `/demo/dashboard`. `/microbrain/prefilter` fails closed (`status="error"`, `passed=False`) and `DSHMicrobrainClient` propagates server error statuses while validating Python syntax via `ast.parse` in its local fallback.
+* **Fail-closed recommendation:** Set `"onFailure": "block"` in Claude Code hook configs so import/environment errors block safely.
+
+### 5. Frozen 120-Task Multi-Label Tool Advisor & Session Prompt-Cache Benchmark (`examples/08_frozen_advisor_benchmark.py`)
+Evaluates **120 frozen multi-label coding tasks** (6 external repo archetypes × 20 tasks, each permitting multiple valid `acceptable_tools`) across **3-turn sessions** with realistic prompt-prefix caching (`0.1x` cached token cost when the tool prefix matches the previous turn, `1.0x` on invalidation):
+
+```bash
+python examples/08_frozen_advisor_benchmark.py
+```
+
+| Strategy | Recall@4 | Narrowed Recall | Narrowed | Dropped | 95% CP Upper Drop | Uncached Net Saved | Cache-Adjusted Net Saved | Local p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full 32-Tool Catalog (Baseline) | 100.0% | 100.0% | 0/120 | 0/120 | <= 2.5% | 0.0% | 0.0% | 0.001 ms |
+| Simple Name+Desc Keyword (Frozen Rule) | 94.2% | 92.9% | 98/120 | 7/120 | <= 10.7% | 79.5% | 48.8% | 0.220 ms |
+| Microbrains Top-4 (Per-Turn) | 100.0% | 100.0% | 78/120 | 0/120 | <= 2.5% | 52.9% | **4.1%** | 5.262 ms |
+| **Microbrains Top-4 (Session-Sticky)** | **100.0%** | **100.0%** | **78/120** | **0/120** | **<= 2.5%** | **56.8%** | **56.8%** | **5.024 ms** |
+
+* **Agreed-Narrowed Error Check:** Even among `73` queries where both Keyword and Microbrains narrowed, `6` had drops in one selector (measured explicitly).
+* **Prompt-Cache Effect:** Switching active tools every turn (`Per-Turn`) breaks prefix caching (`52.9%` raw → `4.1%` cache-adjusted); pinning tools per session with `SessionToolSurface` preserves `56.8%` net cache-adjusted savings. Decoupled `diagnose_patch()` matched `5/5` patch diagnostic cases with `authorizes_execution=False`.
+
+### 6. Bilingual SWE 5-Way Ablation (`aetheris_microbrains/tests/test_colony_swe_shadow.py`)
+Disjoint held-out conformal calibration (`in_sample=False`), tracking both missed mandatory escalations and benign false escalations / misclassifications:
+
+| Variant | 120 RU/EN Acc (RU) | Missed Esc. (95% CP Upper) | Syn-Bank Held-Out (20) | Zero-Overlap Morph Split (20) | Morph Missed Esc. |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `1.` Pure Rules Baseline | 106/120 = 88.3% (95.0%) | 4/50 (`<= 17.38%`) | 5/20 (25.0%, `1/6` missed) | 10/20 (50.0%) | `0/6` (`<= 39.3%`) |
+| `1b.` Rules (Matched Synonym + Invariants) | 107/120 = 89.2% (95.0%) | 4/50 (`<= 17.38%`) | 20/20 (100.0%, `0/6` missed) | 6/20 (30.0%) | `0/6` (`<= 39.3%`) |
+| `2.` Pure Neural (Weights + Threshold) | 103/120 = 85.8% (90.0%) | 1/50 (`<= 9.14%`) | 14/20 (70.0%, `0/6` missed) | 8/20 (40.0%) | `0/6` (`<= 39.3%`) |
+| `2b.` Pure Neural (Weights Only, No Threshold) | 60/120 = 50.0% (56.7%) | 50/50 (`<= 100.0%`) | 12/20 (60.0%, `6/6` missed) | 8/20 (40.0%) | `6/6` (`<= 100.0%`) |
+| **`3.` Microbrain Hybrid (Weights + Conformal Gate)** | **104/120 = 86.7% (91.7%)** | **0/50 (`<= 5.82%`)** | **14/20 (70.0%, `0/6` missed)** | **8/20 (40.0%)** | **`0/6` (`<= 39.3%`)** |
+
+> *Honesty note:* Matching `1b`'s synonym vocabulary solves the old `20/20` synonym split, isolating why vocabulary expansion helped there; meanwhile, on the zero-overlap `FROZEN_UNSEEN_MORPH_QUERIES` split (`0/14` exact token overlap), char-3-gram subword coverage enables `40.0%` vs `30.0%` for exact matched rules (`1b`), while ablating the conformal threshold (`2b`) causes `50/50` missed escalations. None of these synthetic upper bounds transfer directly as field exchangeability guarantees.
 
 ```python
 import aetheris_microbrains as mb
@@ -458,11 +498,11 @@ moe.fit_from_traces([
     {"query": "read source file config.py", "tool": "repo_read"},
     {"query": "commit staged bugfix changes", "tool": "git_commit"},
 ])
+# Measure genuine Top-K drop rate on labeled holdout trajectories
+eval_rep = moe.evaluate_topk_holdout([
+    {"query": "read source file config.py", "acceptable_tools": ["repo_read", "grep_search"]},
+] * 20, top_k=4, sample_id="holdout_20")
 ```
-
-Also run the **de-leaked 120-query RU/EN + 20-query Held-Out Paraphrased SWE Ablation** (`aetheris_microbrains/tests/test_colony_swe_shadow.py`):
-* **Standard 120 RU/EN Queries:** Hybrid Microbrain **106/120 (88.3%)** strict accuracy (**56/60 = 93.3%** RU) with **`0/50`** missed escalations vs. **`4/50`** missed on Pure Rules Baseline.
-* **Unseen Held-Out Paraphrased Split (20 queries absent from rule substrings):** Hybrid Microbrain **14/20 (70.0%)** accuracy & **`0/6`** missed escalations vs. Pure Rules Baseline **5/20 (25.0%)** & `1/6` missed escalations.
 
 Or target specific verification suites:
 
@@ -471,8 +511,8 @@ pytest aetheris_microbrains/tests/test_fable_review_fixes.py aetheris_microbrain
 ```
 
 ### Independent Audit & Hardening Coverage:
-* **`test_fable_review_fixes.py` (`test_fable_1`..`23`)**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha`, honest `ESCALATED_TO_LLM` without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems or leaked benchmark identifiers in `test_colony_swe_shadow.py`, `allow_pickle=False`, zero numbered placeholder vocab tokens across all 42 models, ridge-fitted `W_gate` + empirical per-expert quantiles in `ToolRoutingMoE`, non-polluting `save()` CWD hygiene, full-file patched AST verification, multi-feature ensemble tokens, generic non-`ouroboros` blast-radius scanning, live `available_tools` enforcement, Clopper-Pearson upper bounds + nonconformity drift monitoring, grounded `CascadeEnsembleRouter` verdicts (`escalation_payload` on OOD/unknown tools), bilingual RU/EN `IntentPersistenceTracker`, grounded `MetacognitiveCalibrator`, universal `.env`/`.git/hooks`/`.ssh` protection, static data-table vs. cyclomatic complexity scoring, `recalibrate_from_decision_journal()`, zero legacy `Proposal N` comments, and `n_cal = 120` expanded calibration + external Tool-Drop Rate / retry-adjusted benchmark validation.
-* **Split-Conformal & Mondrian Consistency Discipline (`conformal_collector.py`)**: Disjoint **Train**, **120 Calibration**, and **40 Validation** splits across **all 42 clean-vocab models** (`calibration_data_origin: "synthetic_rule_consistency"` — verifying internal rule consistency rather than field user-distribution exchangeability) validated under strict prediction-set membership $Y \in C_\alpha(X)$, with companion `.manifest.json` pair-integrity verification (`strict_directory=True` for continual-learning candidates), SHA-256 weight checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Clopper-Pearson upper bounds reported strictly from real measured evaluation sets (`unknown` otherwise), sliding-window drift detection, and Gibbs-Candès ACI adaptation.
+* **`test_fable_review_fixes.py` (`test_fable_1`..`41`)**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha`, honest `ESCALATED_TO_LLM` without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems or leaked benchmark identifiers in `test_colony_swe_shadow.py`, `allow_pickle=False`, zero numbered placeholder vocab tokens across all 42 models, ridge-fitted `W_gate` + empirical per-expert quantiles + `evaluate_topk_holdout()` in `ToolRoutingMoE`, atomic `_versions/` snapshot commits via single-pointer `.manifest.json` (`strict_directory=True` and atomic rollback), persisted `calibration_data_origin`, non-polluting `save()` CWD hygiene, full-file patched AST verification, live `available_tools` enforcement, Clopper-Pearson upper bounds strictly from real measured eval sets (`null` + `unknown` otherwise), `authorizes_execution=False` + decoupled `rank_tools()` / `diagnose_patch()` / `SessionToolSurface`, host-contracted Claude/Codex hooks + passive `--shadow`, live `/dashboard` vs static `/demo/dashboard` + DSH AST fallback, zero legacy `Proposal N` comments, `n_cal = 120` expanded calibration, and `08_frozen_advisor_benchmark.py`.
+* **Split-Conformal & Mondrian Consistency Discipline (`conformal_collector.py`)**: Disjoint **Train**, **120 Calibration**, and **40 Validation** splits across **all 42 clean-vocab models** (`calibration_data_origin: "synthetic_rule_consistency"` persisted in `*_meta.json` — verifying internal rule consistency rather than field user-distribution exchangeability) validated under strict prediction-set membership $Y \in C_\alpha(X)$, immutable `_versions/` snapshots with single-pointer `.manifest.json` commits, SHA-256 weight/meta checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Clopper-Pearson upper bounds & Rule-of-3 emitted strictly from real measured evaluation sets (`null` otherwise), sliding-window drift detection, and Gibbs-Candès ACI adaptation.
 * **Ablation, Baselines & Economics (`test_layer_ablation_and_baselines.py`, `test_end_to_end_economics_and_drift.py`)**: Layer 0 / 0+1 / 0+1+2 ablation, bilingual RU/EN routing vs. English keyword baseline, MCP-Zero Top-$K$ schema reduction ($\ge 75\%$), `< 2 ms` p95 decision latency, risk-class fail-closed error handling, `shadow_mode` journaling, and `_candidates/` $\to$ `_rollback/` continual learning.
 * **Adversarial & Probe Suites (`test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py`)**: Diverse obfuscated Python sinks & secret leaks, realistic indented/`except`/`elif`/comment/`.ts`/`.json`/`.yaml`/`.md` diffs, real weight-space surgical causal inversion (no `MagicMock`), allowlist-first `shlex` shell parsing, and 120 bilingual (60 RU / 60 EN) SWE queries (`0/50` missed escalations).
 
