@@ -765,7 +765,7 @@ def test_fable_28_fit_from_traces_and_baseline_comparison():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     rows = mod.evaluate_baselines_comparison(top_k=4)
-    assert len(rows) == 3
+    assert len(rows) == 4
     mb_row = next(r for r in rows if "Microbrains" in r["baseline"])
     assert mb_row["recall_at_k_pct"] >= 95.0
     assert mb_row["cp95_upper_drop_pct"] < 15.0
@@ -955,6 +955,54 @@ def test_fable_37_hook_prefilter_mode_protected_read_and_fail_closed(monkeypatch
     captured = capsys.readouterr()
     assert rc == 2
     assert "hook_internal_error:RuntimeError:simulated_hook_crash" in captured.err
+
+
+def test_fable_38_lazy_init_hook_import_fail_closed_and_shadow(monkeypatch, capsys):
+    import json
+    import subprocess
+    import sys
+    from aetheris_microbrains import hook as hook_mod
+
+    # 1. Importing aetheris_microbrains.hook in a fresh process must NOT load OpenCL or heavy neural modules
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, aetheris_microbrains.hook as h; "
+                "h.evaluate_hook_payload({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}); "
+                "loaded = [m for m in sys.modules if 'opencl' in m or 'bitnet' in m or 'kolmogorov' in m]; "
+                "print(','.join(loaded))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert probe.returncode == 0
+    assert probe.stdout.strip() == "", f"Unexpected heavy modules loaded by hook: {probe.stdout}"
+
+    # 2. Import failure inside _load_decision_engine() fails closed with exit code 2
+    def _import_boom():
+        raise ImportError("simulated_missing_dependency")
+
+    monkeypatch.setattr(hook_mod, "_load_decision_engine", _import_boom)
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: '{"tool_name":"Bash","tool_input":{"command":"ls"}}'})())
+    rc = hook_mod.main([])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "hook_internal_error:ImportError:simulated_missing_dependency" in captured.err
+
+    # 3. --shadow mode logs shadow_decision and passes through silently (exit 0)
+    shadow_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook", "--shadow"],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert shadow_proc.returncode == 0
+    assert shadow_proc.stdout.strip() == ""
 
 
 

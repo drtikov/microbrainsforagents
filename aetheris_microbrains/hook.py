@@ -17,7 +17,10 @@ import os
 import sys
 from typing import Any, Dict, Optional
 
-from .core.layered_decision_engine import PolicyConfig, decide
+
+def _load_decision_engine():
+    from .core.layered_decision_engine import PolicyConfig, decide
+    return PolicyConfig, decide
 
 
 def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -73,15 +76,19 @@ def evaluate_hook_payload(
     strict_ast: bool = False,
     file_content: Optional[str] = None,
     log_decisions: bool = False,
+    shadow_mode: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return normalized verdict + exit_code."""
+    PolicyConfig, decide = _load_decision_engine()
     norm = _normalize_hook_payload(payload)
     policy = PolicyConfig(strict_ast_allowlist=strict_ast)
     ctx: Dict[str, Any] = {}
     if file_content is not None:
         ctx["file_content"] = file_content
-    if log_decisions:
+    if log_decisions or shadow_mode:
         ctx["log_decisions"] = True
+    if shadow_mode:
+        ctx["shadow_mode"] = True
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
     perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
@@ -92,7 +99,7 @@ def evaluate_hook_payload(
         "permissionDecision": perm,
         "permissionDecisionReason": reason,
     }
-    return {
+    out: Dict[str, Any] = {
         "hookSpecificOutput": hook_specific,
         "decision": dec,
         "permissionDecision": perm,
@@ -103,6 +110,10 @@ def evaluate_hook_payload(
         "latency_ms": verdict["latency_ms"],
         "exit_code": exit_code,
     }
+    if shadow_mode:
+        out["shadow_decision"] = verdict.get("shadow_decision", dec)
+        out["shadow_reason_code"] = verdict.get("shadow_reason_code", verdict["reason_code"])
+    return out
 
 
 def _format_hook_stdout(hook_specific: Dict[str, Any]) -> str:
@@ -119,9 +130,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             action="store_true",
             help="Explicitly emit permissionDecision='allow' on safe verdicts (bypasses Claude Code user prompts); default is silent pass-through",
         )
+        parser.add_argument(
+            "--shadow",
+            action="store_true",
+            help="Audit/shadow mode: log what Microbrains would deny/ask to the decision journal without blocking",
+        )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
+        shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
 
         raw = sys.stdin.read().strip()
         if not raw:
@@ -151,7 +168,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
-        result = evaluate_hook_payload(payload, strict_ast=args.strict_ast, log_decisions=log_decisions)
+        result = evaluate_hook_payload(
+            payload,
+            strict_ast=args.strict_ast,
+            log_decisions=log_decisions,
+            shadow_mode=shadow_mode,
+        )
+        if shadow_mode:
+            # Shadow mode logs to decision journal and passes control back cleanly
+            return 0
         exit_code = int(result["exit_code"])
         perm = result["permissionDecision"]
         if exit_code == 2:

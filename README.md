@@ -49,14 +49,14 @@ When an AI agent writes code or executes commands, it frequently wastes time and
 
 ## 🤝 Compatible Agent Ecosystems
 
-Microbrains is architecturally independent of any specific LLM provider or orchestration framework. It plugs cleanly anywhere tool calls, shell commands, or diffs are evaluated:
+Microbrains is architecturally independent of any specific LLM provider or orchestration framework. Below is the exact integration status today:
 
-| Category | Agents & Frameworks | Why Microbrains Fits Here | Integration Mode |
+| Category | Agents & Frameworks | Integration Status | What Microbrains Covers (and Does Not Cover) |
 | :--- | :--- | :--- | :--- |
-| **Autonomous Coding Agents** | **Claude Code**, **SWE-agent** / **mini-SWE-agent**, **Codex**, **OpenHands** (OpenDevin), **Aider**, **Cursor Agent** | Stops invalid syntax / indent loops, prevents accidental secret leaks in commits, and intercepts fatal shell mistakes before test execution. | CLI `PreToolUse` hook (`hookSpecificOutput`) or Python pre-execution interceptor. |
-| **Personal & Desktop OS Assistants** | **OpenClaw** (50+ chat channels & ClawHub skills), **Hermes Agent** (Nous Research self-improving loop), **Goose**, **Computer Use Agents** | Guards the host OS: protects `.env`, `.git/hooks/`, `.ssh/` credentials, denies destructive commands (`rm -rf`, `DROP DATABASE`), and safely escalates uninspected external tools to `"ask"`. | Local daemon middleware or CLI hook subprocess before shell/file execution. |
-| **Orchestration & Workflow Frameworks** | **LangGraph**, **CrewAI**, **AutoGPT**, **LlamaIndex Workflows**, **AutoGen** / **AG2** | Shrinks massive tool & MCP registries (30+ tools) down to Top-4 per step (`narrow_tool_surface`), cutting schema prefill tokens by ~39% across multi-agent turns. | Native Python API (`mb.decide(...)`, `mb.narrow_tool_surface(...)`). |
-| **MCP (Model Context Protocol) Hosts** | **Any MCP Client / Host** (Desktop, CLI, or server) | Sits in front of untrusted or third-party MCP servers to enforce allowlists, parameter sanitization, and structured escalation. | Pre-call proxy or wrapper around MCP tool execution. |
+| **Claude Code & `PreToolUse` Harnesses** | **Claude Code** (≥ 2.1.295 for `onFailure: "block"`), **Codex** | **Built-in CLI Hook** (`python -m aetheris_microbrains.hook`) | Pre-flight AST/secret/shell filter on individual tool calls (`allow` passes through to user prompts, `ask` escalates, `deny` blocks). Not an OS/network sandbox. |
+| **Coding Agents** | **SWE-agent** / **mini-SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Custom Adapter** (`mb.decide(...)`) | Catches malformed syntax, leaked secrets, and destructive commands in diffs/commands before test execution. Does not audit full repos or verify test logic. |
+| **Personal & Desktop OS Assistants** | **OpenClaw**, **Hermes Agent**, **Goose**, **Computer Use Agents** | **Python API / Custom Adapter** | Protects `.env`, `.git/hooks/`, `.ssh/` paths, blocks destructive shell chains, and escalates uninspected external calls to `"ask"`. Must be paired with OS/process permissions. |
+| **Orchestration & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Custom Adapter** (`mb.narrow_tool_surface(...)`) | Shrinks tool-schema tokens per turn; `ask` is a client-side prompt (not a server-side MCP permission boundary), and schema pruning does not cap total steps or session spend. |
 
 ---
 
@@ -203,10 +203,17 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 
 **Key Hook Modes & CLI Flags:**
 * **Prefilter Mode (Default):** On safe operations, the hook exits `0` silently. It does **not** bypass Claude Code's native user confirmation dialogs—it only intercepts dangerous or broken calls before the prompt is shown.
+* **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to `memory/decision_journal.jsonl` without blocking live execution.
 * **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
-* **Fail-Closed on Exceptions:** Unexpected runtime errors return exit code `2` with error details in `stderr`, preventing unsafe actions from running if the hook fails.
+* **Fail-Closed on Exceptions & Import Errors:** Unexpected runtime or import errors return exit code `2` with error details in `stderr`, preventing unsafe actions from running if the hook fails.
 * **`--log-decisions` (or `AETHERIS_LOG_DECISIONS=1`):** Records decision telemetry to `memory/decision_journal.jsonl` across independent hook processes, enabling cross-process drift detection.
+
+**Live Claude Code Acceptance Checklist (before production use):**
+1. **Normal call (`ls -la`):** exits `0` silently and preserves Claude Code's normal user permission prompt.
+2. **Escalation (`Read .env` or unknown MCP tool):** `ask` prompt reaches the user.
+3. **Denial (`rm -rf /`):** blocked before execution, reason shown via `stderr`.
+4. **Hook failure (`onFailure: "block"` on Claude Code ≥ `2.1.295`):** simulated hook crash blocks the tool call rather than failing open.
 
 ---
 
