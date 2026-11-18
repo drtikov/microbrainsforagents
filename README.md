@@ -293,7 +293,23 @@ python examples/05_reproducible_25step_benchmark.py
 | Naive Keyword Baseline | 64,800 | 0.0% | 8 | 4 | 0.002 ms |
 | **Aetheris Microbrains v0.6.8** | **12,312** | **81.0%** | **0** | **0** | **0.962 ms** |
 
-### 3. Drop-In `PreToolUse` Hook CLI, Strict AST Allowlist & Trace Training (`v0.6.5`–`v0.6.6`)
+### 3. External SWE-bench Lite (300 Real GitHub Issues) Zero-LLM Gate Benchmark (`examples/07_swebench_lite_gate_benchmark.py`)
+Evaluates `decide()` and `narrow_tool_surface(top_k=4)` against all **300 real issues and gold patches** in `princeton-nlp/SWE-bench_Lite` (Astropy, Django, Matplotlib, Pytest, scikit-learn, SymPy, etc.):
+
+```bash
+python examples/07_swebench_lite_gate_benchmark.py
+```
+
+| Metric (300 Real SWE-bench Lite Issues) | Result |
+| --- | ---: |
+| Gold patches allowed (`layer1_structural_verified`) | **213 / 300 (71.0%)** |
+| Partial hunks escalated without full `original_source` | **82 / 300 (27.3%)** |
+| Gold patch false-deny rate (`AST syntax FP: 0`) | **5 / 300 (1.67%)** |
+| Adversarial mutations on real patches caught (syntax/secret/`getattr`) | **60 / 60 (100.0%)** |
+| Diff gate local latency (`p50` / `p95`) | **1.312 ms / 4.358 ms** |
+| SWE core tool retained in `narrow_tool_surface(top_k=4)` | **297 / 300 (99.0%)** (`36.7%` schema saved) |
+
+### 4. Drop-In `PreToolUse` Hook CLI, Strict AST Allowlist & Trace Training (`v0.6.5`–`v0.6.8`)
 Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON, or train the Layer 2 MoE router directly from recorded agent traces:
 
 ```bash

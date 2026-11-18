@@ -199,6 +199,15 @@ def _parse_python_with_context(code_text: str) -> Optional[ast.AST]:
     # Branch continuation hunk (`elif ...:` / `else:`)
     candidates.append(f"if True:\n    pass\n{dedented}")
 
+    # Trailing block header in 3-line unified-diff context (e.g. `else:` at end of hunk)
+    last_non_empty = next((ln for ln in reversed(dedented.splitlines()) if ln.strip()), "")
+    if last_non_empty.rstrip().endswith(":"):
+        lead = len(last_non_empty) - len(last_non_empty.lstrip(" "))
+        pass_line = " " * (lead + 4) + "pass"
+        candidates.append(f"{dedented}\n{pass_line}")
+        candidates.append(f"if True:\n    pass\n{dedented}\n{pass_line}")
+        candidates.append(f"def _hunk_ctx():\n{indented_for_fn}\n    {pass_line}")
+
     for cand in candidates:
         try:
             return ast.parse(cand)
@@ -428,10 +437,11 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         attr_str = _const_str(node.args[1]) if len(node.args) >= 2 else None
         if target_obj in self.DANGEROUS_MODULES or target_obj in self.SUBSCRIPT_SCOPE_NAMES:
             self.findings.append(f"obfuscated_getattr:{target_obj}.{attr_str or '<dynamic>'}")
-        elif len(node.args) >= 2 and isinstance(node.args[1], ast.BinOp):
-            self.findings.append(f"obfuscated_getattr_concat:{attr_str or '<expr>'}")
         elif attr_str in {"system", "popen", "eval", "exec", "__import__", "rmtree"}:
-            self.findings.append(f"obfuscated_getattr_sink:{attr_str}")
+            if len(node.args) >= 2 and isinstance(node.args[1], ast.BinOp):
+                self.findings.append(f"obfuscated_getattr_concat:{attr_str}")
+            else:
+                self.findings.append(f"obfuscated_getattr_sink:{attr_str}")
 
 
 def _extract_defs_from_lines(lines: List[str]) -> Tuple[Dict[str, Tuple[int, int]], int]:
@@ -706,20 +716,28 @@ def analyze_code_diff(
 
     # Extract proposed lines carefully
     raw_lines = diff_text.splitlines()
-    has_unified = any(l.startswith(("--- ", "+++ ", "@@ ")) for l in raw_lines)
+    has_unified = any(l.startswith(("--- ", "+++ ", "@@ ", "diff --git ")) for l in raw_lines)
+    _GIT_META_PREFIXES = (
+        "diff --git ", "index ", "new file mode ", "deleted file mode ",
+        "old mode ", "new mode ", "similarity index ", "rename from ", "rename to ",
+        "---", "+++", "@@", "\\ No newline",
+    )
     if has_unified:
-        code_lines = []
+        hunks: List[List[str]] = [[]]
         for l in raw_lines:
-            if l.startswith(("---", "+++", "@@")) or l.startswith("-"):
+            if l.startswith("@@"):
+                if hunks[-1]:
+                    hunks.append([])
                 continue
-            if l.startswith("+"):
-                code_lines.append(l[1:])
-            elif l.startswith(" ") and not any(other.startswith("+") and not other.startswith("+++") and len(other) > 1 and other[1] != " " and l.startswith("    ") for other in raw_lines):
-                code_lines.append(l[1:])
+            if l.startswith(_GIT_META_PREFIXES) or l.startswith("-"):
+                continue
+            if l.startswith(("+", " ")):
+                hunks[-1].append(l[1:])
             else:
-                code_lines.append(l)
-        extracted = "\n".join(code_lines)
+                hunks[-1].append(l)
+        extracted = "\n".join(line for h in hunks for line in h)
     else:
+        hunks = []
         if all(l.startswith("+") or not l.strip() for l in raw_lines if l):
             extracted = "\n".join(l[1:] if l.startswith("+") else l for l in raw_lines)
         else:
@@ -828,6 +846,37 @@ def analyze_code_diff(
             }
 
     tree = _parse_python_with_context(dedented)
+    if tree is None and has_unified and hunks:
+        # Multi-hunk unified diff without full file: parse each @@ hunk independently
+        parsed_bodies: List[ast.stmt] = []
+        all_hunks_ok = True
+        for h_lines in hunks:
+            h_text = textwrap.dedent("\n".join(h_lines)).strip("\n")
+            if not h_text.strip():
+                continue
+            h_tree = _parse_python_with_context(h_text)
+            if h_tree is None:
+                all_hunks_ok = False
+                break
+            if isinstance(h_tree, ast.Module):
+                parsed_bodies.extend(h_tree.body)
+        if all_hunks_ok and parsed_bodies:
+            tree = ast.Module(body=parsed_bodies, type_ignores=[])
+    if tree is None and has_unified:
+        # Fallback 1: synthetic unified diffs where context lines omit the 1-space diff prefix
+        unshifted = "\n".join(
+            l[1:] if l.startswith("+") else l
+            for l in raw_lines
+            if not (l.startswith(_GIT_META_PREFIXES) or l.startswith("-"))
+        )
+        if unshifted.strip():
+            tree = _parse_python_with_context(textwrap.dedent(unshifted).strip("\n"))
+    if tree is None and has_unified:
+        # Fallback 2: parse added '+' lines only when they are self-contained statements (not dangling block headers)
+        added_only = "\n".join(l[1:] for l in raw_lines if l.startswith("+") and not l.startswith("+++"))
+        added_dedented = textwrap.dedent(added_only).strip("\n")
+        if added_dedented.strip() and not added_dedented.rstrip().endswith(":"):
+            tree = _parse_python_with_context(added_dedented)
     if tree is None and patched_tree is not None:
         tree = patched_tree
     elif tree is None and resolved_source:
@@ -841,11 +890,30 @@ def analyze_code_diff(
 
     analysis_tree = patched_tree if patched_tree is not None else tree
     if analysis_tree is None:
+        # Check for explicit syntax errors on added lines vs. partial-context unified hunks without original_source
+        added_lines_text = [l[1:] for l in raw_lines if l.startswith("+") and not l.startswith("+++")] if has_unified else dedented.splitlines()
+        line_findings: List[str] = list(secret_findings)
+        for ln in added_lines_text:
+            s_ln = ln.strip()
+            if not s_ln or s_ln.startswith("#"):
+                continue
+            lt = _parse_python_with_context(s_ln)
+            if lt is not None:
+                lv = _SecurityASTVisitor()
+                lv.visit(lt)
+                line_findings.extend(lv.findings)
+        line_findings = list(dict.fromkeys(line_findings))
+        explicit_bad_syntax = any(
+            re.match(r"^\s*(?:def|class)\s+[A-Za-z_]\w*\s*\([^)]*:\s*$", ln)
+            for ln in added_lines_text
+        )
+        partial_needs_source = bool(has_unified and not resolved_source and not explicit_bad_syntax and not line_findings)
         return {
             "language": "python",
             "syntax_valid": False,
-            "security_clean": False,
-            "findings": ["syntax_tree_malformed"],
+            "partial_hunk_needs_source": partial_needs_source,
+            "security_clean": len(line_findings) == 0,
+            "findings": list(dict.fromkeys(["syntax_tree_malformed"] + line_findings)),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1316,10 +1384,12 @@ def decide(
 
         if diff_text is not None:
             diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source)
-            if not diff_res["syntax_valid"]:
-                return _finish("deny", "syntax_error", ["deny"], "layer1_ast_syntax_error", 1)
             if not diff_res["security_clean"]:
                 return _finish("deny", diff_res["findings"][0], ["deny"], "layer1_ast_security_veto", 1)
+            if not diff_res["syntax_valid"]:
+                if diff_res.get("partial_hunk_needs_source"):
+                    return _finish("escalate", "partial_hunk_without_source", ["allow", "deny"], "layer1_partial_hunk_without_source", 1)
+                return _finish("deny", "syntax_error", ["deny"], "layer1_ast_syntax_error", 1)
             if diff_res["line_count"] > cfg.max_diff_lines:
                 return _finish("escalate", "high_blast_radius", ["allow", "deny"], "layer1_diff_scale_exceeded", 1)
             if cfg.strict_ast_allowlist and diff_res.get("language") == "python":
