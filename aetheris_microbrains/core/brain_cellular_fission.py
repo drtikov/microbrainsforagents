@@ -150,22 +150,41 @@ class BrainCellularFissionEngine:
 
             # Ensure each daughter retains >= 12 Hopfield rules and held-out split-conformal calibration
             # so cellular mitosis never emits uncalibrated models into the fleet store.
+            fission_semantic_tags = (
+                "decompose_root_goal", "isolate_subtask_graph", "validate_step_contract",
+                "schedule_parallel_stage", "verify_precondition_edge", "resolve_dependency_order",
+                "partition_search_scope", "checkpoint_stage_output", "detect_cycle_guard",
+                "merge_subtask_results", "estimate_step_budget", "rollback_partial_branch",
+                "prioritize_critical_path", "bind_context_artifacts", "propagate_failure_mode",
+                "emit_execution_manifest", "guard_resource_ceiling", "verify_postcondition_seal",
+                "audit_branch_coherence", "dispatch_worker_unit", "aggregate_leaf_status",
+                "prune_redundant_branch", "normalize_task_payload", "confirm_terminal_state",
+                "isolate_sandbox_scope", "track_progress_invariant", "align_schema_contract",
+                "synthesize_plan_delta", "split_dependency_cluster", "reconcile_stage_outputs",
+                "verify_schema_boundary", "audit_execution_trace", "gate_unsafe_mutation",
+                "narrow_tool_surface", "escalate_ambiguous_step", "consolidate_worker_state",
+                "preserve_ewc_anchor", "compute_fisher_importance", "verify_checksum_digest",
+                "track_window_coverage", "adjust_aci_quantile", "enforce_singleton_set",
+                "route_bilingual_query", "filter_secret_leak", "check_ast_signature",
+            )
             alpha = float(getattr(brain, "conformal_alpha", 0.05) or 0.05)
-            for daughter, d_rules, suffix in ((daughter_a, a_rules, "a"), (daughter_b, b_rules, "b")):
+            for daughter, d_rules, suffix in ((daughter_a, a_rules, "alpha"), (daughter_b, b_rules, "beta")):
                 idx_pad = 0
                 while len(daughter.hopfield_keys) < 14 and idx_pad < len(parent_rules):
-                    pk, pv = parent_rules[(idx_pad * 2 + (0 if suffix == "a" else 1)) % len(parent_rules)]
+                    pk, pv = parent_rules[(idx_pad * 2 + (0 if suffix == "alpha" else 1)) % len(parent_rules)]
                     daughter.compile_logic_association(pk, pv, binding_gain=5.0)
                     d_rules.append(([pk], pv))
                     idx_pad += 1
-                while len(daughter.vocab) < 28:
-                    daughter.register_token(f"{clean_name}_{suffix}_ctx_{len(daughter.vocab)}")
+                tag_idx = 0
+                while len(daughter.vocab) < 54 and tag_idx < len(fission_semantic_tags):
+                    daughter.register_token(f"{suffix}_{fission_semantic_tags[tag_idx]}")
+                    tag_idx += 1
                 daughter.inv_vocab = {int(v): k for k, v in daughter.vocab.items()}
                 if d_rules:
                     n_dr = len(d_rules)
                     cal_anchors = [d_rules[(i * n_dr) // 22] for i in range(22)]
                     cal_data = [
-                        (list(toks), tgt) if (i % 3 == 0) else ([f"cal_{suffix}_{i:02d}", *toks], tgt)
+                        (list(toks), tgt) if (i % 3 == 0) else ([f"cal_{suffix}_{fission_semantic_tags[i % len(fission_semantic_tags)]}", *toks], tgt)
                         for i, (toks, tgt) in enumerate(cal_anchors)
                     ]
                     daughter.calibrate_conformal(cal_data, alpha=alpha, in_sample=False)

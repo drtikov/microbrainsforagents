@@ -39,7 +39,7 @@ CANONICAL_STORE_DIRS: List[Path] = [
     _PKG_STORE_DIR,
     _CWD_STORE_DIR,
 ]
-STORE_DIR = _PKG_STORE_DIR if _PKG_STORE_DIR.exists() else (_CWD_STORE_DIR if _CWD_STORE_DIR.exists() else _PKG_STORE_DIR)
+STORE_DIR = _PKG_STORE_DIR
 
 
 class AnalyticalMicroTransformer:
@@ -533,7 +533,7 @@ class AnalyticalMicroTransformer:
 
         prediction_set = [
             tok for tok, p in sorted_probs
-            if (1.0 - p) <= (_threshold_for(tok) + 1e-7)
+            if (1.0 - p) <= (_threshold_for(tok) + 1e-6)
         ]
         top_tok, top_p = sorted_probs[0] if sorted_probs else ("<unk>", 0.0)
         set_size = len(prediction_set)
@@ -645,13 +645,12 @@ class AnalyticalMicroTransformer:
             json.dump(meta, f, indent=2)
         tmp_meta.replace(meta_file)
 
-        # Mirror automatically across other canonical roots to prevent desync
+        # Mirror only to other canonical roots that ALREADY exist on disk (never mkdir inside arbitrary CWD)
         if directory is None:
             import shutil
             for alt_dir in CANONICAL_STORE_DIRS:
-                if alt_dir.resolve() != target_dir.resolve():
+                if alt_dir.exists() and alt_dir.resolve() != target_dir.resolve():
                     try:
-                        alt_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(weights_file, alt_dir / weights_file.name)
                         shutil.copy2(meta_file, alt_dir / meta_file.name)
                     except Exception:

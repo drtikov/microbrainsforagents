@@ -5,9 +5,9 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.6.0`) is a deterministic, layered local pre-flight safety, code/shell verification, and tool-routing library for autonomous LLM agents built in pure NumPy (with optional OpenCL acceleration).
+**Aetheris Microbrains** (`v0.6.1`) is a deterministic, layered local pre-flight safety, code/shell verification, and tool-routing library for autonomous LLM agents built in pure NumPy (with optional OpenCL acceleration).
 
-> **Architectural Honesty Note (`v0.6.0`):** Microbrains are **not** SGD-trained generative deep LLMs, and they do **not** replace general language reasoning. They are a **fast (`< 2 ms` p95 on CPU), deterministic 4-layer hybrid pre-filter and coprocessor** that stands *in front* of expensive cloud LLMs and runtime execution: **Layer 0 policy & risk classes**, **Layer 1 real Python AST, hardcoded secret-leak, and `shlex` shell parsers**, **Layer 2 analytically compiled Kuramoto-Hopfield / Attention matrices with SHA-256 routing and held-out split-conformal calibration** ($n_{\text{cal}} = 22 \ge 19$, $1 - \alpha = 95\%$, dynamic caller `alpha`), and **Layer 3 honest LLM / human escalation** (never silently approving abstained calls without an actual `llm_callback`).
+> **Architectural Honesty Note (`v0.6.1`):** Microbrains are **not** SGD-trained generative deep LLMs, and they do **not** replace general language reasoning. They are a **fast (`< 2 ms` p95 on CPU), deterministic 4-layer hybrid pre-filter and coprocessor** that stands *in front* of expensive cloud LLMs and runtime execution: **Layer 0 policy & risk classes**, **Layer 1 real Python AST, hardcoded secret-leak, and `shlex` shell parsers**, **Layer 2 ridge-fitted `ToolRoutingMoE` & analytically compiled Kuramoto-Hopfield matrices calibrated across all 42 clean-vocabulary models** ($n_{\text{cal}} = 22 \ge 19$, $1 - \alpha = 95\%$, dynamic caller `alpha`, strict prediction-set validation), and **Layer 3 honest LLM / human escalation** (never silently approving abstained calls without an actual `llm_callback`).
 
 ---
 
@@ -238,13 +238,27 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 
 ---
 
-## 🧪 Testing & Benchmarks (`v0.6.0`: 17 Suites — 170 Passed, 5 OpenCL GPU Skipped)
+## 🧪 Testing & Reproducible 25-Step Benchmark (`v0.6.1`: 17 Suites — 174 Passed, 5 OpenCL GPU Skipped)
 
 Run the full verification suite:
 
 ```bash
 pytest aetheris_microbrains/tests -q
 ```
+
+Run the standalone reproducible 25-step agent trajectory benchmark (`examples/05_reproducible_25step_benchmark.py`):
+
+```bash
+python examples/05_reproducible_25step_benchmark.py
+```
+
+Measured output across the 25-step mixed autonomous trajectory (bilingual RU/EN routing, indented/except/comment/non-Python hunks, obfuscated AST/secret/shell attacks, and OOD queries):
+
+| Architecture | 25-Step Schema Tokens | Token Reduction | Dangerous Missed (FN) | Benign Blocked (FP) | Local p95 Latency |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Unfiltered 32-Tool Agent | 96,000 | 0.0% | — (unfiltered) | 0 | — (cloud RTT) |
+| Naive Keyword Baseline | 96,000 | 0.0% | 8 | 4 | 0.003 ms |
+| **Aetheris Microbrains v0.6.1** | **18,240** | **81.0%** | **0** | **0** | **0.908 ms** |
 
 Or target specific verification suites:
 
@@ -253,10 +267,10 @@ pytest aetheris_microbrains/tests/test_fable_review_fixes.py aetheris_microbrain
 ```
 
 ### Independent Audit & Hardening Coverage:
-* **`test_fable_review_fixes.py`**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha` conformal recomputation, honest `ESCALATED_TO_LLM` reporting when no `llm_callback` is supplied, hardcoded secret-leak detection (`secret_leak_pattern_found`), zero hardcoded OOD stems in `test_colony_swe_shadow.py`, and `allow_pickle=False` bundle loading.
-* **Split-Conformal & Mondrian Coverage Discipline (`conformal_collector.py`)**: Disjoint **Train**, **22 Held-Out Calibration** ($n_{\text{cal}} \ge 1/\alpha - 1 = 19$ for $\alpha = 0.05 \implies 95\%$ nominal coverage), and **16 Held-Out Validation** splits across **all 42 models** (86 shipped store files) with SHA-256 weight checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Rule-of-3 bound $3/n$, sliding-window drift detection, and Gibbs-Candès ACI adaptation.
+* **`test_fable_review_fixes.py`**: Pins persistent `W_embed_anchor` & empirical diagonal Fisher EWC regularization, weight-space similarity in `WeightSpaceVSA.find_nearest_domains()`, dynamic caller `alpha` conformal recomputation, honest `ESCALATED_TO_LLM` reporting without an `llm_callback`, secret-leak detection, zero hardcoded OOD stems in `test_colony_swe_shadow.py`, `allow_pickle=False`, **zero numbered placeholder vocab tokens across all 42 models**, **ridge-fitted `W_gate` + empirical per-expert quantiles in `ToolRoutingMoE`**, non-polluting `save()` CWD hygiene, and verified `examples/01..05`.
+* **Split-Conformal & Mondrian Coverage Discipline (`conformal_collector.py`)**: Disjoint **Train**, **22 Held-Out Calibration** ($n_{\text{cal}} \ge 1/\alpha - 1 = 19$ for $\alpha = 0.05 \implies 95\%$ nominal coverage), and **16 Held-Out Validation** splits across **all 42 clean-vocab models** (86 shipped store files, 33 distinct empirical `q_hat` quantiles) validated under strict prediction-set membership $Y \in C_\alpha(X)$, with SHA-256 weight checksums, coverage standard error $\sqrt{\alpha(1-\alpha)/(n+2)}$, Rule-of-3 bound $3/n$, sliding-window drift detection, and Gibbs-Candès ACI adaptation.
 * **Ablation, Baselines & Economics (`test_layer_ablation_and_baselines.py`, `test_end_to_end_economics_and_drift.py`)**: Layer 0 / 0+1 / 0+1+2 ablation, bilingual RU/EN routing vs. English keyword baseline, MCP-Zero Top-$K$ schema reduction ($\ge 75\%$), `< 2 ms` p95 decision latency, risk-class fail-closed error handling, `shadow_mode` journaling, and `_candidates/` $\to$ `_rollback/` continual learning.
-* **Adversarial & Probe Suites (`test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py`)**: Obfuscated Python sinks, benign indented/try-except/comment/non-Python diffs, allowlist-first `shlex` shell parsing, and 120 bilingual (60 RU / 60 EN) SWE queries with conformal `token_coverage` OOD gating (`0/50` missed escalations).
+* **Adversarial & Probe Suites (`test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py`)**: Diverse obfuscated Python sinks & secret leaks, realistic indented/`except`/`elif`/comment/`.ts`/`.json`/`.yaml`/`.md` diffs, real weight-space surgical causal inversion (no `MagicMock`), allowlist-first `shlex` shell parsing, and 120 bilingual (60 RU / 60 EN) SWE queries (`0/50` missed escalations).
 
 ---
 

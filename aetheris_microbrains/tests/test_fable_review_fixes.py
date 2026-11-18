@@ -201,3 +201,96 @@ def test_rm_rf_top_level_and_ensemble_route_ood_escalation():
     assert route_ood["escalate_to_llm"] is True
     assert route_ood["fallback"] is True
 
+
+def test_fable_8_zero_numbered_placeholder_tokens_across_all_42_models():
+    import json
+    import re
+    from collections import Counter
+
+    metas = sorted(BRAINS_DIR.glob("*_meta.json"))
+    assert len(metas) == 42
+    for mf in metas:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        vocab_keys = [k for k in data["vocab"] if not str(k).startswith("<")]
+        assert len(data["vocab"]) >= 50, f"{mf.stem} vocab below 50: {len(data['vocab'])}"
+        stems = Counter(re.sub(r"_\d+$", "", t) for t in vocab_keys if re.search(r"_\d+$", t))
+        bad_series = {s: c for s, c in stems.items() if c >= 2}
+        assert not bad_series, f"{mf.stem} still contains numbered placeholder series: {bad_series}"
+        for forbidden in ("intent_class_1", "risk_factor_level_1", "subtask_step_1", "blast_radius_files_1", "quality_metric_1"):
+            assert forbidden not in data["vocab"], f"{mf.stem} contains {forbidden}"
+
+
+def test_fable_9_moe_router_fitted_w_gate_and_empirical_per_expert_quantiles():
+    moe = mb.ToolRoutingMoE(d_model=256)
+    assert moe.w_gate_fitted is True
+    # Empirical per-expert quantiles must NOT all collapse to identical 0.0420/0.0120 constants
+    qs = set(moe.per_expert_quantiles.values())
+    assert len(qs) >= 3, f"Per-expert quantiles appear constant/uncalibrated: {moe.per_expert_quantiles}"
+    assert 0.042 not in qs or len(qs) > 1
+    assert all(cov >= 0.90 for cov in moe.per_expert_coverage.values())
+
+
+def test_fable_10_examples_01_to_05_run_cleanly_and_no_syntaxerror_hack():
+    import subprocess
+    import sys
+    repo_root = PKG_DIR.parent
+    ex04 = (repo_root / "examples" / "04_counterfactual_safety_gate.py").read_text(encoding="utf-8")
+    assert "SyntaxError" not in ex04, "examples/04 still contains literal SyntaxError substring hack!"
+
+    ex01 = (repo_root / "examples" / "01_quickstart_consult.py").read_text(encoding="utf-8")
+    assert "44" not in ex01 and 'result.get("prediction")' not in ex01
+
+    bench_mod_path = repo_root / "examples" / "05_reproducible_25step_benchmark.py"
+    assert bench_mod_path.exists()
+    proc = subprocess.run(
+        [sys.executable, str(bench_mod_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "Aetheris Microbrains v0.6.1 Reproducible 25-Step Agent Benchmark" in proc.stdout
+    assert "Token Reduction" in proc.stdout
+
+    # Also verify structured return contract of benchmark helper
+    sys.path.insert(0, str(repo_root))
+    from examples import __file__ as _ex_check  # noqa: F401
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bench25", str(bench_mod_path))
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+    report = mod.run_25step_benchmark(trials=2)
+    m = report["aetheris_microbrains"]
+    assert m["dangerous_missed_fn"] == 0
+    assert m["benign_false_positive_fp"] == 0
+    assert m["token_reduction_pct"] >= 60.0
+    assert m["p95_latency_ms"] < 2.0
+
+
+def test_fable_11_save_does_not_pollute_cwd_with_memory_store(tmp_path: Path):
+    import os
+    from aetheris_microbrains.core import analytical_micro_transformer as amt_mod
+
+    orig_cwd = os.getcwd()
+    pkg_tmp = tmp_path / "pkg_store"
+    pkg_tmp.mkdir()
+    cwd_tmp = tmp_path / "user_cwd"
+    cwd_tmp.mkdir()
+    orig_store = amt_mod.STORE_DIR
+    orig_canon = list(amt_mod.CANONICAL_STORE_DIRS)
+    try:
+        os.chdir(cwd_tmp)
+        amt_mod.STORE_DIR = pkg_tmp
+        amt_mod.CANONICAL_STORE_DIRS[:] = [pkg_tmp, cwd_tmp / "memory" / "store" / "neuro_brains"]
+        b = AnalyticalMicroTransformer(name="tmp_pkg_only_test", d_model=16, n_heads=2, d_mlp=32)
+        b.compile_logic_association("ping", "pong")
+        # Calling save() with default directory=None must NOT create memory/store/neuro_brains in user CWD
+        b.save(directory=None)
+        assert (pkg_tmp / "tmp_pkg_only_test_weights.npz").exists()
+        assert not (cwd_tmp / "memory" / "store" / "neuro_brains").exists()
+    finally:
+        amt_mod.STORE_DIR = orig_store
+        amt_mod.CANONICAL_STORE_DIRS[:] = orig_canon
+        os.chdir(orig_cwd)
+
+

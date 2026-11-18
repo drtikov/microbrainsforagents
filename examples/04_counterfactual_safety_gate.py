@@ -8,7 +8,7 @@ import aetheris_microbrains as mb
 
 def main():
     print("=== Aetheris Microbrains: Counterfactual Pre-Commit Simulation ===")
-    
+
     sim = mb.get_counterfactual_pipeline()
 
     # Case 1: Safe clean patch
@@ -19,13 +19,31 @@ def main():
     print("Status:", outcome_safe.status)
     print("Step Rollouts:", outcome_safe.step_predictions)
 
-    # Case 2: Malformed risky patch (syntax hazard)
-    risky_diff = "def calculate():\n    SyntaxError eval(raw_input)\n"
-    print("\n--- Testing Risky Patch ---")
-    outcome_risky = sim.simulate_edit_impact("src/math.py", risky_diff)
+    # Case 2: Obfuscated code execution hazard (caught structurally via Python AST visitor)
+    obfuscated_diff = (
+        "--- a/runner.py\n+++ b/runner.py\n@@ -1,2 +1,3 @@\n"
+        " def run_task(cmd):\n"
+        "+    return getattr(os, 'sys' + 'tem')(cmd)\n"
+    )
+    print("\n--- Testing Obfuscated Execution Diff ---")
+    outcome_risky = sim.simulate_edit_impact("src/runner.py", obfuscated_diff)
     print("Allowed:", outcome_risky.allowed)
     print("Status:", outcome_risky.status)
     print("Veto Reason:", outcome_risky.veto_reason)
+
+    # Case 3: Breaking public API signature removal (caught by AST interface diff + Causal SCM rollout)
+    sig_break_diff = (
+        "--- a/api.py\n+++ b/api.py\n@@ -1,2 +1,2 @@\n"
+        "-def compute(a, b, c):\n"
+        "+def compute(a):\n"
+        "     return a * 2\n"
+    )
+    print("\n--- Testing Breaking Signature Diff ---")
+    outcome_sig = sim.simulate_edit_impact("src/api.py", sig_break_diff)
+    print("Allowed:", outcome_sig.allowed)
+    print("Status:", outcome_sig.status)
+    print("Failure Modes:", outcome_sig.simulated_failure_modes)
+    print("Step Rollouts:", outcome_sig.step_predictions)
 
 if __name__ == "__main__":
     main()
