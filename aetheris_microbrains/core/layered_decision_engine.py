@@ -162,6 +162,12 @@ def evaluate_layer0_policy(
                 "reason_code": "layer0_protected_path_veto",
                 "protected_path": target_path,
             }
+        return {
+            "decision": "escalate",
+            "risk_class": risk_class,
+            "reason_code": "layer0_protected_path_read_requires_confirmation",
+            "protected_path": target_path,
+        }
 
     if risk_class == "IRREVERSIBLE_DESTRUCTIVE" and cfg.require_approval_for_irreversible:
         return {

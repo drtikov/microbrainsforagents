@@ -110,28 +110,61 @@ def _format_hook_stdout(hook_specific: Dict[str, Any]) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
-    parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
-    parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
-    args = parser.parse_args(argv)
-    log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
-
-    raw = sys.stdin.read().strip()
-    if not raw:
-        print(
-            _format_hook_stdout(
-                {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                    "permissionDecisionReason": "empty_hook_payload",
-                }
-            )
-        )
-        return 0
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        err_msg = f"invalid_hook_json:{exc}"
+        parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
+        parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
+        parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
+        parser.add_argument(
+            "--auto-allow",
+            action="store_true",
+            help="Explicitly emit permissionDecision='allow' on safe verdicts (bypasses Claude Code user prompts); default is silent pass-through",
+        )
+        args = parser.parse_args(argv)
+        log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
+        auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
+
+        raw = sys.stdin.read().strip()
+        if not raw:
+            print(
+                _format_hook_stdout(
+                    {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "ask",
+                        "permissionDecisionReason": "empty_hook_payload",
+                    }
+                )
+            )
+            return 0
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            err_msg = f"invalid_hook_json:{exc}"
+            print(err_msg, file=sys.stderr)
+            print(
+                _format_hook_stdout(
+                    {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": err_msg,
+                    }
+                )
+            )
+            return 2
+
+        result = evaluate_hook_payload(payload, strict_ast=args.strict_ast, log_decisions=log_decisions)
+        exit_code = int(result["exit_code"])
+        perm = result["permissionDecision"]
+        if exit_code == 2:
+            print(result["reason"], file=sys.stderr)
+            print(_format_hook_stdout(result["hookSpecificOutput"]))
+            return 2
+        if perm == "allow" and not auto_allow:
+            # Silent pass-through: let Claude Code apply normal user permission rules
+            return 0
+        print(_format_hook_stdout(result["hookSpecificOutput"]))
+        return exit_code
+    except Exception as exc:
+        err_msg = f"hook_internal_error:{type(exc).__name__}:{exc}"
         print(err_msg, file=sys.stderr)
         print(
             _format_hook_stdout(
@@ -143,13 +176,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         )
         return 2
-
-    result = evaluate_hook_payload(payload, strict_ast=args.strict_ast, log_decisions=log_decisions)
-    exit_code = int(result["exit_code"])
-    if exit_code == 2:
-        print(result["reason"], file=sys.stderr)
-    print(_format_hook_stdout(result["hookSpecificOutput"]))
-    return exit_code
 
 
 if __name__ == "__main__":

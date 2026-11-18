@@ -323,11 +323,14 @@ python examples/07_swebench_lite_gate_benchmark.py
 | SWE core retained strictly within narrowed queries (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `read_file`: **103 / 127**) |
 
 ### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.6.9`)
-Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials write structured reasons to `stderr`:
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials and internal errors write structured reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast
 ```
+
+* **Prefilter-by-default:** On safe `allow` verdicts, the hook exits `0` with empty `stdout` so Claude Code's normal user permission prompts still apply (pass `--auto-allow` only if you explicitly want to bypass prompts). Reading protected files (`.env`, `.ssh/id_rsa`, `credentials.json`) escalates to `"ask"`.
+* **Fail-closed recommendation:** Set `"onFailure": "block"` in your Claude Code hook configuration so environment/import errors also block safely.
 
 ```python
 import aetheris_microbrains as mb

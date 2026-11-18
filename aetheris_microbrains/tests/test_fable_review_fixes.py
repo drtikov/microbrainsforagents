@@ -908,6 +908,55 @@ def test_fable_36_uninspected_tools_external_policy_and_telemetry(tmp_path):
     assert drift_res["drift_detected"] is True
 
 
+def test_fable_37_hook_prefilter_mode_protected_read_and_fail_closed(monkeypatch, capsys):
+    import json
+    import subprocess
+    import sys
+    from aetheris_microbrains import hook as hook_mod
+
+    # 1. Default prefilter mode: safe allow exits 0 with empty stdout (does not bypass Claude Code prompts)
+    safe_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook"],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert safe_proc.returncode == 0
+    assert safe_proc.stdout.strip() == ""
+
+    # 2. Explicit --auto-allow emits hookSpecificOutput permissionDecision='allow'
+    auto_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook", "--auto-allow"],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert auto_proc.returncode == 0
+    auto_out = json.loads(auto_proc.stdout.strip())
+    assert auto_out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    # 3. Reading protected paths (.env / .ssh/id_rsa) must escalate ('ask'), never auto-allow
+    for prot_path in (".env", "/home/user/.ssh/id_rsa", "config/credentials.json"):
+        res = mb.decide({"tool": "read_file", "path": prot_path})
+        assert res["decision"] == "escalate", f"{prot_path} returned {res}"
+        assert res["reason_code"] == "layer0_protected_path_read_requires_confirmation"
+        hres = mb.evaluate_hook_payload({"tool_name": "Read", "tool_input": {"file_path": prot_path}})
+        assert hres["permissionDecision"] == "ask"
+
+    # 4. Internal exception in hook.main() fails closed with exit code 2 and stderr reason
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated_hook_crash")
+
+    monkeypatch.setattr(hook_mod, "evaluate_hook_payload", _boom)
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self: '{"tool_name":"Bash","tool_input":{"command":"ls"}}'})())
+    rc = hook_mod.main([])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "hook_internal_error:RuntimeError:simulated_hook_crash" in captured.err
+
+
 
 
 
