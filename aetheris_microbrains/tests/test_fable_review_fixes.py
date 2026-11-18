@@ -687,7 +687,7 @@ def test_fable_26_pretooluse_hook_cli():
     assert bad_res["permissionDecision"] == "deny"
     assert bad_res["exit_code"] == 2
 
-    # Unapproved import under --strict-ast via CLI stdin/stdout
+    # Unapproved import under --strict-ast via CLI stdin/stdout -> Claude Code hookSpecificOutput
     proc = subprocess.run(
         [sys.executable, "-m", "aetheris_microbrains.hook", "--strict-ast"],
         input=json.dumps({"tool_name": "Edit", "tool_input": {"file_path": "src/a.py", "new_string": "import socket\n"}}),
@@ -697,8 +697,36 @@ def test_fable_26_pretooluse_hook_cli():
     )
     assert proc.returncode == 0
     out = json.loads(proc.stdout.strip())
-    assert out["decision"] == "escalate"
-    assert out["permissionDecision"] == "ask"
+    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert out["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert "strict_ast" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+    # Deny via CLI stdin/stdout -> exit 2 + reason in stderr for model feedback
+    deny_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook"],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert deny_proc.returncode == 2
+    assert "layer1_shell_parser_veto" in deny_proc.stderr
+    deny_out = json.loads(deny_proc.stdout.strip())
+    assert deny_out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert deny_out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    # Uninspected external/MCP tool without cmd/diff/query -> ask (never auto-allow)
+    mcp_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook"],
+        input=json.dumps({"tool_name": "mcp__github__create_issue", "tool_input": {"title": "x"}}),
+        capture_output=True,
+        text=True,
+        cwd=str(PKG_DIR.parent),
+    )
+    assert mcp_proc.returncode == 0
+    mcp_out = json.loads(mcp_proc.stdout.strip())
+    assert mcp_out["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert "layer1_uninspected_tool" in mcp_out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_fable_27_mondrian_per_class_cal_sizing():
@@ -842,6 +870,42 @@ def test_fable_35_negation_do_and_clause_window():
     assert _action_category("Don't you think that we should probably fix the login flow") == "generic_action"
     # Clause boundary resets negation scope
     assert _action_category("Don't panic, fix the login flow") == "careful_repair"
+
+
+def test_fable_36_uninspected_tools_external_policy_and_telemetry(tmp_path):
+    from aetheris_microbrains.core.layered_decision_engine import PolicyConfig, _DECISION_RING_BUFFER
+
+    # Uninspected tools (MCP, NotebookEdit, edit_file without diff) must escalate, not allow
+    for tool in ("NotebookEdit", "mcp__slack__post_message", "edit_file"):
+        res = mb.decide({"tool": tool, "path": "src/a.py"})
+        assert res["decision"] == "escalate", f"{tool} unexpectedly returned {res}"
+        assert res["reason_code"] == "layer1_uninspected_tool"
+        assert res["upper_error_bound_95"] is None
+
+    # Explicit READ_ONLY tool still allows and has no conformal upper_error_bound_95
+    ro = mb.decide({"tool": "read_file", "path": "src/a.py"})
+    assert ro["decision"] == "allow"
+    assert ro["reason_code"] == "layer1_structural_verified"
+    assert ro["upper_error_bound_95"] is None
+
+    # PolicyConfig.require_approval_for_external is enforced at Layer 0
+    ext_pol = PolicyConfig(require_approval_for_external=True)
+    ext_res = mb.decide({"tool": "execute_shell", "cmd": "ls -la"}, policy=ext_pol)
+    assert ext_res["decision"] == "escalate"
+    assert ext_res["reason_code"] == "layer0_external_requires_confirmation"
+
+    # Cross-process drift_detected reads persistent journal when ring buffer is empty
+    jpath = tmp_path / "decision_journal.jsonl"
+    jpath.write_text(
+        "\n".join(
+            '{"decision": "escalate", "reason_code": "layer2_conformal_abstention_ood"}'
+            for _ in range(10)
+        ) + "\n",
+        encoding="utf-8",
+    )
+    _DECISION_RING_BUFFER.clear()
+    drift_res = mb.decide("quantum flux hyperdrive calibrator xyzzy", context={"journal_path": str(jpath)})
+    assert drift_res["drift_detected"] is True
 
 
 

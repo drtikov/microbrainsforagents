@@ -170,6 +170,13 @@ def evaluate_layer0_policy(
             "reason_code": "layer0_irreversible_requires_confirmation",
         }
 
+    if risk_class == "EXTERNAL_ACTION" and cfg.require_approval_for_external:
+        return {
+            "decision": "escalate",
+            "risk_class": risk_class,
+            "reason_code": "layer0_external_requires_confirmation",
+        }
+
     return {
         "decision": "allow",
         "risk_class": risk_class,
@@ -1315,15 +1322,49 @@ def decide(
         "EXTERNAL_ACTION" if (cmd_str or clean_tool) else ("REVERSIBLE_WRITE" if diff_text is not None else "READ_ONLY"),
     )
 
-    def _finish(decision: str, label: str, pred_set: List[str], reason_code: str, layer: int) -> Dict[str, Any]:
+    def _tail_journal_recent(path: Path, limit: int = 12) -> List[Dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 16384))
+                lines = f.read().decode("utf-8", errors="ignore").splitlines()
+            items: List[Dict[str, Any]] = []
+            for ln in lines[-limit:]:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    items.append(json.loads(ln))
+                except Exception:
+                    continue
+            return items
+        except Exception:
+            return []
+
+    def _finish(
+        decision: str,
+        label: str,
+        pred_set: List[str],
+        reason_code: str,
+        layer: int,
+        conformal_bound: Optional[float] = None,
+    ) -> Dict[str, Any]:
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
+        if len(recent) < 9 and (journal_path is not None or should_log):
+            j_target = journal_path or DEFAULT_JOURNAL_PATH
+            disk_recent = _tail_journal_recent(j_target, limit=12)
+            if len(disk_recent) > len(recent):
+                recent = disk_recent[-12:]
         ood_hits = sum(1 for item in recent if item.get("reason_code") == "layer2_conformal_abstention_ood")
         if reason_code == "layer2_conformal_abstention_ood":
             ood_hits += 1
         denom = max(1, len(recent) + 1)
         drift_detected = bool(denom >= 10 and (ood_hits / float(denom)) > 0.60)
-        upper_error_bound_95 = round(1.0 - (0.05 ** (1.0 / 120.0)), 4)
+        upper_error_bound_95 = round(float(conformal_bound), 4) if conformal_bound is not None else None
 
         out: Dict[str, Any] = {
             "decision": decision,
@@ -1413,9 +1454,13 @@ def decide(
                         1,
                     )
 
-        # Pure allowlisted/verified tool invocation without free-text routing
+        # Only allow at Layer 1 when the payload was actually inspected (cmd/diff)
+        # or the tool is an explicit READ_ONLY tool; uninspected/external tools escalate.
         if tool_name and not query_text:
-            return _finish("allow", tool_name, [tool_name], "layer1_structural_verified", 1)
+            is_verified = bool(cmd_str) or (diff_text is not None) or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
+            if is_verified:
+                return _finish("allow", tool_name, [tool_name], "layer1_structural_verified", 1)
+            return _finish("escalate", tool_name, ["allow", "deny"], "layer1_uninspected_tool", 1)
 
     except Exception as exc:
         if inferred_risk in ("EXTERNAL_ACTION", "IRREVERSIBLE_DESTRUCTIVE") or cmd_str or diff_text is not None:
@@ -1428,6 +1473,11 @@ def decide(
             from .tool_routing_moe import get_tool_routing_moe
             moe = get_tool_routing_moe()
             moe_res = moe.route(query_text, available_tools=available_tools)
+            cal_bound = (
+                moe.calibration_report().get("upper_error_bound_95")
+                if hasattr(moe, "calibration_report")
+                else round(1.0 - (0.05 ** (1.0 / 120.0)), 4)
+            )
             if not moe_res.conformal_passed:
                 return _finish(
                     "escalate",
@@ -1435,6 +1485,7 @@ def decide(
                     [moe_res.selected_tool, moe_res.secondary_tool],
                     "layer2_conformal_abstention_ood",
                     2,
+                    conformal_bound=cal_bound,
                 )
             return _finish(
                 "allow",
@@ -1442,6 +1493,7 @@ def decide(
                 [moe_res.selected_tool],
                 "layer2_conformal_singleton",
                 2,
+                conformal_bound=cal_bound,
             )
         except Exception as exc:
             # Fail safe: escalate to Layer 3 LLM rather than returning a fake constant

@@ -5,65 +5,77 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.6.8`) is a deterministic, layered local pre-flight safety, full-file AST/shell verification, and registry-enforced tool-routing library for autonomous LLM agents built in pure NumPy (with optional OpenCL acceleration).
+**Aetheris Microbrains** (`v0.6.9`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of AI coding agents (Claude Code, SWE-agent, Codex, or custom LLM loops).
 
-> **Architectural Honesty Note (`v0.6.8`):** Microbrains are **not** SGD-trained generative deep LLMs, and they do **not** replace general language reasoning or an OS sandbox. They are a **fast (`< 2 ms` p95 on CPU), deterministic 4-layer hybrid pre-filter and coprocessor** that stands *in front* of cloud LLMs and runtime execution: **Layer 0 universal SWE security paths (`.env`, `.git/hooks/`, `.ssh/`, `credentials.json`), risk classes, and live `available_tools` enforcement**, **Layer 1 full-file patched Python AST reconstruction (`ast.parse` over applied unified diffs), opt-in `strict_ast_allowlist` mode, YAML `!!python/object` & JS `child_process`/`new Function` + optional `tree-sitter` checks, cyclomatic complexity vs. static data-table differentiation, hardcoded secret-leak detection, and allowlist-first `shlex` shell parsing**, **Layer 2 grounded `CascadeEnsembleRouter` (with `escalation_payload` on all block verdicts), negation-aware bilingual `IntentPersistenceTracker`, `MetacognitiveCalibrator` (`q_hat`/`conformal_basis` provenance), negation-aware `active_inference`, trace-trainable `ToolRoutingMoE.fit_from_traces()` + optional semantic `embed_fn`/`tool_descriptions` hybrid, and 42 clean-vocabulary Kuramoto-Hopfield models** ($\ge 25$ samples per Mondrian class, $n_{\text{cal}} = 120\text{--}550$, $1 - \alpha = 95\%$ `coverage_target`, `conformal_set_valid`, exact Clopper-Pearson 95% upper failure bounds, and journal recalibration), **Layer 3 honest LLM / human escalation**, plus a drop-in **`PreToolUse` hook CLI (`python -m aetheris_microbrains.hook`)**. **License:** PolyForm Noncommercial 1.0.0 (commercial use requires a commercial license).
+It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**.
+
+```text
+       [ User / Task ]
+              │
+              ▼
+    ┌───────────────────┐
+    │     LLM Agent     │
+    └─────────┬─────────┘
+              │ Tool call / Diff / Shell command
+              ▼
+   ⚡ [ AETHERIS MICROBRAINS ]  ── (<2 ms local CPU pre-flight gate)
+         │
+         ├── 🛑 Blocked locally? (Syntax error, leaked secret, rm -rf, protected path)
+         │       ↳ Instant reject. Zero cloud tokens wasted. Zero broken runs.
+         │
+         ├── 🔍 Ambiguous / Uninspected?
+         │       ↳ Safely escalates ("ask") to human or full LLM review.
+         │
+         └── ✅ Verified safe?
+                 ↳ Allowed to run.
+```
 
 ---
 
-## 💡 Why Microbrains? (For Agents, Users, and the Planet)
+## 🚀 What Is It (In Plain English)?
 
-Modern LLM agents send thousands of redundant tool-schema tokens in every prompt turn just to expose 32+ tools, or execute/retry patches containing syntax errors, hardcoded API keys, or destructive shell commands (`rm -rf`, `curl | sh`). Because standard tool-calling agents select tools and generate arguments in the same LLM pass, **Microbrains' routing layer cuts per-turn input schema prefill tokens (`narrow_tool_surface`), while its Layer 0/1 gate blocks malformed or dangerous actions locally in `< 2 ms` on CPU before execution or wasted retry turns.**
+When an AI agent writes code or executes commands, it frequently wastes time and money:
+1. **Broken Patches & Retries:** The agent makes a syntax error, leaks an API token, or invokes a destructive shell command (`rm -rf`, `curl | sh`). The runner executes it, tests fail, and the agent burns multiple expensive LLM turns just to read the traceback and retry.
+2. **Context Window Bloat:** Passing 30+ tool definitions in every single turn burns thousands of prompt tokens per step and degrades model focus.
 
-### 🤖 Why Microbrains Are Useful for Autonomous Agents
-* **Prompt & Context Hygiene (MCP-Zero Narrowing):** Dynamically shrinks large tool registries (e.g., 32+ tools) down to the Top-$K$ relevant candidates (`narrow_tool_surface(top_k=4)`) in `< 1.2 ms`, achieving **97.4% Recall@4** (`2.6%` needed-tool drop rate) and **39.7% net schema-token savings after retry penalties** on a 40-task external multi-tool benchmark (`examples/06_real_llm_ab_benchmark.py`), while escalating the full catalog on ambiguous or OOD tasks.
-* **Universal Protected Paths & Complexity-Aware Blast Radius (`v0.6.3`+):** Layer 0 protects standard SWE secret/key/hook paths (`.env*`, `.git/hooks/`, `.git/config`, `.ssh/`, `id_rsa`, `credentials.json`) without false-positiving on `src/env_loader.py`; Layer 1 distinguishes benign multi-hundred-line static data tables (`is_static_data_or_doc=True`, zero cyclomatic delta) from high-complexity control-flow mutations (`cyclomatic_complexity >= 25`).
-* **Journal-Closed Conformal Recalibration & Clean Packaging:** `decide()` emits `upper_error_bound_95` and `drift_detected`, while `recalibrate_from_decision_journal()` closes the feedback loop from audited runs back to empirical quantile thresholds with zero legacy `Proposal N` scaffold comments anywhere in the SDK.
-* **Live Agent Registry Enforcement (`available_tools`):** Both `ToolRoutingMoE.route(..., available_tools=...)` and `decide(..., context={"available_tools": ...})` strictly constrain routing and execution to registered agent tools, denying unregistered calls at Layer 0 and escalating registry mismatches at Layer 2.
-* **Calibrated Epistemic Humility, Clopper-Pearson Bounds & Live Drift Detection:** Split-conformal and Mondrian prediction sets ($\alpha = 0.05$, $n_{\text{cal}} = 120$ held-out samples, $n_{\text{val}} = 40$) report exact one-sided Clopper-Pearson 95% upper failure bounds (`upper_error_bound_95`) alongside rolling nonconformity/abstention drift alarms (`drift_detected`) on `infer_conformal()`.
+**Microbrains solves this at zero LLM cost:**
+* **Instant Pre-Flight Safety Shield:** Validates code diffs with real AST parsing, checks for secrets, and parses shell commands *before* anything runs. Broken patches are intercepted in 1.3 ms.
+* **Smart Tool Pruning:** Dynamically narrows large tool catalogs down to the Top-4 most relevant tools for the current step, saving **up to 39% of schema tokens** without starving the agent of needed capabilities.
+* **Claude Code & Codex Ready:** Includes a standard `PreToolUse` hook CLI (`python -m aetheris_microbrains.hook`) that plugs right into agent workflows with full `hookSpecificOutput` compatibility.
 
-### 👤 Benefits for the User
-* **Substantially Lower API Bills:** Cutting redundant tool-definition prefill tokens per turn and catching malformed or dangerous actions locally prevents paying cloud token fees for broken steps and execution retries.
-* **Instant `< 2 ms` Local Gate:** Safety verification, AST diff checks, allowlist-first shell parsing, and Top-K tool narrowing complete in microseconds to `< 2 ms` on local CPU before hitting remote APIs or local subprocesses.
-* **Stronger Local Codebase, Data & Credential Safety:** Blocks obfuscated code sinks (`eval`, `exec`, `getattr`, `__builtins__[...]`, `base64`-to-`exec`), breaking public API removals, protected path writes (`constitution/`, `memory/bible.md`), and leaked secrets *on your machine* before execution or external transmission.
-* **Predictable, Portable & Auditable:** Zero GPU requirement, cross-process deterministic SHA-256 routing across any `PYTHONHASHSEED`, clean Python imports (`sys.path` never mutated), `allow_pickle=False` model bundles, SHA-256 weight checksums, `shadow_mode`, and JSONL audit trails.
+> **What it is NOT:** Microbrains is **not** an LLM that writes code from scratch, and it does not replace an OS sandbox. It is an ultra-fast structural filter and router designed to make your agent faster, cheaper, and safer.
 
-### 🌍 Ecological & Sustainable AI (Green AI) Impact
-* **Orders-of-Magnitude Lower Energy Per Gate:** Running a `< 2 ms` NumPy / AST / `shlex` pre-filter on a local CPU consumes fractions of a milliwatt-hour—**thousands of times less electricity** than waking a cluster of datacenter GPUs for a full transformer forward pass per agent loop step.
-* **Cutting Quadratic Attention Compute on Every Agent Turn:** Narrowing 32+ tool definitions down to Top-4 via `narrow_tool_surface()` eliminates **39.7% net prefill schema tokens after retries** on diverse external tasks (`81.0%` on the 25-step local smoke test), shrinking datacenter FLOPs, $\text{CO}_2\text{e}$ carbon footprint, and cooling water consumed over long multi-step autonomous runs.
-* **Hardware Longevity & Zero E-Waste Pressure:** Runs efficiently on existing laptops, edge CPUs, and legacy OpenCL GPUs without demanding continuous hardware upgrades just to route tools or validate patches.
+---
+
+## 💡 Key Benefits
+
+### 1. 💰 Lower API Bills & Fewer Wasted Turns
+Catching malformed code, invalid syntax, and leaked keys locally in 1.3 ms prevents paying cloud token fees for broken execution cycles and costly model retries.
+
+### 2. 🛡️ Strong Local Protection
+Guards sensitive files (`.env*`, `.git/hooks/`, `.ssh/`, `credentials.json`), blocks obfuscated code injection (`eval`, `exec`, `getattr`, base64 execution), and vetoes destructive terminal commands before they hit your machine.
+
+### 3. ⚡ Zero Lag (<2 ms CPU Latency)
+Pure NumPy with zero GPU required. The checks run in microseconds to under 2 milliseconds on standard laptop hardware—adding virtually zero overhead to seconds-long LLM calls.
 
 ---
 
 ## 🏗️ 4-Layer Decision Architecture
 
-```text
-Agent Input (tool call, diff, shell command, or intent query)
- │
- ├─ Layer 0: Deterministic Policy (code invariants & risk taxonomy)
- │    • Read-only vs. Reversible Write vs. External vs. Irreversible Destructive
- │    • Protected paths (memory/bible.md, constitution/, etc.) ── veto → deny / escalate
- │
- ├─ Layer 1: Structural Language, Secret & Shell Parsers (zero brittle substring hacks)
- │    • Python AST visitor (dedents indented hunks, wraps except/elif fragments, resolves `file_content` enclosing aliases, ignores comments)
- │    • Catches direct eval/exec, subprocess(shell=True), shutil.rmtree, pickle.loads, aliases, subscript (__builtins__/globals), encoded decode-to-exec, and getattr obfuscation
- │    • Hardcoded secret-leak detection (`secret_leak_pattern_found` on OpenAI/GitHub/AWS keys, PEM private keys, literal credential assignments)
- │    • AST interface & signature diffing (`breaking_signature_change`, `public_symbol_removed`, `exception_guard_removed`) + `CausalWorldModel` do-calculus rollout
- │    • JSON / TypeScript / JS / YAML / Markdown diffs parsed without false Python SyntaxErrors
- │    • Allowlist-first shell `shlex` tokenizer (`rm -rf`, `rm -fr`, `DROP DATABASE`, `sh -c`, `python -c`, `dd of=/dev/...`, `mkfs`, `curl | sh` deny; unrecognized cmds escalate; `ls`, `pwd`, `git log --format`, `clang-format` allow)
- │    • Risk-class fail-closed handling + structured decision journaling & `shadow_mode`
- │
- ├─ Layer 2: Analytical Micro-Classifiers & Split-Conformal Abstention
- │    • Deterministic SHA-256 bilingual (RU/EN) char-trigram + lexical routing (`ToolRoutingMoE`), constrained to `available_tools` + MCP-Zero Top-K narrowing (`narrow_tool_surface`, >=75% schema reduction)
- │    • 42-model fleet calibrated at alpha=0.05 on n_cal=120 held-out samples (n_val=40, std error <= 0.0197), Mondrian per-class quantiles, dynamic caller `alpha` recomputation, `W_embed_anchor`, and SHA-256 checksums (`allow_pickle=False`)
- │    • Pickle-safe Weight-Space VSA (`weight_space_vsa.npz`) ranking nearest domains via actual Count-Sketch projected parameter weights
- │    • Empirical Fisher diagonal EWC continual plasticity (`_candidates/` → leak-free holdout verification → `_rollback/`)
- │    • Sliding-window drift telemetry (`drift_detected`) + Gibbs-Candès Adaptive Conformal Inference (`update_aci_quantile`)
- │    • Singleton set (|C_alpha| == 1) → local allow; OOD / ambiguous (|C_alpha| != 1 or token_coverage < 0.50) → escalate
- │
- └─ Layer 3: Honest External LLM / Human Escalation
-      • Invokes caller-supplied `llm_callback` when escalated, or explicitly returns `ESCALATED_TO_LLM` (`llm_invoked=False`) rather than auto-authorizing without an LLM
-```
+1. **Layer 0: Policy & Protected Paths**
+   * Enforces live `available_tools` registries.
+   * Protects sensitive paths (`.env*`, `.git/hooks/`, `.ssh/`, `credentials.json`) without false-positiving on normal application code (`src/env_loader.py`).
+   * Supports `require_approval_for_external` and irreversible action guards.
+2. **Layer 1: Structural AST, Secret & Allowlist-First Shell Gate**
+   * Full-file reconstructed Python AST parsing (`ast.parse` applied over unified diffs), distinguishing harmless static data tables from high cyclomatic complexity changes.
+   * Hardcoded API secret detection (`secret_leak_pattern_found`).
+   * Allowlist-first `shlex` shell tokenizer (`ls`, `git log`, `pytest` allow; `rm -rf`, `curl | sh`, `dd of=/dev/` deny; unknown commands safely escalate).
+   * Uninspected tools without diffs or commands escalate to `"ask"` rather than auto-approving.
+3. **Layer 2: Tool Narrowing & Conformal Abstention**
+   * Bilingual (EN/RU) SHA-256 char-trigram `ToolRoutingMoE` + `narrow_tool_surface(top_k=4)` shrinks 32+ tool registries before prompt assembly.
+   * Calibrated micro-classifiers with empirical conformal prediction sets, exact Clopper-Pearson bounds, and cross-process decision journal drift detection.
+4. **Layer 3: Honest Escalation**
+   * Structured fallback returning `escalate` (in Claude Code hooks: `permissionDecision: "ask"`) with full context for human or LLM review.
 
 ---
 
@@ -305,12 +317,13 @@ python examples/07_swebench_lite_gate_benchmark.py
 | Gold patches allowed (`layer1_structural_verified`) | **213 / 300 (71.0%)** |
 | Partial hunks escalated without full `original_source` | **82 / 300 (27.3%)** |
 | Gold patch false-deny rate (`AST syntax FP: 0`) | **5 / 300 (1.67%)** |
-| Adversarial mutations on real patches caught (syntax/secret/`getattr`) | **60 / 60 (100.0%)** |
-| Diff gate local latency (`p50` / `p95`) | **1.312 ms / 4.358 ms** |
-| SWE core tool retained in `narrow_tool_surface(top_k=4)` | **297 / 300 (99.0%)** (`36.7%` schema saved) |
+| Synthetic mutation templates caught (syntax / secrets / `getattr` / `eval` / `shell=True`) | **60 / 60 (100.0%)** |
+| Diff gate local latency (`p50` / `p95`) | **1.660 ms / 8.773 ms** |
+| SWE core tool retained in `narrow_tool_surface(top_k=4)` (all tasks) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
+| SWE core retained strictly within narrowed queries (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `read_file`: **103 / 127**) |
 
-### 4. Drop-In `PreToolUse` Hook CLI, Strict AST Allowlist & Trace Training (`v0.6.5`–`v0.6.8`)
-Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON, or train the Layer 2 MoE router directly from recorded agent traces:
+### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.6.9`)
+Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials write structured reasons to `stderr`:
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' | python -m aetheris_microbrains.hook --strict-ast

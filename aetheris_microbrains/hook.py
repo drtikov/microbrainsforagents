@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, Dict, Optional
 
@@ -40,6 +41,10 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = "write_file"
     elif tool_lower in {"read", "read_file", "repo_read", "view_file"}:
         tool_name = "read_file"
+    elif tool_lower in {"grep", "grep_search", "search_code"}:
+        tool_name = "search_code"
+    elif tool_lower in {"glob", "list_dir"}:
+        tool_name = "list_dir"
     else:
         tool_name = tool_raw
 
@@ -67,19 +72,31 @@ def evaluate_hook_payload(
     payload: Dict[str, Any],
     strict_ast: bool = False,
     file_content: Optional[str] = None,
+    log_decisions: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return normalized verdict + exit_code."""
     norm = _normalize_hook_payload(payload)
     policy = PolicyConfig(strict_ast_allowlist=strict_ast)
-    ctx = {"file_content": file_content} if file_content is not None else None
-    verdict = decide(norm, context=ctx, policy=policy)
+    ctx: Dict[str, Any] = {}
+    if file_content is not None:
+        ctx["file_content"] = file_content
+    if log_decisions:
+        ctx["log_decisions"] = True
+    verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
     perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
     exit_code = 2 if dec == "deny" else 0
+    reason = f"{verdict['reason_code']}: {verdict['label']}"
+    hook_specific = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": perm,
+        "permissionDecisionReason": reason,
+    }
     return {
+        "hookSpecificOutput": hook_specific,
         "decision": dec,
         "permissionDecision": perm,
-        "reason": f"{verdict['reason_code']}: {verdict['label']}",
+        "reason": reason,
         "label": verdict["label"],
         "reason_code": verdict["reason_code"],
         "layer": verdict["layer"],
@@ -88,25 +105,51 @@ def evaluate_hook_payload(
     }
 
 
+def _format_hook_stdout(hook_specific: Dict[str, Any]) -> str:
+    return json.dumps({"hookSpecificOutput": hook_specific})
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
     parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
+    parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
     args = parser.parse_args(argv)
+    log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
 
     raw = sys.stdin.read().strip()
     if not raw:
-        print(json.dumps({"decision": "escalate", "permissionDecision": "ask", "reason": "empty_hook_payload"}))
+        print(
+            _format_hook_stdout(
+                {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": "empty_hook_payload",
+                }
+            )
+        )
         return 0
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        print(json.dumps({"decision": "deny", "permissionDecision": "deny", "reason": f"invalid_hook_json:{exc}"}))
+        err_msg = f"invalid_hook_json:{exc}"
+        print(err_msg, file=sys.stderr)
+        print(
+            _format_hook_stdout(
+                {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": err_msg,
+                }
+            )
+        )
         return 2
 
-    result = evaluate_hook_payload(payload, strict_ast=args.strict_ast)
-    out = {k: v for k, v in result.items() if k != "exit_code"}
-    print(json.dumps(out))
-    return int(result["exit_code"])
+    result = evaluate_hook_payload(payload, strict_ast=args.strict_ast, log_decisions=log_decisions)
+    exit_code = int(result["exit_code"])
+    if exit_code == 2:
+        print(result["reason"], file=sys.stderr)
+    print(_format_hook_stdout(result["hookSpecificOutput"]))
+    return exit_code
 
 
 if __name__ == "__main__":

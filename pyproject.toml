@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aetheris-microbrains"
-version = "0.6.8"
-description = "Sub-2ms pure-NumPy 4-layer pre-flight safety, full-file AST/strict-allowlist/YAML/JS/secret/shell guard, PreToolUse hook & trace-trainable MCP-Zero router (v0.6.6): 97.4% Recall@4 (<=11.9% CP95 drop bound, 39.6% net tokens saved after retries), 42/42 Mondrian alpha=0.05 calibration (>=25/class, n_cal=120..550)"
+version = "0.6.9"
+description = "Fast (<2ms) CPU safety gate & tool-routing coprocessor for LLM agents. Catches broken syntax, leaked secrets, and dangerous commands before execution, cutting prompt token costs by up to 39%."
 readme = "README.md"
 authors = [
     { name = "Dmitry Tikov", email = "drtikov@gmail.com" }
