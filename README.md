@@ -5,7 +5,7 @@
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
-**Aetheris Microbrains** (`v0.6.9`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of any autonomous AI agent — from coding agents (**Claude Code**, **SWE-agent**, **Codex**) to personal/OS assistants (**OpenClaw**, **Hermes**, or custom LLM loops).
+**Aetheris Microbrains** (`v0.7.0`) is a fast, lightweight safety gate and tool-routing coprocessor that sits directly in front of any autonomous AI agent — from coding agents (**Claude Code**, **SWE-agent**, **Codex**) to personal/OS assistants (**OpenClaw**, **Hermes**, or custom LLM loops).
 
 It runs completely locally in pure NumPy on your CPU in **under 2 milliseconds**.
 
@@ -70,6 +70,19 @@ Guards sensitive files (`.env*`, `.git/hooks/`, `.ssh/`, `credentials.json`), bl
 
 ### 3. ⚡ Zero Lag (<2 ms CPU Latency)
 Pure NumPy with zero GPU required. The checks run in microseconds to under 2 milliseconds on standard laptop hardware—adding virtually zero overhead to seconds-long LLM calls.
+
+---
+
+## 🔒 Cybersecurity & Defense-in-Depth Options
+
+When AI agents browse the web, read external tickets/PRs, or connect to third-party MCP servers, they face indirect prompt injection, poisoned diffs, credential leaks, and rogue tool calls. Microbrains serves as an **additional pre-flight filter and audit journal** (paired with OS/container/network isolation—never as a standalone sandbox):
+
+* **Sensitive Asset Protection (Layer 0):** Denies writes/modifications to `.env*`, `.git/hooks/`, `.git/config`, `.ssh/`, `id_rsa`, and `credentials.json`, and escalates `READ_ONLY` access on those paths to `"ask"`.
+* **Obfuscated Payload & Secret Screening (Layer 1):** Inspects applied Python ASTs and diffs to block `eval`/`exec`, `os.system`, `subprocess(shell=True)`, `base64`-to-`exec`, `getattr` obfuscation, `__builtins__` tampering, and hardcoded API keys (`secret_leak_pattern_found`).
+* **Allowlist-First Shell Guard:** Blocks destructive shell chains (`rm -rf`, `curl | sh`, `dd of=/dev/`, `DROP DATABASE`) and escalates unrecognized commands rather than letting them run unchecked.
+* **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
+* **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
+* **Audit & Safe Rollout (`--shadow`, `--log-decisions`):** Shadow mode logs what would be blocked to `memory/decision_journal.jsonl` without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
 
 ---
 
@@ -387,7 +400,7 @@ python examples/07_swebench_lite_gate_benchmark.py
 | SWE core tool retained across all prompts (including full-catalog) | **297 / 300 (99.0%)** (`36.7%` schema tokens saved) |
 | Any SWE core tool retained within narrowed-only prompts (`mode == "narrowed"`) | **124 / 127 (97.6%)** (`edit_file` / `repo_read`: **103 / 127**) |
 
-### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.6.9`)
+### 4. Drop-In Claude Code / Codex `PreToolUse` Hook CLI (`v0.7.0`)
 Use Microbrains directly inside Claude Code, Codex, or custom agent hooks via stdin/stdout JSON. Output conforms to Claude Code's official `hookSpecificOutput` schema, while fatal denials and internal errors write structured reasons to `stderr` with exit code `2` (fail-closed):
 
 ```bash
