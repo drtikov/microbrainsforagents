@@ -75,17 +75,23 @@ Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destruct
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
 Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.5`)
-- **Safe Timeout Contracts:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission.
-- **Zero-Fabrication Error Bounds & Calibration Provenance:** `decide()`, `calibrate_conformal()`, and `infer_conformal()` emit `upper_error_bound_95: null` and `upper_error_bound_rule_of_3: null` (`statistical_confidence_status: "unknown"`) unless measured on an explicit labeled evaluation set. Fission-derived models honestly declare `conformal_basis: "fission_synthetic_anchors"` with `conformal_guarantee_valid = False` until calibrated on genuine holdouts; `ToolRoutingMoE` explicitly marks synthetic anchors as `"synthetic_lexical_probes"`.
-- **Nuanced Shell & AST Inspection:** Differentiates dangerous redirects (`> /etc/passwd`, `> .env`, `> ../escaped`) which are strictly denied from unprivileged redirects (`echo "ok" > out.txt`) which escalate for confirmation, while allowing standard descriptor piping (`2>&1`, `> /dev/null`). Real optional Tree-sitter grammars are dynamically verified before reporting AST validation.
-- **Shell Wrapper Unwrapping & Secret Env Defense:** Unwraps prefix wrappers (`env`, `sudo`, `timeout`, `nohup`, inline `VAR=val`) so commands like `env sh -c "rm -rf /"` or `sudo rm -rf /` cannot evade inspection; blocks secret variable dumps (`echo $OPENAI_API_KEY`, `printenv GITHUB_TOKEN`), sensitive `/proc/*/environ` reads, and protected-path mutations, escalating bare `env` / `printenv` inspection.
-- **Outbound Secret Egress & Post-Tool Scrubbing (`v0.7.5`):** Inspects tool arguments across all tools (shell commands, `WebFetch`, MCP payloads) to block raw credential exfiltration (`layer1_secret_egress_veto`), and provides `mb.scrub_tool_output()` / `python -m aetheris_microbrains.hook --event post-tool-use` to sanitize returned credentials before context persistence.
-- **Decoupled Advisors & Cache-Safe Sessions:** Standalone non-authorizing entrypoints `diagnose_patch()` (patch diagnostics) and `rank_tools()` / `SessionToolSurface` (sticky per-session Top-K narrowing that avoids LLM prompt-cache invalidation across turns), plus `evaluate_topk_holdout()` for real Top-K recall audits.
-- **Clean Fleet Registry & Dynamic Variance:** Fleet lifecycle registry reports `null` and `"unobserved"` for models without runtime telemetry instead of placeholder defaults. Counterfactual simulations dynamically track empirical variance thresholds. Test probe models are safely isolated in `_archive/` leaving 41 pure production models.
-- **Atomic Versioned Storage & Live Telemetry:** `AnalyticalMicroTransformer.save()` commits immutable `_versions/{name}/{rev_id}/` snapshots via a single atomic `.manifest.json` pointer swap; `/dashboard` renders live `MicrobrainTelemetry` (with illustrative preview isolated on `/demo/dashboard`), and `decision_journal.jsonl` redacts secrets and surfaces `journal_written` / `journal_error`.
-- **Shadow Error Observability & Isolated Journals:** `--shadow` mode uses a pure stdlib logger to append structured, redacted `event_type: "hook_error"` entries to `decision_journal.jsonl` upon empty payloads, malformed JSON, non-object payloads, or engine/import failures (supported via `--journal-path` / `AETHERIS_JOURNAL_PATH`), so shadow errors are never indistinguishable from unchecked operations.
-- **Clear File Context Checks:** Distinguishes full-file verified diffs from single partial hunks (`layer1_hunk_only_checked`), so your agent always knows whether it inspected complete file context.
+### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.6`)
+- **Safe Timeout Contracts & Fail-Closed Boundaries:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission. Missing context (e.g. unsupplied `file_content` for ambiguous diffs) likewise degrades safely to `"ask"` rather than auto-allowing.
+- **Statistical Honesty & Conformal Discipline:**
+  - True split-conformal coverage requires sufficient calibration sample sizes ($n_{cal} \ge 120$). When sample sizes are small or uncalibrated, `decide()`, `calibrate_conformal()`, and `infer_conformal()` honestly emit `upper_error_bound_95: null` (`statistical_confidence_status: "unknown"`).
+  - Mondrian (per-class) conditioning requires $\ge 20$ samples per class to avoid trivial set collapse; when data is sparse, the engine safely flags `conformal_guarantee_valid = False` or pools calibration.
+  - On out-of-domain linguistic shifts, we openly report empirical accuracy drops (e.g. 70.0% on zero-token-overlap morphological shifts; see Section 6) rather than claiming synthetic exchangeability guarantees.
+- **Flag-Aware Shell Unwrapping & Structural AST Inspection:**
+  - Does not rely on naive command-name string matching: unwraps nested wrappers (`xargs`, `find -exec`, `env`, `sudo`, `timeout`, `nohup`, inline `VAR=val`, and `LD_PRELOAD` overrides), tokenizes arguments via `shlex`, and validates path-bearing flags (e.g. `git log --output=...`, `-o <path>`) against protected targets (`is_protected_path`).
+  - Diffs are parsed into real Python Abstract Syntax Trees (`ast.parse`) with `SecurityASTVisitor` detecting dynamic code execution (`eval`, `exec`, `subprocess(shell=True)`), dynamic imports (`importlib.import_module`), obfuscated attribute access (`getattr(os, "sys" + "tem")`), and sensitive env reads piped into network sinks (`ast_secret_exfil_pattern`).
+- **Prompt-Cache Economics & Sticky Sessions:**
+  - Dynamic tool-schema pruning saves tokens, but naive per-turn tool permutation destroys LLM prefix-prompt caching (dropping effective cost savings to ~4%).
+  - Microbrains solves this with **`SessionToolSurface(cluster_pinning=True)`**, keeping tool namespaces sticky across multi-turn sessions to preserve **56.8% cache-adjusted net savings** without cache churn.
+- **Outbound Secret Egress & Post-Tool Scrubbing:** Inspects tool arguments across all tools (shell commands, `WebFetch`, MCP payloads) to block raw credential exfiltration (`layer1_secret_egress_veto`), and provides `mb.scrub_tool_output()` / `python -m aetheris_microbrains.hook --event post-tool-use` to sanitize returned credentials before context persistence.
+- **Human-Friendly Audit CLI & Policy Governance:**
+  - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`, conformal bounds) to `memory/decision_journal.jsonl`.
+  - Humans can inspect why an action stopped using `python -m aetheris_microbrains.audit --last` or `--summary`.
+  - Security policies can be loaded from external files via `PolicyConfig.from_file("security_rules.yaml")` without modifying Python code (see [SECURITY.md](SECURITY.md)).
 
 ---
 
@@ -411,13 +417,18 @@ turn2 = session.select_for_turn("check line 20") # reuses sticky prefix -> cache
 
 ### 8. Mondrian Conformal Quantiles, Atomic Versioned Checksums & Staged Plasticity
 
+Split-conformal prediction provides finite-sample distribution-free guarantees under exchangeability. For Mondrian (per-class) conditioning, sample sizes must satisfy $n_{c} \ge \lceil (1-\alpha)/\alpha \rceil$ (e.g. $n_c \ge 19$ for $\alpha = 0.05$); otherwise, per-class quantiles are degenerate and the engine safely sets `conformal_guarantee_valid = False` or falls back to pooled quantiles:
+
 ```python
 import aetheris_microbrains as mb
 
 # Load weights with automatic SHA-256 integrity verification (`verify_checksum=True`)
 brain = mb.AnalyticalMicroTransformer.load("neuro_code_edit_verifier")
+
+# Runs split-conformal inference across calibrated validation splits (n_cal >= 120)
 inf = brain.infer_conformal(["syntax_tree_valid", "ast_node_function_def"], alpha=0.05, mondrian=True)
-print("Origin:", inf["calibration_data_origin"], "Std Err:", inf["coverage_std_error"])
+print("Origin:", inf["calibration_data_origin"], "Valid Guarantee:", inf.get("conformal_guarantee_valid"))
+print("Coverage Std Err:", inf.get("coverage_std_error"))
 
 # Staged continual plasticity: writes to `_candidates/`, requires holdout gate, atomic `_rollback/`
 pipeline = mb.ContinualLearningPipeline()
@@ -503,7 +514,7 @@ python examples/06_real_llm_ab_benchmark.py --live --model gpt-4o-mini
 > *Honesty note:* Using a pre-frozen lexical cutoff (`top_score < 2 or margin < 1`) with zero test-set tuning, Keyword reaches 84.2% Recall@4 while Microbrains reaches 97.4% by escalating half the queries to the full catalog (`--live` retries rely strictly on runtime invalid/missing tool calls, never oracle ground-truth labels).
 
 ### 2. Local 25-Step Regression & Schema-Token Smoke Test (`examples/05_reproducible_25step_benchmark.py`)
-Deterministic offline trajectory checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (measures **tool-schema tokens only**, excluding conversation history and LLM prompt caching; see Section 5 for cache-adjusted multi-turn metrics):
+Deterministic offline trajectory smoke test checking local CPU gate latency, AST/shell/secret rules, and OOD escalation (measures **tool-schema tokens only**; see Section 5 for realistic multi-turn prompt-caching benchmarks with `SessionToolSurface` and Section 3 for 300-issue SWE-bench Lite):
 
 ```bash
 python examples/05_reproducible_25step_benchmark.py
