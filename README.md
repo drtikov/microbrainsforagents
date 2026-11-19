@@ -1,7 +1,7 @@
 # Aetheris Microbrains
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-purple.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy_%7C_OpenCL-success.svg)](https://github.com/)
 [![Latency](https://img.shields.io/badge/Prefilter-<2ms-brightgreen.svg)](https://github.com/)
 
@@ -474,7 +474,7 @@ print("Window coverage:", report.sliding_window_coverage, "Drift:", report.drift
 * **What Microbrains Are NOT For:**
   - Replacing general LLM reasoning on arbitrary natural language tasks (unknown prompts deterministically abstain and escalate to Layer 3).
   - Acting as a standalone OS sandbox: whatever static rules miss gets through unless isolated at the OS/container boundary.
-* **License:** **PolyForm Noncommercial 1.0.0** — free for educational, research, and noncommercial use; commercial/work use requires a commercial license.
+* **License:** **Apache License 2.0** — free and open source for commercial, personal, and research use. Custom enterprise integrations and support available.
 
 ---
 
@@ -644,12 +644,10 @@ pytest aetheris_microbrains/tests/test_fable_review_fixes.py aetheris_microbrain
 
 ---
 
-## 📄 License & Commercial Inquiries
+## 📄 License & Commercial Support
 
-This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
+This project is open-source under the **[Apache License 2.0](LICENSE)**.
 
-* **Noncommercial Use:** You may freely use, modify, and distribute this software for educational, research, and noncommercial purposes.
-* **Commercial Use:** Commercial use requires a commercial license from the author.
-
-For commercial licensing inquiries, please contact:
-**Dmitry Tikov** — [drtikov@gmail.com](mailto:drtikov@gmail.com)
+* **Permissive Open-Source:** You are free to use, modify, embed, and distribute this software for personal, research, and commercial purposes.
+* **Commercial Support & Custom Integration:** Need custom tool routing models, fine-tuned weights for proprietary APIs, SOC 2 compliance consulting, or dedicated support SLAs? Contact:  
+  **Dmitry Tikov** — [drtikov@gmail.com](mailto:drtikov@gmail.com)

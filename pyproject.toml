@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     { name = "Dmitry Tikov", email = "drtikov@gmail.com" }
 ]
-license = { text = "PolyForm Noncommercial License 1.0.0" }
+license = { text = "Apache-2.0" }
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
