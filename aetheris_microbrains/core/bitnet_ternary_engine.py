@@ -27,7 +27,7 @@ class BitLinearLayer:
         if weights is not None:
             self.raw_weight = np.asarray(weights, dtype=np.float32).reshape(out_features, in_features)
         else:
-            self.raw_weight = np.random.randn(out_features, in_features).astype(np.float32) * np.sqrt(2.0 / in_features)
+            self.raw_weight = np.random.default_rng(42).standard_normal((out_features, in_features)).astype(np.float32) * np.sqrt(2.0 / in_features)
         
         self.bias = np.asarray(bias, dtype=np.float32).flatten() if bias is not None else None
         self.ternary_weight, self.gamma_w = self._quantize_weights()

@@ -67,7 +67,7 @@ class SynapticMetaplasticityEngine:
         # Weight update modulated by CBF Spectral Barrier
         dW = effective_lr * float(reward_signal) * activity
         try:
-            from .cbf_spectral_barrier import CBFSpectralBarrierEngine
+            from ..core.cbf_spectral_barrier import CBFSpectralBarrierEngine
             cbf = CBFSpectralBarrierEngine.get_instance()
             dW, was_projected = cbf.enforce_safe_update(self.W, dW)
         except Exception:

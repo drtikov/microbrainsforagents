@@ -93,6 +93,7 @@ class ZeroShotToolChainer:
             "is_single_shot": len(resolved_pipeline) == 1,
             "pipeline_binding_fidelity": round(mean_fidelity, 4),
             "synthesis_latency_us": round((time.perf_counter() - t0) * 1e6, 2),
-            "llm_prompt_tokens_saved": len(complex_goal.split()) * 15,
+            "llm_prompt_tokens_saved": None,
+            "token_savings_basis": "unmeasured",
         }
 

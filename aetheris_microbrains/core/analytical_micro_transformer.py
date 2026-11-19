@@ -314,6 +314,19 @@ class AnalyticalMicroTransformer:
 
         # Residual connection
         x = x + mlp_out
+
+        # Modern Hopfield supplement for rule retrieval beyond d_mlp slots
+        if self.hopfield_keys and len(self.hopfield_keys) > self.d_mlp:
+            hk = np.stack(self.hopfield_keys, axis=0)  # (N, d_model)
+            hv = np.stack(self.hopfield_values, axis=0)  # (N, d_model)
+            x_last = x[-1]  # (d_model,)
+            hop_logits = 12.0 * (hk @ x_last)  # (N,)
+            hop_logits -= hop_logits.max()
+            hop_weights = np.exp(hop_logits)
+            hop_weights /= hop_weights.sum() + 1e-12
+            hopfield_out = hop_weights @ hv  # (d_model,)
+            x = x + hopfield_out[np.newaxis, :]  # broadcast to all positions
+
         last_hidden = x[-1]  # Output vector of the newest token (d_model,)
 
         # 4. Predict Next Token via Embedding Cosine Similarity

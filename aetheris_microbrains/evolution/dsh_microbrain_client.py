@@ -106,9 +106,9 @@ class DSHMicrobrainClient:
     def classify_intent(self, text: str, top_k: int = 3) -> IntentResult:
         """Classify the intent of a text (task classification for DSH)."""
         if not self.config.enabled:
-            # Fallback classification
+            # Fallback classification (uncalibrated keyword heuristic)
             intent = self._simple_classify(text)
-            return IntentResult(intent=intent, confidence=0.5, alternatives=[])
+            return IntentResult(intent=intent, confidence=0.0, alternatives=[])
         
         try:
             result = self._request("POST", "/microbrain/intent", {
@@ -123,7 +123,7 @@ class DSHMicrobrainClient:
         except Exception as e:
             log.warning(f"Intent classification failed: {e}, using fallback")
             intent = self._simple_classify(text)
-            return IntentResult(intent=intent, confidence=0.5, alternatives=[])
+            return IntentResult(intent=intent, confidence=0.0, alternatives=[])
     
     def _simple_classify(self, text: str) -> str:
         """Simple keyword-based intent classification fallback."""

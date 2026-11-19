@@ -168,7 +168,7 @@ class PackedTernaryLinear:
 
 def bench_receipt(layer: PackedTernaryLinear, batch: int = 1, repeats: int = 32) -> Dict[str, Any]:
     """MEASURED latency receipts for the caller's machine (no claimed constants)."""
-    x = np.random.randn(batch, layer.in_features).astype(np.float32)
+    x = np.random.default_rng(42).standard_normal((batch, layer.in_features)).astype(np.float32)
     layer.forward(x[:1])  # warm
     t0 = time.perf_counter()
     for _ in range(repeats):

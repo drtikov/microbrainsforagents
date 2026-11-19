@@ -18,7 +18,11 @@ REPO = Path(__file__).resolve().parents[1]
 def _source(rel: str) -> str:
     target = REPO / rel
     if not target.exists():
-        pytest.skip(f"File not found in standalone SDK: {rel}")
+        exp_target = REPO / "experimental" / Path(rel).name
+        if exp_target.exists():
+            target = exp_target
+        else:
+            pytest.skip(f"File not found in standalone SDK: {rel}")
     return target.read_text(encoding="utf-8")
 
 

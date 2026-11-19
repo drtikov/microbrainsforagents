@@ -17,10 +17,10 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
-from .wsp_substrate import CPUMicroRouter
+from ..evolution.wsp_substrate import CPUMicroRouter
 from .wsp_hebbian import HebbianPlasticLayer
-from .wsp_merger import WeightSpaceMerger
-from .wsp_sae import ConceptSparseAutoencoder
+from ..evolution.wsp_merger import WeightSpaceMerger
+from ..evolution.wsp_sae import ConceptSparseAutoencoder
 
 logger = logging.getLogger(__name__)
 

@@ -95,7 +95,7 @@ class CounterfactualDreamEngine:
         if not meta_files:
             return {"status": "skipped", "reason": "No micro-brains found on disk"}
 
-        from .analytical_micro_transformer import AnalyticalMicroTransformer
+        from ..core.analytical_micro_transformer import AnalyticalMicroTransformer
 
         for meta_path in meta_files[:max_scenarios]:
             brain_name = meta_path.stem.replace("_meta", "")

@@ -7,9 +7,11 @@ and intent classification.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import html
 import logging
 import os
+import re
 import sys
 import time
 import yaml
@@ -17,7 +19,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -176,7 +179,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 log.warning(f"Failed to preload brain {brain_name}: {e}")
     else:
-        log.warning("Microbrain components not available - running in mock mode")
+        log.warning("Microbrain components unavailable; running in degraded fallback mode")
     
     log.info("Microbrain HTTP Server ready")
     yield
@@ -262,6 +265,32 @@ app = FastAPI(
     version=_PKG_VERSION,
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def _security_and_size_middleware(request: Request, call_next):
+    max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
+    cl_hdr = request.headers.get("content-length")
+    if cl_hdr:
+        try:
+            if int(cl_hdr) > max_body:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+    body_bytes = await request.body()
+    if len(body_bytes) > max_body:
+        return JSONResponse({"detail": "Payload too large"}, status_code=413)
+
+    req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
+    if req_token and request.url.path.startswith("/microbrain/"):
+        auth_hdr = request.headers.get("authorization", "")
+        if not auth_hdr.lower().startswith("bearer "):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        supplied = auth_hdr[7:].strip()
+        if not hmac.compare_digest(supplied, req_token):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    return await call_next(request)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -581,13 +610,13 @@ async def classify_intent(req: IntentRequest):
                         source="microbrain",
                     )
         intent = _simple_intent_classify(req.text)
-        return IntentResponse(intent=intent, confidence=0.75, alternatives=[], status="fallback", source="fallback_keyword")
+        return IntentResponse(intent=intent, confidence=0.0, alternatives=[], status="fallback", source="fallback_keyword")
     except Exception as e:
         log.warning(f"Intent classification failed: {e}")
         intent = _simple_intent_classify(req.text)
         return IntentResponse(
             intent=intent,
-            confidence=0.5,
+            confidence=0.0,
             alternatives=[],
             status="fallback_on_error",
             source="fallback_keyword",
@@ -613,89 +642,91 @@ def _simple_intent_classify(text: str) -> str:
 
 @app.post("/microbrain/validate", response_model=ValidationResponse)
 async def validate_code(req: ValidationRequest):
-    """Validate Python code (syntax + optional type checking)."""
+    """Validate Python code (syntax + AST type/handler inspection)."""
+    import ast
+
     issues = []
     metrics = {"lines": len(req.code.splitlines()), "chars": len(req.code)}
-    
+    parsed_tree = None
+
     # Syntax validation
-    if req.check_syntax:
+    if req.check_syntax or req.check_types:
         try:
-            import ast
-            ast.parse(req.code)
+            parsed_tree = ast.parse(req.code)
         except SyntaxError as e:
-            issues.append(ValidationIssue(
-                severity="error",
-                message=f"Syntax error: {e.msg}",
-                line=e.lineno,
-                column=e.offset,
-                rule="syntax",
-            ))
+            if req.check_syntax:
+                issues.append(ValidationIssue(
+                    severity="error",
+                    message=f"Syntax error: {e.msg}",
+                    line=e.lineno,
+                    column=e.offset,
+                    rule="syntax",
+                ))
         except Exception as e:
-            issues.append(ValidationIssue(
-                severity="error",
-                message=f"Parse error: {type(e).__name__}: {e}",
-                rule="syntax",
-            ))
-    
-    # Type checking (basic)
-    if req.check_types:
-        # Check for common type issues
-        import re
-        # Missing type hints on functions
-        func_defs = re.findall(r'def (\w+)\([^)]*\):', req.code)
-        for func in func_defs:
-            if f"def {func}(" in req.code and "->" not in req.code.split(f"def {func}(")[1].split(":")[0]:
+            if req.check_syntax:
+                issues.append(ValidationIssue(
+                    severity="error",
+                    message=f"Parse error: {type(e).__name__}: {e}",
+                    rule="syntax",
+                ))
+
+    # Real AST type/handler inspection
+    if req.check_types and parsed_tree is not None:
+        for node in ast.walk(parsed_tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is None:
                 issues.append(ValidationIssue(
                     severity="warning" if not req.strict_mode else "error",
-                    message=f"Function '{func}' missing return type annotation",
+                    message=f"Function '{node.name}' missing return type annotation",
+                    line=getattr(node, "lineno", None),
                     rule="type_hints",
                 ))
-        
-        # Check for bare except
-        if "except:" in req.code:
-            issues.append(ValidationIssue(
-                severity="warning",
-                message="Bare 'except:' clause - consider specifying exception type",
-                rule="bare_except",
-            ))
-    
+            elif isinstance(node, ast.ExceptHandler) and node.type is None:
+                issues.append(ValidationIssue(
+                    severity="warning",
+                    message="Bare 'except:' clause - consider specifying exception type",
+                    line=getattr(node, "lineno", None),
+                    rule="bare_except",
+                ))
+
     success = not any(i.severity == "error" for i in issues)
     return ValidationResponse(success=success, issues=issues, metrics=metrics)
 
 
 @app.post("/microbrain/prefilter", response_model=PrefilterResponse)
 async def prefilter_candidates(req: PrefilterRequest):
-    """Batch prefilter evolution candidates via Python `ast.parse` and structural heuristics."""
+    """Batch prefilter evolution candidates via Python AST security & structural heuristics."""
+    from .layered_decision_engine import analyze_code_diff
+
     results = []
-    import ast
     try:
         for i, cand in enumerate(req.candidates):
-            code = cand.get("code", "")
+            code = str(cand.get("code", "") or "")
             cand_id = cand.get("id", f"cand_{i}")
-            score = 0.5
-            passed = True
-            reason = "syntax_ok"
-            
-            try:
-                ast.parse(code)
+            diff_res = analyze_code_diff("candidate.py", code)
+
+            if not diff_res.get("syntax_valid", False) or not diff_res.get("security_clean", True):
+                score = 0.05
+                passed = False
+                findings = diff_res.get("findings") or ["prefilter_rejected"]
+                reason = ",".join(findings)
+            else:
+                score = 0.5
                 if "def " in code and "def test_" in code:
                     score = 0.90
                 elif "def " in code:
                     score = 0.75
                 elif "import " in code:
                     score = 0.60
-            except SyntaxError as syn_err:
-                score = 0.10
-                passed = False
-                reason = f"syntax_error: {syn_err.msg}"
-            
+                passed = score >= req.threshold
+                reason = "syntax_and_security_ok"
+
             results.append(PrefilterResult(
                 candidate_id=cand_id,
                 score=score,
-                passed=passed and (score >= req.threshold),
+                passed=passed,
                 reason=reason,
             ))
-        
+
         filtered = sum(1 for r in results if r.passed)
         return PrefilterResponse(
             results=results,
@@ -740,6 +771,8 @@ async def list_brains():
 @app.post("/microbrain/load/{brain_name}")
 async def load_brain_endpoint(brain_name: str):
     """Explicitly load a brain into cache."""
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", brain_name):
+        raise HTTPException(status_code=400, detail="Invalid brain name")
     try:
         brain = _load_brain(brain_name)
         return {"success": True, "brain": brain_name, "cached": brain_name in _brain_cache}
@@ -777,7 +810,8 @@ class GateResponse(BaseModel):
     conformal: Dict[str, Any] = {}
 
 
-_vla_gate_singleton: Optional[Any] = None
+_vla_skill_library: Optional[Any] = None
+_vla_action_gate: Optional[Any] = None
 
 
 def _build_filter_from_request(req: "GateRequest") -> Any:
@@ -814,25 +848,27 @@ def _build_filter_from_request(req: "GateRequest") -> Any:
 async def gate_action(req: GateRequest):
     """Gate a robot action: CBF safety -> conformal risk -> VLA-tier routing.
 
-    Uses a shared SkillLibrary singleton (affordances) rebuilt safety filters
-    per request. Honest labels are carried in the response payload.
+    Builds a fresh per-request VLActionGate sharing only read-only SkillLibrary and
+    ConformalActionGate singletons so concurrent requests never overwrite each other's
+    safety filter or conformal margin.
     """
-    global _vla_gate_singleton
+    global _vla_skill_library, _vla_action_gate
     try:
         from .vla_gating import ConformalActionGate, SkillLibrary, VLActionGate
 
-        if _vla_gate_singleton is None:
-            _vla_gate_singleton = VLActionGate(
-                skill_library=SkillLibrary(),
-                action_gate=ConformalActionGate(),
-            )
-        else:
-            # rebuild the state-dependent safety filter for this request
-            _vla_gate_singleton.safety = _build_filter_from_request(req)
-        if _vla_gate_singleton.safety is None:
-            _vla_gate_singleton.safety = _build_filter_from_request(req)
-        _vla_gate_singleton.safety.set_conformal_margin(req.conformal_margin)
-        out = _vla_gate_singleton.gate(
+        if _vla_skill_library is None:
+            _vla_skill_library = SkillLibrary()
+        if _vla_action_gate is None:
+            _vla_action_gate = ConformalActionGate()
+
+        req_filter = _build_filter_from_request(req)
+        req_filter.set_conformal_margin(req.conformal_margin)
+        req_gate = VLActionGate(
+            skill_library=_vla_skill_library,
+            safety_filter=req_filter,
+            action_gate=_vla_action_gate,
+        )
+        out = req_gate.gate(
             scene_vec=req.scene,
             state=req.state,
             nominal_action=req.nominal_action,

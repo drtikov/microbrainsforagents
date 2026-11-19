@@ -19,8 +19,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 log = logging.getLogger("aetheris.memory.auto_dreamer")
 
-WIKI_KNOWLEDGE_PATH = Path("memory/store/wiki_knowledge.json")
-MEMORY_NOTES_PATH = Path("memory/store/memory_notes.jsonl")
+_PKG_STORE_DIR = Path(__file__).resolve().parents[1] / "memory" / "store"
+WIKI_KNOWLEDGE_PATH = _PKG_STORE_DIR / "wiki_knowledge.json"
+MEMORY_NOTES_PATH = _PKG_STORE_DIR / "memory_notes.jsonl"
 
 
 @dataclass
@@ -60,11 +61,11 @@ class AutoDreamerConsolidator:
 
     def __init__(
         self,
-        attempt_ledger_path: str = "memory/store/attempt_ledger.jsonl",
+        attempt_ledger_path: Optional[str] = None,
         wiki_path: Optional[Path] = None,
         notes_path: Optional[Path] = None,
     ):
-        self.ledger_path = Path(attempt_ledger_path)
+        self.ledger_path = Path(attempt_ledger_path) if attempt_ledger_path else (_PKG_STORE_DIR / "attempt_ledger.jsonl")
         self.wiki_path = Path(wiki_path) if wiki_path else WIKI_KNOWLEDGE_PATH
         self.notes_path = Path(notes_path) if notes_path else MEMORY_NOTES_PATH
         self.weight_memory_path = self.notes_path.parent / "neuro_brains" / "neuro_weight_space_memory.json"
@@ -170,7 +171,7 @@ class AutoDreamerConsolidator:
         # 5.1 Dual-Stream Grounding: Compile synthesized rules into weight-space memory
         weight_implant_count = 0
         try:
-            from .wsp_neural_surgeon import WSPNeuralSurgeon
+            from ..core.wsp_neural_surgeon import WSPNeuralSurgeon
             surgeon = WSPNeuralSurgeon.get_instance()
             for note in new_notes:
                 implant_res = self.ground_rule_into_neural_weights(note, surgeon)
@@ -234,7 +235,7 @@ class AutoDreamerConsolidator:
         import numpy as np
 
         if surgeon is None:
-            from .wsp_neural_surgeon import WSPNeuralSurgeon
+            from ..core.wsp_neural_surgeon import WSPNeuralSurgeon
             surgeon = WSPNeuralSurgeon.get_instance()
 
         target_file = self.weight_memory_path

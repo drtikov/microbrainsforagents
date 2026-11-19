@@ -23,12 +23,14 @@ Contract:
 from __future__ import annotations
 
 import ast
+import fnmatch
 import hashlib
 import importlib
 import json
 import logging
 import math
 import os
+import posixpath
 import re
 import shlex
 import textwrap
@@ -91,7 +93,7 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "totem",
     "integrity_seal.json",
     "integrity_manifest",
-    # Universal SWE security-critical asset paths
+    # Universal SWE security-critical asset paths & agent control plane
     ".env",
     ".git/config",
     ".git/hooks",
@@ -101,7 +103,39 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "credentials.json",
     "secrets.yaml",
     "secrets.json",
+    ".aws/credentials",
+    ".aws/config",
+    ".kube/config",
+    ".docker/config.json",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/sudoers",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks",
+    ".mcp.json",
+    ".cursor/mcp.json",
+    ".vscode/tasks.json",
+    ".vscode/settings.json",
 )
+
+_PROTECTED_EXACT_BASENAMES: Set[str] = {
+    ".env",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".gitconfig",
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+    ".bash_profile",
+    ".zprofile",
+    "id_rsa",
+    "id_ed25519",
+    "credentials.json",
+    "secrets.yaml",
+    "secrets.json",
+}
 
 
 DEFAULT_ALLOWED_AST_IMPORTS: Tuple[str, ...] = (
@@ -132,20 +166,40 @@ DEFAULT_POLICY = PolicyConfig()
 def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Return True if path points to a constitutional, credential, or security-critical asset.
 
-    Protects both custom constitutional patterns and standard SWE secrets/hooks (`.env`,
-    `.git/hooks`, `.ssh/id_rsa`, `credentials.json`) while avoiding false positives on
-    generic code/math paths like `src/math/axioms.py` or `src/env_loader.py`.
+    Protects both custom constitutional patterns and standard SWE secrets/hooks/control-plane
+    files (`.env*`, `.git/hooks`, `.ssh/id_rsa`, `.aws/credentials`, `.claude/settings.json`,
+    `.mcp.json`) while avoiding false positives on generic code/math paths like
+    `src/math/axioms.py` or `src/env_loader.py`.
     """
     if not path_str:
         return False
+    raw = str(path_str)
+    if "\x00" in raw:
+        return True
     cfg = policy or DEFAULT_POLICY
-    normalized = str(path_str).replace("\\", "/").strip().lower()
-    basename = Path(normalized).name
+    normalized = raw.replace("\\", "/").strip().lower()
+    raw_segments = [seg for seg in normalized.split("/") if seg]
+    if ".env" in raw_segments:
+        return True
+
+    if normalized.startswith("~/"):
+        tail = posixpath.normpath(normalized[2:])
+        norm_path = "~/" + tail if tail != "." else "~/"
+    else:
+        norm_path = posixpath.normpath(normalized)
+    basename = Path(norm_path).name
+
+    if basename == ".env" or basename.startswith(".env.") or basename in _PROTECTED_EXACT_BASENAMES:
+        return True
+    if any(ch in basename for ch in "*?["):
+        stripped_glob = re.sub(r"[*?\[\]]", "", basename)
+        if len(stripped_glob) >= 3 and any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
+            return True
+
     for pat in cfg.protected_patterns:
         if pat == ".env":
-            if basename == ".env" or basename.startswith(".env."):
-                return True
-        elif pat in normalized:
+            continue
+        if pat in norm_path or pat in normalized:
             return True
     return False
 
@@ -264,6 +318,19 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         self.dangerous_aliases: Set[str] = set()
         self.module_aliases: Dict[str, str] = {}
         self.decoded_vars: Set[str] = set()
+        self.has_network_sink: bool = False
+        self.has_env_secret_read: bool = False
+
+    @staticmethod
+    def _attr_chain(node: ast.AST) -> str:
+        parts: List[str] = []
+        cur = node
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+        return ".".join(reversed(parts)).lower()
 
     @staticmethod
     def _is_decode_call(node: ast.AST) -> bool:
@@ -373,6 +440,10 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             flag = f"obfuscated_subscript_builtin:{sub_key}"
             if flag not in self.findings:
                 self.findings.append(flag)
+        if isinstance(node.value, ast.Attribute) and node.value.attr == "environ":
+            env_k = _const_str(node.slice)
+            if env_k and _SENSITIVE_ENV_VAR_RE.search(env_k):
+                self.has_env_secret_read = True
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -390,6 +461,10 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                     self.findings.append("obfuscated_encoded_payload")
             elif func.id == "getattr":
                 self._check_getattr(node)
+            elif func.id == "open" and node.args:
+                open_path = _const_str(node.args[0])
+                if open_path and is_protected_path(open_path):
+                    self.findings.append("ast_protected_file_access")
 
         # Case 2: Obfuscated dynamic dispatch `getattr(os, 'sys' + 'tem')(...)`
         elif isinstance(func, ast.Call):
@@ -410,8 +485,36 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         # Case 3: Attribute call (`os.system`, `subprocess.run`, `shutil.rmtree`, `pickle.loads`, ...)
         elif isinstance(func, ast.Attribute):
             attr = func.attr
+            chain = self._attr_chain(func)
             base_name = func.value.id.lower() if isinstance(func.value, ast.Name) else ""
             resolved_mod = self.module_aliases.get(base_name, base_name)
+
+            if chain in {
+                "urllib.request.urlopen",
+                "requests.post",
+                "requests.get",
+                "requests.put",
+                "requests.request",
+                "httpx.post",
+                "httpx.get",
+                "httpx.put",
+                "httpx.request",
+                "socket.create_connection",
+                "http.client.httpconnection",
+                "http.client.httpsconnection",
+            }:
+                self.has_network_sink = True
+
+            if attr in {"read_text", "read_bytes", "open"} and isinstance(func.value, ast.Call):
+                if func.value.args:
+                    p_str = _const_str(func.value.args[0])
+                    if p_str and is_protected_path(p_str):
+                        self.findings.append("ast_protected_file_access")
+
+            if attr in {"getenv", "get"} and node.args:
+                env_k = _const_str(node.args[0])
+                if env_k and _SENSITIVE_ENV_VAR_RE.search(env_k):
+                    self.has_env_secret_read = True
 
             if attr in {"eval", "exec", "system", "popen"}:
                 self.findings.append(f"dangerous_method:{resolved_mod}.{attr}" if resolved_mod else f"dangerous_method:{attr}")
@@ -564,6 +667,19 @@ _SECRET_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
     ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[REDACTED_HF_TOKEN]"),
     ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "[REDACTED_NPM_TOKEN]"),
     ("pypi_token", re.compile(r"\bpypi-[A-Za-z0-9_\-]{24,}\b"), "[REDACTED_PYPI_TOKEN]"),
+    ("stripe_key", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "[REDACTED_STRIPE_KEY]"),
+    ("telegram_bot_token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{30,}\b"), "[REDACTED_TELEGRAM_TOKEN]"),
+    ("sendgrid_key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_SENDGRID_KEY]"),
+    ("databricks_token", re.compile(r"\bdapi[a-f0-9]{32}\b"), "[REDACTED_DATABRICKS_TOKEN]"),
+    (
+        "db_connection_uri",
+        re.compile(
+            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://"
+            r"[^/\s:@\"']+:(?!pass(?:word)?@|changeme@|example@|your_)[^/\s@\"']{4,}@[^\s\"']+"
+        ),
+        "[REDACTED_DB_URI]",
+    ),
+    ("jwt_token", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED_JWT]"),
     ("bearer_token", re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]{16,}=*"), "Bearer [REDACTED]"),
 )
 
@@ -941,14 +1057,65 @@ def analyze_code_diff(
             "patched_file_ast_verified": False,
         }
 
-    if ext in {".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".md", ".yaml", ".yml", ".toml", ".txt", ".c", ".cpp", ".h", ".rs", ".go"}:
+    fname_lower = Path(path_str).name.lower() if path_str else ""
+    is_shell_shebang = (not ext) and dedented.lstrip().startswith(("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env bash", "#!/usr/bin/env zsh"))
+    if (
+        ext in {".sh", ".bash", ".zsh", ".ksh", ".ps1"}
+        or is_shell_shebang
+        or fname_lower in {"makefile", "dockerfile", "gnumakefile", "justfile"}
+    ):
+        sh_diff_findings: List[str] = list(secret_findings)
+        for ln in dedented.splitlines():
+            stripped = ln.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if fname_lower in {"makefile", "gnumakefile", "justfile"}:
+                if re.match(r"^[A-Za-z0-9_.\-/]+:\s*(?:[^=]|$)", stripped) and ";" not in stripped:
+                    continue
+                stripped = stripped.lstrip("@-+").strip()
+                if not stripped:
+                    continue
+            elif fname_lower == "dockerfile":
+                if stripped.upper().startswith("RUN "):
+                    stripped = stripped[4:].strip()
+                else:
+                    continue
+            sh_res = analyze_shell_command(stripped)
+            if not sh_res.get("is_safe", True):
+                for f_item in sh_res.get("findings", []):
+                    sh_diff_findings.append(f"shell_script_unsafe_cmd:{f_item}")
+        sh_diff_findings = list(dict.fromkeys(sh_diff_findings))
+        lang_name = "shell" if (ext in {".sh", ".bash", ".zsh", ".ksh"} or is_shell_shebang) else (ext.lstrip(".") or fname_lower)
+        return {
+            "language": lang_name,
+            "syntax_valid": True,
+            "security_clean": len(sh_diff_findings) == 0,
+            "findings": sh_diff_findings,
+            "interface_hazards": [],
+            "line_count": line_count,
+            "ast_nodes": [],
+            "cyclomatic_complexity": 0,
+            "is_static_data_or_doc": False,
+            "context_ast_parsed": False,
+            "ast_parser_backend": "shell_parser",
+            "patched_file_ast_verified": False,
+        }
+
+    if (
+        ext in {
+            ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".md", ".yaml", ".yml", ".toml", ".txt",
+            ".c", ".cpp", ".h", ".rs", ".go", ".sql", ".rb", ".java", ".php", ".ini", ".cfg",
+            ".xml", ".svg", ".lock",
+        }
+        or fname_lower == "procfile"
+    ):
         non_py_findings: List[str] = list(secret_findings)
         for ln in dedented.splitlines():
             stripped = ln.strip()
             if stripped.startswith(("//", "#", "/*", "*")):
                 continue
             if ext in {".js", ".ts", ".jsx", ".tsx"}:
-                if re.search(r"\beval\s*\(", stripped):
+                if re.search(r"\beval\s*\(", stripped) or re.search(r"""\[\s*['"]ev['"]\s*\+\s*['"]al['"]\s*\]""", stripped):
                     non_py_findings.append("js_eval_call")
                 if re.search(r"\bnew\s+Function\s*\(|\bchild_process\b|\bexecSync\s*\(|\bspawnSync\s*\(", stripped):
                     non_py_findings.append("js_dangerous_sink")
@@ -1098,10 +1265,19 @@ def analyze_code_diff(
             visitor.decoded_vars.update(seed_visitor.decoded_vars)
         visitor.visit(tree)
         hunk_findings.extend(visitor.findings)
+        if visitor.has_network_sink and (
+            visitor.has_env_secret_read or any("ast_protected_file_access" in f for f in visitor.findings)
+        ):
+            hunk_findings.append("ast_secret_exfil_pattern")
 
     if patched_tree is not None:
         patched_visitor = _SecurityASTVisitor()
         patched_visitor.visit(patched_tree)
+        if patched_visitor.has_network_sink and (
+            patched_visitor.has_env_secret_read
+            or any("ast_protected_file_access" in f for f in patched_visitor.findings)
+        ):
+            patched_visitor.findings.append("ast_secret_exfil_pattern")
         baseline_counts = Counter(seed_visitor.findings) if seed_visitor is not None else Counter()
         delta_counts = Counter(patched_visitor.findings) - baseline_counts
         for finding, cnt in delta_counts.items():
@@ -1195,7 +1371,7 @@ SAFE_SHELL_COMMANDS: Set[str] = {
 SAFE_GIT_SUBCOMMANDS: Set[str] = {"status", "log", "diff", "branch", "show", "rev-parse", "describe"}
 
 _SHELL_WRAPPER_COMMANDS: Set[str] = {
-    "env", "command", "nohup", "nice", "timeout", "time", "sudo", "doas", "exec", "strace",
+    "env", "command", "nohup", "nice", "timeout", "time", "sudo", "doas", "exec", "strace", "xargs",
 }
 _DANGEROUS_ENV_OVERRIDES: Set[str] = {
     "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
@@ -1606,6 +1782,19 @@ def _unwrap_shell_prefix(tokens: List[str]) -> Tuple[List[str], List[str], List[
                     idx += 1
                     continue
                 break
+        elif exe == "xargs":
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-I", "-J", "-L", "-n", "-P", "-d", "-s", "-E", "-a", "--max-args", "--max-procs", "--replace", "--delimiter"}:
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                break
         elif exe == "strace":
             while idx < n:
                 tok = tokens[idx]
@@ -1661,6 +1850,18 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         }
 
     cmd = str(cmd_str).strip()
+    if "\x00" in cmd:
+        return {
+            "is_safe": False,
+            "allowlisted": False,
+            "unrecognized_commands": [],
+            "findings": ["null_byte_in_shell_command"],
+            "commands": [],
+            "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+            "protected_path_reads": [],
+            "sensitive_env_access": False,
+            "sensitive_env_vars": [],
+        }
     lower_cmd = cmd.lower()
 
     # Check raw SQL destructive commands passed directly
@@ -1698,32 +1899,33 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         else:
             unprivileged_redirects.append(r_target)
 
-    # First inspect pipe sequences for download-and-execute (`curl ... | sh`), unwrapping prefixes
-    if "|" in cmd and "||" not in cmd:
-        pipe_cmds: List[str] = []
-        for p in cmd.split("|"):
-            ptoks = _tokenize_shell_segment(p)
-            prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
-            eff = prem or ptoks
-            if eff:
-                pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
-        if any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(
-            c in ("sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3")
-            for c in pipe_cmds[1:]
-        ):
-            return {
-                "is_safe": False,
-                "allowlisted": False,
-                "unrecognized_commands": pipe_cmds,
-                "findings": ["remote_code_execution_pipe"],
-                "commands": pipe_cmds,
-                "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
-                "protected_path_reads": [],
-                "sensitive_env_access": False,
-                "sensitive_env_vars": [],
-            }
+    # First inspect pipe sequences per line for download-and-execute (`curl ... | sh`), unwrapping prefixes
+    for line_seg in re.split(r"\r?\n", cmd):
+        if "|" in line_seg and "||" not in line_seg:
+            pipe_cmds: List[str] = []
+            for p in line_seg.split("|"):
+                ptoks = _tokenize_shell_segment(p)
+                prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+                eff = prem or ptoks
+                if eff:
+                    pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
+            if any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(
+                c in ("sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3")
+                for c in pipe_cmds[1:]
+            ):
+                return {
+                    "is_safe": False,
+                    "allowlisted": False,
+                    "unrecognized_commands": pipe_cmds,
+                    "findings": ["remote_code_execution_pipe"],
+                    "commands": pipe_cmds,
+                    "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+                    "protected_path_reads": [],
+                    "sensitive_env_access": False,
+                    "sensitive_env_vars": [],
+                }
 
-    subcommands = re.split(r"(?:&&|\|\||;|\|)", cmd)
+    subcommands = re.split(r"(?:&&|\|\||;|\||\r?\n)", cmd)
     parsed_cmds: List[str] = []
     unrecognized: List[str] = []
     protected_path_reads: List[str] = []
@@ -1856,6 +2058,24 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             has_root_or_rec = any(a in {"/", "/*", "-r", "--recursive"} for a in args_lower)
             if has_777 and has_root_or_rec:
                 findings.append("dangerous_chmod_777")
+
+        elif exe == "find":
+            for idx_arg, a_low in enumerate(args_lower):
+                if a_low in {"-exec", "-execdir", "-ok", "-okdir"}:
+                    exec_tokens: List[str] = []
+                    for tok in args[idx_arg + 1 :]:
+                        if tok in {";", "+", "\\;"}:
+                            break
+                        if tok != "{}":
+                            exec_tokens.append(tok)
+                    if exec_tokens:
+                        inner_res = analyze_shell_command(" ".join(exec_tokens), policy=policy)
+                        if not inner_res["is_safe"]:
+                            findings.extend(inner_res["findings"])
+                        protected_path_reads.extend(inner_res.get("protected_path_reads", []))
+                        sensitive_env_vars.extend(inner_res.get("sensitive_env_vars", []))
+                        if inner_res.get("sensitive_env_access"):
+                            sensitive_env_access = True
 
         elif exe in {"sh", "bash", "zsh", "dash"}:
             for idx_arg, a in enumerate(args_lower):
@@ -2129,7 +2349,44 @@ def decide(
         if l0["decision"] == "escalate":
             return _finish("escalate", "requires_confirmation", ["escalate", "deny"], l0["reason_code"], 0)
 
+        # Optional cross-turn SessionSecurityState taint guard
+        sess_obj = ctx.get("session_state")
+        sess_path = ctx.get("session_state_path")
+        if sess_obj is not None or sess_path:
+            from .mcp_security import SessionSecurityState
+
+            sess = sess_obj if isinstance(sess_obj, SessionSecurityState) else SessionSecurityState(Path(str(sess_path)))
+            is_egress_or_mutation = (
+                clean_tool
+                in {
+                    "execute_shell",
+                    "run_command",
+                    "write_file",
+                    "repo_write",
+                    "edit_file",
+                    "str_replace_editor",
+                    "apply_patch",
+                    "delete_file",
+                    "web_fetch",
+                    "http_request",
+                    "git_push",
+                    "git_commit",
+                }
+                or cmd_str is not None
+                or diff_text is not None
+                or any(k in clean_tool for k in ("fetch", "post", "http", "curl", "upload", "send", "exec", "shell", "write", "edit", "mcp"))
+            )
+            taint_res = sess.evaluate_taint_gate(clean_tool, is_egress_or_mutation=is_egress_or_mutation)
+            if taint_res["decision"] == "deny":
+                return _finish("deny", taint_res["label"], ["deny"], taint_res["reason_code"], 0)
+            if taint_res["decision"] == "escalate":
+                return _finish("escalate", taint_res["label"], ["escalate", "deny"], taint_res["reason_code"], 0)
+            sess.record_pre_tool(clean_tool, str(target_path or ""), is_protected_path(target_path, cfg))
+
         # --- Layer 1: Structural AST, Secret Egress & Allowlist-First Shell Parsers ---
+        if any(isinstance(val, str) and "\x00" in val for val in (target_path, cmd_str, diff_text, query_text)):
+            return _finish("deny", "null_byte_in_input", ["deny"], "layer1_null_byte_veto", 1)
+
         egress_secret_types = _scan_outbound_secret_egress(
             input_data,
             cmd_str=cmd_str,

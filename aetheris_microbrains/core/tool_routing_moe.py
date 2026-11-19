@@ -62,6 +62,198 @@ class MoERoutingDecision:
         }
 
 
+class ToolSchemaIndex:
+    """BM25 + char-3-gram + optional dense embed_fn hybrid retriever over arbitrary MCP tool schemas."""
+
+    def __init__(
+        self,
+        tool_schemas: Sequence[Dict[str, Any]],
+        embed_fn: Optional[Any] = None,
+        k1: float = 1.5,
+        b: float = 0.75,
+        k_rrf: int = 60,
+    ):
+        self.k1 = float(k1)
+        self.b = float(b)
+        self.k_rrf = int(k_rrf)
+        self.embed_fn = embed_fn
+        self.tool_schemas: List[Dict[str, Any]] = list(tool_schemas)
+        self.tools: List[str] = []
+        self.doc_texts: List[str] = []
+        self.doc_tokens: List[List[str]] = []
+        self.doc_lengths: List[int] = []
+        self.doc_freqs: Dict[str, int] = {}
+        self.trigram_vectors: List[Dict[str, float]] = []
+        self.dense_vectors: Optional[List[np.ndarray]] = None
+
+        self._build_index()
+
+    @staticmethod
+    def _stem(token: str) -> str:
+        t = token.lower()
+        if len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
+            return t[:-1]
+        if len(t) > 4 and t.endswith("ing"):
+            return t[:-3]
+        if len(t) > 3 and t.endswith("ed"):
+            return t[:-2]
+        return t
+
+    def _extract_doc_text(self, schema: Dict[str, Any]) -> str:
+        parts: List[str] = []
+        name = str(schema.get("name", ""))
+        parts.append(name)
+        name_words = re.findall(r"[A-Za-z0-9]+", name)
+        parts.extend(name_words)
+
+        desc = str(schema.get("description", ""))
+        if desc:
+            parts.append(desc)
+
+        params = schema.get("parameters") or schema.get("inputSchema") or {}
+        if isinstance(params, dict):
+            props = params.get("properties") or {}
+            if isinstance(props, dict):
+                for p_name, p_val in props.items():
+                    parts.append(p_name)
+                    if isinstance(p_val, dict):
+                        p_desc = p_val.get("description")
+                        if p_desc:
+                            parts.append(str(p_desc))
+                        p_type = p_val.get("type")
+                        if p_type:
+                            parts.append(str(p_type))
+        return " ".join(parts).lower()
+
+    def _build_index(self) -> None:
+        N = len(self.tool_schemas)
+        for schema in self.tool_schemas:
+            name = str(schema.get("name", ""))
+            self.tools.append(name)
+            doc_text = self._extract_doc_text(schema)
+            self.doc_texts.append(doc_text)
+            raw_tokens = [w for w in re.findall(r"(?u)\b\w+\b", doc_text) if len(w) > 1]
+            tokens = [self._stem(w) for w in raw_tokens] + raw_tokens
+            self.doc_tokens.append(tokens)
+            self.doc_lengths.append(len(tokens))
+
+            tri_counts: Dict[str, float] = {}
+            for i in range(len(doc_text) - 2):
+                tri = doc_text[i : i + 3]
+                tri_counts[tri] = tri_counts.get(tri, 0.0) + 1.0
+            norm = math.sqrt(sum(v * v for v in tri_counts.values())) + 1e-12
+            self.trigram_vectors.append({k: v / norm for k, v in tri_counts.items()})
+
+            seen = set(tokens)
+            for t in seen:
+                self.doc_freqs[t] = self.doc_freqs.get(t, 0) + 1
+
+        self.avgdl = (sum(self.doc_lengths) / max(1, N)) if N > 0 else 1.0
+
+        if self.embed_fn is not None and callable(self.embed_fn):
+            self.dense_vectors = []
+            for dt in self.doc_texts:
+                vec = np.asarray(self.embed_fn(dt), dtype=np.float32)
+                vec = vec / (np.linalg.norm(vec) + 1e-12)
+                self.dense_vectors.append(vec)
+
+    def get_namespace_clusters(self) -> Dict[str, List[str]]:
+        clusters: Dict[str, List[str]] = {}
+        for name in self.tools:
+            parts = re.split(r"[_:.-]", name)
+            ns = parts[0] if len(parts) > 1 and parts[0] else "general"
+            clusters.setdefault(ns, []).append(name)
+        for ns in clusters:
+            clusters[ns].sort()
+        return clusters
+
+    def _score_bm25(self, query_tokens: List[str]) -> List[float]:
+        N = len(self.tools)
+        scores = [0.0] * N
+        if N == 0 or not query_tokens:
+            return scores
+        stemmed_q = [self._stem(t) for t in query_tokens] + query_tokens
+        for t in stemmed_q:
+            df = self.doc_freqs.get(t, 0)
+            idf = math.log((N - df + 0.5) / (df + 0.5) + 1.0)
+            if idf <= 0:
+                idf = 1e-4
+            for i in range(N):
+                tf = self.doc_tokens[i].count(t)
+                if tf > 0:
+                    denom = tf + self.k1 * (1.0 - self.b + self.b * (self.doc_lengths[i] / max(1e-9, self.avgdl)))
+                    scores[i] += idf * (tf * (self.k1 + 1.0)) / max(1e-9, denom)
+        return scores
+
+    def _score_trigram(self, query_text: str) -> List[float]:
+        N = len(self.tools)
+        scores = [0.0] * N
+        q = query_text.lower()
+        if N == 0 or len(q) < 3:
+            return scores
+        q_tri: Dict[str, float] = {}
+        for i in range(len(q) - 2):
+            tri = q[i : i + 3]
+            q_tri[tri] = q_tri.get(tri, 0.0) + 1.0
+        norm = math.sqrt(sum(v * v for v in q_tri.values())) + 1e-12
+        q_tri = {k: v / norm for k, v in q_tri.items()}
+
+        for i in range(N):
+            doc_tri = self.trigram_vectors[i]
+            scores[i] = sum(q_tri[tri] * doc_tri.get(tri, 0.0) for tri in q_tri)
+        return scores
+
+    def _score_dense(self, query_text: str) -> Optional[List[float]]:
+        if self.dense_vectors is None or not self.embed_fn:
+            return None
+        q_vec = np.asarray(self.embed_fn(query_text), dtype=np.float32)
+        q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-12)
+        return [float(np.dot(q_vec, d_vec)) for d_vec in self.dense_vectors]
+
+    def query(self, query_str: str, top_k: Optional[int] = None) -> List[Tuple[str, float]]:
+        N = len(self.tools)
+        if N == 0:
+            return []
+        q_tokens = [w for w in re.findall(r"(?u)\b\w+\b", query_str.lower()) if len(w) > 1]
+        bm25_scores = self._score_bm25(q_tokens)
+        tri_scores = self._score_trigram(query_str)
+        dense_scores = self._score_dense(query_str)
+
+        bm25_ranked = sorted(range(N), key=lambda i: -bm25_scores[i])
+        tri_ranked = sorted(range(N), key=lambda i: -tri_scores[i])
+
+        rrf_scores = [0.0] * N
+        for rank_idx, doc_i in enumerate(bm25_ranked):
+            if bm25_scores[doc_i] > 0:
+                rrf_scores[doc_i] += 1.0 / (self.k_rrf + rank_idx + 1)
+        for rank_idx, doc_i in enumerate(tri_ranked):
+            if tri_scores[doc_i] > 0:
+                rrf_scores[doc_i] += 1.0 / (self.k_rrf + rank_idx + 1)
+
+        if dense_scores is not None:
+            dense_ranked = sorted(range(N), key=lambda i: -dense_scores[i])
+            for rank_idx, doc_i in enumerate(dense_ranked):
+                if dense_scores[doc_i] > 0:
+                    rrf_scores[doc_i] += 1.0 / (self.k_rrf + rank_idx + 1)
+
+        ranked = sorted(
+            ((self.tools[i], rrf_scores[i]) for i in range(N)),
+            key=lambda x: (-x[1], x[0]),
+        )
+        if top_k is not None:
+            ranked = ranked[: max(1, int(top_k))]
+        return ranked
+
+    def score_tools(self, query_str: str) -> Dict[str, float]:
+        ranked = self.query(query_str)
+        if not ranked:
+            return {}
+        max_s = max(s for _, s in ranked)
+        if max_s <= 0:
+            return {name: 0.0 for name, _ in ranked}
+        return {name: round(s / max_s, 4) for name, s in ranked}
+
+
 class ToolRoutingMoE:
     """Mixture of Experts Router for Autonomous Tools."""
 
@@ -236,7 +428,7 @@ class ToolRoutingMoE:
 
         field_certified = bool(
             self.verified_episodes > 0
-            and self.calibration_basis in ("measured_holdout", "recalibrated_journal")
+            and self.calibration_basis in ("measured_holdout", "recalibrated_journal", "online_crc_feedback")
         )
 
         rep: Dict[str, Any] = {
@@ -258,6 +450,47 @@ class ToolRoutingMoE:
         if self.last_topk_eval_report is not None:
             rep["topk_evaluation"] = dict(self.last_topk_eval_report)
         return rep
+
+    def update_online_crc(
+        self,
+        expert_name: str,
+        nonconformity_score: float,
+        was_error: bool,
+        alpha: float = 0.05,
+        gamma: float = 0.02,
+    ) -> Dict[str, Any]:
+        """Adaptive Conformal Inference (ACI) quantile update for online feedback.
+
+        Implements:
+            q_new = clip(q_old + gamma * (alpha - int(was_error)), 0.05, 0.90)
+        Once >= 10 live updates have occurred, switches calibration_basis to
+        'online_crc_feedback'.
+        """
+        if expert_name not in self.per_expert_quantiles:
+            self.per_expert_quantiles[expert_name] = 0.50
+        q_old = self.per_expert_quantiles[expert_name]
+        err_indicator = 1.0 if was_error else 0.0
+        q_new = float(np.clip(q_old + gamma * (alpha - err_indicator), 0.05, 0.90))
+        self.per_expert_quantiles[expert_name] = q_new
+
+        if not hasattr(self, "_online_crc_updates"):
+            self._online_crc_updates = 0
+        self._online_crc_updates += 1
+        self.verified_episodes += 1
+        if was_error:
+            self.verified_errors += 1
+
+        if self._online_crc_updates >= 10:
+            self.calibration_basis = "online_crc_feedback"
+
+        return {
+            "expert": expert_name,
+            "q_old": round(q_old, 4),
+            "q_new": round(q_new, 4),
+            "was_error": bool(was_error),
+            "update_count": self._online_crc_updates,
+            "calibration_basis": self.calibration_basis,
+        }
 
     def _fit_ridge_gate(self, l2_reg: float = 0.25) -> np.ndarray:
         """Fit gating projection W_gate analytically via L2-regularized ridge regression."""
@@ -706,6 +939,7 @@ class ToolRoutingMoE:
         context_tags: Optional[List[str]] = None,
         tool_descriptions: Optional[Dict[str, str]] = None,
         embed_fn: Optional[Any] = None,
+        tool_schemas: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """MCP-Zero style hierarchical Top-K tool surface narrowing before LLM invocation.
 
@@ -714,22 +948,39 @@ class ToolRoutingMoE:
         semantic `tool_descriptions` and dense `embed_fn` hybrid re-ranking.
         """
         k = max(1, int(top_k))
+        if available_tools is None and tool_schemas is not None:
+            available_tools = [str(s["name"]) for s in tool_schemas if isinstance(s, dict) and "name" in s]
+
         all_catalog = (
             list(dict.fromkeys(str(t) for t in available_tools if t))
             if available_tools is not None
             else [t for tools in self.EXPERT_TOOLS.values() for t in tools]
         )
+
+        schema_scores: Dict[str, float] = {}
+        if tool_schemas:
+            s_idx = ToolSchemaIndex(tool_schemas, embed_fn=embed_fn)
+            schema_scores = s_idx.score_tools(task_description)
+
         decision = self.route(task_description, context_tags=context_tags, available_tools=all_catalog if available_tools is not None else None)
         if not decision.conformal_passed:
-            if embed_fn is not None and all_catalog:
-                sem = self._semantic_description_scores(
-                    task_description,
-                    all_catalog,
-                    tool_descriptions=tool_descriptions,
-                    embed_fn=embed_fn,
+            if (embed_fn is not None or tool_schemas) and all_catalog:
+                sem = (
+                    self._semantic_description_scores(
+                        task_description,
+                        all_catalog,
+                        tool_descriptions=tool_descriptions,
+                        embed_fn=embed_fn,
+                    )
+                    if (tool_descriptions or embed_fn is not None)
+                    else {}
                 )
-                if sem and max(sem.values()) >= 0.70:
-                    ranked_sem = sorted(sem.items(), key=lambda x: -x[1])
+                combined_nonconformal = {
+                    name: sem.get(name, 0.0) + schema_scores.get(name, 0.0)
+                    for name in all_catalog
+                }
+                if combined_nonconformal and max(combined_nonconformal.values()) >= 0.70:
+                    ranked_sem = sorted(combined_nonconformal.items(), key=lambda x: -x[1])
                     narrowed_sem = [name for name, _ in ranked_sem[:k]]
                     reduction = round(1.0 - (len(narrowed_sem) / max(1, len(all_catalog))), 4)
                     return {
@@ -737,7 +988,7 @@ class ToolRoutingMoE:
                         "candidate_tools": narrowed_sem,
                         "selected_tool": narrowed_sem[0],
                         "conformal_passed": False,
-                        "confidence": round(max(sem.values()), 4),
+                        "confidence": round(max(combined_nonconformal.values()), 4),
                         "reduction_ratio": max(0.0, reduction),
                         "semantic_hybrid": True,
                     }
@@ -756,15 +1007,27 @@ class ToolRoutingMoE:
 
         top_expert = decision.top_experts[0][0]
         ranked = self._score_candidate_tools(all_catalog, tokens, expert=top_expert)
-        if tool_descriptions or embed_fn is not None:
-            sem = self._semantic_description_scores(
-                task_description,
-                all_catalog,
-                tool_descriptions=tool_descriptions,
-                embed_fn=embed_fn,
+        if tool_descriptions or embed_fn is not None or tool_schemas:
+            sem = (
+                self._semantic_description_scores(
+                    task_description,
+                    all_catalog,
+                    tool_descriptions=tool_descriptions,
+                    embed_fn=embed_fn,
+                )
+                if (tool_descriptions or embed_fn is not None)
+                else {}
             )
             ranked = sorted(
-                ((name, score + 3.0 * sem.get(name, 0.0)) for name, score in ranked),
+                (
+                    (
+                        name,
+                        score
+                        + 3.0 * sem.get(name, 0.0)
+                        + 3.0 * schema_scores.get(name, 0.0),
+                    )
+                    for name, score in ranked
+                ),
                 key=lambda x: -x[1],
             )
             narrowed: List[str] = []
@@ -787,7 +1050,7 @@ class ToolRoutingMoE:
             "conformal_passed": True,
             "confidence": round(decision.confidence, 4),
             "reduction_ratio": max(0.0, reduction),
-            "semantic_hybrid": bool(tool_descriptions or embed_fn is not None),
+            "semantic_hybrid": bool(tool_descriptions or embed_fn is not None or tool_schemas),
         }
 
     def rank_tools(
@@ -798,8 +1061,12 @@ class ToolRoutingMoE:
         context_tags: Optional[List[str]] = None,
         tool_descriptions: Optional[Dict[str, str]] = None,
         embed_fn: Optional[Any] = None,
+        tool_schemas: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Advisory non-mutating tool ranker (never removes tools or authorizes execution)."""
+        if available_tools is None and tool_schemas is not None:
+            available_tools = [str(s["name"]) for s in tool_schemas if isinstance(s, dict) and "name" in s]
+
         all_catalog = (
             list(dict.fromkeys(str(t) for t in available_tools if t))
             if available_tools is not None
@@ -825,8 +1092,24 @@ class ToolRoutingMoE:
             if (tool_descriptions or embed_fn is not None)
             else {}
         )
+        schema_scores: Dict[str, float] = {}
+        if tool_schemas:
+            s_idx = ToolSchemaIndex(tool_schemas, embed_fn=embed_fn)
+            schema_scores = s_idx.score_tools(task_description)
+
         combined = sorted(
-            ((name, round(float(score) + 3.0 * float(sem_scores.get(name, 0.0)), 4)) for name, score in lexical_ranked),
+            (
+                (
+                    name,
+                    round(
+                        float(score)
+                        + 3.0 * float(sem_scores.get(name, 0.0))
+                        + 3.0 * float(schema_scores.get(name, 0.0)),
+                        4,
+                    ),
+                )
+                for name, score in lexical_ranked
+            ),
             key=lambda kv: (-kv[1], kv[0]),
         )
         ranked_tools = [
@@ -840,6 +1123,7 @@ class ToolRoutingMoE:
             context_tags=context_tags,
             tool_descriptions=tool_descriptions,
             embed_fn=embed_fn,
+            tool_schemas=tool_schemas,
         )
         return {
             "ranked_tools": ranked_tools,
@@ -985,17 +1269,46 @@ class SessionToolSurface:
         tool_descriptions: Optional[Dict[str, str]] = None,
         embed_fn: Optional[Any] = None,
         moe: Optional[ToolRoutingMoE] = None,
+        cluster_pinning: bool = False,
+        tool_schemas: Optional[Sequence[Dict[str, Any]]] = None,
     ):
         self.full_catalog: List[str] = list(dict.fromkeys(str(t) for t in available_tools if t))
         self.top_k: int = max(1, int(top_k))
         self.tool_descriptions: Optional[Dict[str, str]] = tool_descriptions
         self.embed_fn: Optional[Any] = embed_fn
         self.moe: ToolRoutingMoE = moe or get_tool_routing_moe()
+        self.cluster_pinning: bool = bool(cluster_pinning)
+        self.tool_schemas: Optional[Sequence[Dict[str, Any]]] = tool_schemas
         self.active_tools: Optional[List[str]] = None
         self.expanded_to_full: bool = False
         self.turns: int = 0
         self.cache_hits: int = 0
         self.cache_invalidations: int = 0
+
+        if self.cluster_pinning:
+            self._pin_initial_clusters()
+
+    def _pin_initial_clusters(self) -> None:
+        """Groups tools by namespace prefix (e.g. git_*, docker_*) and selects whole coherent clusters."""
+        clusters: Dict[str, List[str]] = {}
+        for t in self.full_catalog:
+            parts = re.split(r"[_:.-]", str(t))
+            ns = parts[0] if len(parts) > 1 and parts[0] else str(t)
+            clusters.setdefault(ns, []).append(str(t))
+
+        for ns in clusters:
+            clusters[ns].sort()
+
+        pinned: List[str] = []
+        for ns in sorted(clusters.keys()):
+            group = clusters[ns]
+            for tool_name in group:
+                if tool_name not in pinned:
+                    pinned.append(tool_name)
+            if len(pinned) >= self.top_k:
+                break
+
+        self.active_tools = pinned if pinned else list(self.full_catalog[: self.top_k])
 
     def select_for_turn(
         self,
@@ -1022,8 +1335,21 @@ class SessionToolSurface:
             context_tags=context_tags,
             tool_descriptions=self.tool_descriptions,
             embed_fn=self.embed_fn,
+            tool_schemas=self.tool_schemas,
         )
         new_cands = list(nar["candidate_tools"])
+        if self.cluster_pinning and new_cands:
+            expanded_cands: List[str] = []
+            for t in new_cands:
+                parts = re.split(r"[_:.-]", str(t))
+                ns = parts[0] if len(parts) > 1 and parts[0] else str(t)
+                for cat_tool in self.full_catalog:
+                    cat_parts = re.split(r"[_:.-]", str(cat_tool))
+                    cat_ns = cat_parts[0] if len(cat_parts) > 1 and cat_parts[0] else str(cat_tool)
+                    if cat_ns == ns and cat_tool not in expanded_cands:
+                        expanded_cands.append(cat_tool)
+            new_cands = expanded_cands
+
         self.active_tools = new_cands
         self.expanded_to_full = len(new_cands) >= len(self.full_catalog)
         if prev is not None and new_cands != prev:
@@ -1073,6 +1399,7 @@ def rank_tools(
     context_tags: Optional[List[str]] = None,
     tool_descriptions: Optional[Dict[str, str]] = None,
     embed_fn: Optional[Any] = None,
+    tool_schemas: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Convenience entrypoint for non-mutating advisory tool ranking."""
     return get_tool_routing_moe().rank_tools(
@@ -1082,6 +1409,7 @@ def rank_tools(
         context_tags=context_tags,
         tool_descriptions=tool_descriptions,
         embed_fn=embed_fn,
+        tool_schemas=tool_schemas,
     )
 
 
@@ -1092,6 +1420,7 @@ def narrow_tool_surface(
     context_tags: Optional[List[str]] = None,
     tool_descriptions: Optional[Dict[str, str]] = None,
     embed_fn: Optional[Any] = None,
+    tool_schemas: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Convenience entrypoint for MCP-Zero Top-K tool catalog narrowing."""
     return get_tool_routing_moe().narrow_tool_surface(
@@ -1101,4 +1430,5 @@ def narrow_tool_surface(
         context_tags=context_tags,
         tool_descriptions=tool_descriptions,
         embed_fn=embed_fn,
+        tool_schemas=tool_schemas,
     )

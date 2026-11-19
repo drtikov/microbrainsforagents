@@ -30,11 +30,7 @@ class AgentSpeculativeDrafter:
 
     def __init__(self):
         self.nursery = AutonomousBrainNursery.get_instance()
-        self.draft_brain = self.nursery.grow_brain_for_domain(
-            "speculative_tool_drafter",
-            d_model=64,
-            n_heads=2,
-        )
+        self.draft_brain = self.nursery._get_or_load_or_grow("speculative_tool_drafter")
         self.custom_param_templates: Dict[str, Dict[str, Any]] = {}
         self._seed_common_agent_patterns()
 
@@ -47,16 +43,14 @@ class AgentSpeculativeDrafter:
     def _seed_common_agent_patterns(self):
         """Compiles common agent tool call skeletons into analytical weights."""
         patterns = {
-            "query_atmosphere": "bear_bern_atmospheric_retrieval",
-            "format_markdown": "markdown_table_parser",
+            "read_source_file": "repo_read",
+            "run_unit_tests": "run_tests",
+            "git_diff_status": "git_diff",
             "audit_matrix": "wsp_tensor_surgeon",
-            "measure_distance": "levenshtein_distance",
             "grow_neural_network": "neuro_brain_incubator",
         }
         for trigger, tool in patterns.items():
             self.draft_brain.compile_logic_association(trigger, tool, binding_gain=5.0)
-        from . import brain_nursery as nursery_mod
-        self.draft_brain.save(nursery_mod.STORE_DIR)
 
     def register_speculative_pattern(
         self,
@@ -69,8 +63,6 @@ class AgentSpeculativeDrafter:
         self.draft_brain.compile_logic_association(clean_trigger, tool_name, binding_gain=5.0)
         if default_params is not None:
             self.custom_param_templates[tool_name] = dict(default_params)
-        from . import brain_nursery as nursery_mod
-        self.draft_brain.save(nursery_mod.STORE_DIR)
         return {"status": "registered", "trigger": clean_trigger, "tool": tool_name}
 
     def _extract_intent_tokens(self, intention_keyword: str) -> List[str]:
@@ -115,12 +107,6 @@ class AgentSpeculativeDrafter:
         # Synthesize draft parameter payload tailored to the predicted tool
         if predicted_tool in self.custom_param_templates:
             draft_params = {**self.custom_param_templates[predicted_tool], **hints}
-        elif "bear_bern" in predicted_tool:
-            draft_params = {
-                "target_name": hints.get("target_name", "WASP-39b"),
-                "observed_spectrum": hints.get("spectrum", [{"wavenumber": 2.5, "flux": 1.0}]),
-                "resolution_mode": "joint_retrieval",
-            }
         elif "wsp_tensor" in predicted_tool:
             draft_params = {
                 "action": hints.get("action", "audit_safety"),

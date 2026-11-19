@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-STORE_DIR = Path("memory/store")
+STORE_DIR = Path(__file__).resolve().parents[1] / "memory" / "store"
 HEBBIAN_WEIGHTS_FILE = STORE_DIR / "wsp_hebbian_traces.npz"
 HEBBIAN_METADATA_FILE = STORE_DIR / "wsp_hebbian_meta.json"
 

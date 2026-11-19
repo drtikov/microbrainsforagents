@@ -24,11 +24,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from .brain_nursery import AutonomousBrainNursery, STORE_DIR
-from .brain_merger import NeuroBrainMerger
+from ..core.brain_nursery import AutonomousBrainNursery, STORE_DIR
+from ..core.brain_merger import NeuroBrainMerger
 
 logger = logging.getLogger(__name__)
-STRATEGY_BANK_FILE = Path("memory/store/strategy_bank.jsonl")
+STRATEGY_BANK_FILE = Path(__file__).resolve().parents[1] / "memory" / "store" / "strategy_bank.jsonl"
 
 
 class AutonomousSleepDreamingEngine:
@@ -73,7 +73,7 @@ class AutonomousSleepDreamingEngine:
 
         if records_to_distill:
             try:
-                from .weight_space_memory_synthesis import WeightSpaceMemorySynthesizer
+                from ..core.weight_space_memory_synthesis import WeightSpaceMemorySynthesizer
                 WeightSpaceMemorySynthesizer.get_instance().distill_journal_records(records_to_distill)
             except Exception as exc:
                 logger.debug("Weight-space distillation skipped: %s", exc)
@@ -115,7 +115,7 @@ class AutonomousSleepDreamingEngine:
                 off_diag_grad = np.matmul(w_centered, c_off) / float(max(1, d_feat))
                 brain.W_mlp = (w_mlp - 0.01 * off_diag_grad).astype(np.float32)
 
-            brain.save()
+            brain.save(STORE_DIR)
             smoothed_brains.append(brain.name)
 
         # Saturation sweep: spectral fission when a brain degenerates
@@ -123,7 +123,7 @@ class AutonomousSleepDreamingEngine:
         fission_checked = 0
         fission_events = []
         try:
-            from .brain_cellular_fission import BrainCellularFissionEngine
+            from ..core.brain_cellular_fission import BrainCellularFissionEngine
             fission = BrainCellularFissionEngine.get_instance()
             for brain_name in list(self.nursery.active_brains.keys()):
                 domain = brain_name

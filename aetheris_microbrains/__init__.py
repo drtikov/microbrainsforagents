@@ -35,6 +35,11 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "record_decision_journal": (".core.layered_decision_engine", "record_decision_journal"),
     "redact_secrets": (".core.layered_decision_engine", "redact_secrets"),
     "scrub_tool_output": (".core.layered_decision_engine", "scrub_tool_output"),
+    # MCP security (Wave 3)
+    "detect_prompt_injection": (".core.mcp_security", "detect_prompt_injection"),
+    "scan_mcp_tools": (".core.mcp_security", "scan_mcp_tools"),
+    "MCPManifestPinner": (".core.mcp_security", "MCPManifestPinner"),
+    "SessionSecurityState": (".core.mcp_security", "SessionSecurityState"),
     # OpenCL & Core microbrains
     "OpenCLMicroBrainAccelerator": (".core.opencl_microbrain_accelerator", "OpenCLMicroBrainAccelerator"),
     "get_opencl_accelerator": (".core.opencl_microbrain_accelerator", "get_opencl_accelerator"),
@@ -85,6 +90,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "get_tool_routing_moe": (".core.tool_routing_moe", "get_tool_routing_moe"),
     "narrow_tool_surface": (".core.tool_routing_moe", "narrow_tool_surface"),
     "rank_tools": (".core.tool_routing_moe", "rank_tools"),
+    "ToolSchemaIndex": (".core.tool_routing_moe", "ToolSchemaIndex"),
     "CriticalEnsemble": (".core.critical_ensemble_abstention", "CriticalEnsemble"),
     "CriticalConsensusResult": (".core.critical_ensemble_abstention", "CriticalConsensusResult"),
     "EnsembleVote": (".core.critical_ensemble_abstention", "EnsembleVote"),

@@ -177,7 +177,7 @@ class NCAWeightSelfRepairEngine:
                     # Weight channel update conditioned on latent coordinates
                     update = 0.40 * lap + 0.15 * (curr[:, :, 1] * gx + curr[:, :, 2] * gy)
                     # Deterministic firing on damaged zones during masked inpainting; stochastic elsewhere
-                    stochastic_mask = (np.random.rand(h, w) < 0.85).astype(np.float64)
+                    stochastic_mask = (np.random.default_rng(1337).random((h, w)) < 0.85).astype(np.float64)
                     if has_clamp:
                         stochastic_mask[clamp_mask] = 1.0
                     updated_w = np.clip(curr[:, :, ch] + update * stochastic_mask, -2.0, 2.0)

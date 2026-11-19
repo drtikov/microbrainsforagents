@@ -150,13 +150,6 @@ class ConcentricSpiralDAG:
 
         # Loop 3: Sovereign Core & Synthesis
         self.register_node(SpiralNode(
-            name="ramanujan_analogy_node",
-            loop_index=3,
-            clock_interval=30,
-            dependencies=[],
-            action=self._action_ramanujan_analogy
-        ))
-        self.register_node(SpiralNode(
             name="nca_weight_healing_node",
             loop_index=3,
             clock_interval=30,
@@ -318,7 +311,7 @@ class ConcentricSpiralDAG:
         return {"voc_mode": dec.mode, "voc_score": dec.voc_score}
 
     def _action_cbf_barrier(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .cbf_spectral_barrier import CBFSpectralBarrierEngine
+        from ..core.cbf_spectral_barrier import CBFSpectralBarrierEngine
         cbf = CBFSpectralBarrierEngine.get_instance()
         # cbf_active is an instantiation flag, not a measurement: True whenever
         # the engine singleton constructs, regardless of whether any barrier
@@ -330,7 +323,7 @@ class ConcentricSpiralDAG:
         }
 
     def _action_autotelic_scanner(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .autotelic_void_explorer import AutotelicVoidExplorer
+        from ..core.autotelic_void_explorer import AutotelicVoidExplorer
         explorer = AutotelicVoidExplorer.get_instance()
         voids = explorer.scan_microbrain_population()
         return {"topological_voids_detected": len(voids)}
@@ -399,22 +392,13 @@ class ConcentricSpiralDAG:
             "spectral_is_connected": res.is_connected,
         }
 
-    def _action_ramanujan_analogy(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .ramanujan_mma import RamanujanMMACoprocessor
-        mma = RamanujanMMACoprocessor.get_instance()
-        conj = mma.formulate_conjecture("spectral_laplacian", "hydro_cortex_fluid")
-        return {
-            "latest_conjecture_name": conj.name,
-            "latest_conjecture_formula": conj.formula,
-        }
-
     def _action_mone_memory(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .mone_fast_weight_memory import MoNeFastWeightMemory
+        from ..core.mone_fast_weight_memory import MoNeFastWeightMemory
         mone = MoNeFastWeightMemory.get_instance()
         return mone.get_status()
 
     def _action_vsa_attention(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .vsa_algebraic_attention import VSAAlgebraicAttentionEngine
+        from ..core.vsa_algebraic_attention import VSAAlgebraicAttentionEngine
         vsa = VSAAlgebraicAttentionEngine.get_instance()
         return vsa.get_status()
 
@@ -429,7 +413,7 @@ class ConcentricSpiralDAG:
         }
 
     def _action_wsp_surgery(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .wsp_neural_surgeon import WSPNeuralSurgeon
+        from ..core.wsp_neural_surgeon import WSPNeuralSurgeon
         surgeon = WSPNeuralSurgeon.get_instance()
         audit = surgeon.audit_neuro_brains_store()
         return {
@@ -486,7 +470,7 @@ class ConcentricSpiralDAG:
         }
 
     def _action_temporal_stream(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .linear_state_space_microbrain import LinearStateSpaceMicroBrain
+        from ..core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
         ssm = LinearStateSpaceMicroBrain.get_instance()
 
         # P: 2026-11-11 - the feed previously packaged the fabricated
@@ -533,7 +517,7 @@ class ConcentricSpiralDAG:
         }
 
     def _action_synaptogenesis(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
-        from .morphogenetic_synaptogenesis import MorphogeneticSynaptogenesis
+        from ..core.morphogenetic_synaptogenesis import MorphogeneticSynaptogenesis
         synap = MorphogeneticSynaptogenesis.get_instance()
         lifecycle = synap.step_synaptic_lifecycle()
         prune_report = synap.prune_and_consolidate()
