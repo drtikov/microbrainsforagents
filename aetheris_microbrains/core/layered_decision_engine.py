@@ -283,6 +283,21 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
             # Also handle trailing slash variations (e.g. .ss*/ vs .ssh)
             if fnmatch.fnmatch(cpat + "/", normalized) or fnmatch.fnmatch(cpat, normalized.rstrip("/")):
                 return True
+        # Match wildcard intermediate directory components (e.g. .ss*/config matching .ssh/...)
+        norm_no_home = normalized[2:] if normalized.startswith("~/") else normalized
+        segs = norm_no_home.strip("/").split("/")
+        for i in range(1, len(segs) + 1):
+            subpath = "/".join(segs[:i]).strip("/")
+            seg = segs[i - 1]
+            for pat in cfg.protected_patterns:
+                cpat = pat.strip("/").lower()
+                if not cpat:
+                    continue
+                if fnmatch.fnmatch(cpat, subpath) or fnmatch.fnmatch(cpat, seg):
+                    return True
+            for sens in _PROTECTED_EXACT_BASENAMES:
+                if fnmatch.fnmatch(sens, seg):
+                    return True
 
     for pat in cfg.protected_patterns:
         if pat == ".env":
@@ -1713,6 +1728,8 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                 return False
             if mod_target in {"pytest", "unittest", "py_compile"}:
                 return True
+            if is_dev and mod_target == "pip":
+                return True
             return False
         if is_dev and len(args_lower) >= 1:
             # Clustered or standalone short flags: -c, -Bc, -uc, -c<code>, etc.
@@ -1785,8 +1802,33 @@ def _extract_unquoted_env_vars(cmd: str) -> List[str]:
     return found
 
 
+def _expand_bash_braces(text: str) -> List[str]:
+    """Expand bash-style brace expansions like `{a,b}`, `prefix{1,2}`, or `{.env,.npmrc}`."""
+    m = re.search(r"\{([^{}]+)\}", text)
+    if not m:
+        return [text]
+    options = m.group(1).split(",")
+    if len(options) == 1:
+        if ".." in options[0]:
+            parts = options[0].split("..")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                start, end = int(parts[0]), int(parts[1])
+                step = 1 if start <= end else -1
+                options = [str(i) for i in range(start, end + step, step)]
+            else:
+                return [text]
+        else:
+            return [text]
+    prefix = text[:m.start()]
+    suffix = text[m.end():]
+    results: List[str] = []
+    for opt in options:
+        results.extend(_expand_bash_braces(prefix + opt + suffix))
+    return results
+
+
 def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
-    """Extract filesystem path candidates from a shell argument (flags, `<file`, `rev:path`)."""
+    """Extract filesystem path candidates from a shell argument (flags, `<file`, `rev:path`, bash braces)."""
     cleaned = str(arg or "").strip()
     if not cleaned:
         return []
@@ -1806,18 +1848,27 @@ def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
         if rhs:
             candidates.append(rhs)
     if cleaned.startswith("-"):
-        return candidates
-    candidates.append(cleaned)
-    low = cleaned.lower()
-    if (
-        ":" in cleaned
-        and not low.startswith(("http://", "https://"))
-        and not re.match(r"^[A-Za-z]:[/\\]", cleaned)
-    ):
-        after_colon = cleaned.split(":", 1)[1].strip()
-        if after_colon:
-            candidates.append(after_colon)
-    return candidates
+        base_cands = candidates
+    else:
+        base_cands = candidates + [cleaned]
+        low = cleaned.lower()
+        if (
+            ":" in cleaned
+            and not low.startswith(("http://", "https://"))
+            and not re.match(r"^[A-Za-z]:[/\\]", cleaned)
+        ):
+            after_colon = cleaned.split(":", 1)[1].strip()
+            if after_colon:
+                base_cands.append(after_colon)
+
+    final_cands: List[str] = []
+    for c in base_cands:
+        final_cands.append(c)
+        if "{" in c and "}" in c:
+            for exp in _expand_bash_braces(c):
+                if exp != c:
+                    final_cands.append(exp)
+    return list(dict.fromkeys(final_cands))
 
 
 def _unwrap_shell_prefix(tokens: List[str]) -> Tuple[List[str], List[str], List[str], bool, bool]:
