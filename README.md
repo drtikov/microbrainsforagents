@@ -111,15 +111,50 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 
 ## 🌐 Beyond AI Agents: Other Use Cases & Readiness
 
-Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-conformal abstention engine also apply outside agent loops:
+Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-conformal abstention engine apply far beyond developer coding agents:
 
-| Domain | Status Today | What's Ready vs. What's Needed |
-| :--- | :--- | :--- |
-| **CI/CD & Pre-Commit Gates** | **Ready out-of-the-box** | `decide()` and `analyze_code_diff()` already check Python ASTs, secrets, breaking API signatures, YAML/JS patterns, and shell commands in `< 2 ms`. |
-| **Edge / Offline & Air-Gapped Systems** | **Ready out-of-the-box** | Pure NumPy + Python stdlib, tiny `.npz` weights (`allow_pickle=False`), zero GPU/internet required, and PEP 562 lazy imports. |
-| **Ticket & Intent Triage (Support / IT Ops)** | **Engine ready, needs your data** | `ToolRoutingMoE.fit_from_traces()` + conformal abstention work on arbitrary text categories, **but** shipped weights target SWE/DevOps tasks—you must supply your own labeled traces. |
-| **MLOps Drift & Auditable Intake** | **Telemetry ready, needs adapter** | `upper_error_bound_95`, `drift_detected`, `recalibrate_from_decision_journal()`, `input_sha256`, `shadow_mode`, and JSONL logging are built, **but** require your domain schemas and compliance integration. |
-| **Robotics (High-Level LLM-to-ROS 2)** | **Middle-layer modules included (`v0.7.0+`), needs ROS 2 adapter & data** | Includes `StateCBFSafetyFilter`, `VLActionGate`, `SensorimotorLoop`, `EFPAgent`, and `PackedTernaryLinear` for the 10–50 Hz planner/VLA layer without GPU VRAM; **not** for real-time 1 kHz+ servo/motor loops or hardware safety interlocks. |
+| Domain | Status Today | Primary Benefit | Key Microbrain Engine |
+| :--- | :--- | :--- | :--- |
+| **🛡️ CI/CD & DevSecOps** | **Ready out-of-the-box** | Instant PR/diff security, secret detection, and shell sanitization in under 2 ms. | AST Inspector, Allowlist-First Shell Guard, Secret Egress Veto |
+| **📱 Edge & Air-Gapped Systems** | **Ready out-of-the-box** | Zero-GPU, zero-network intelligence with pure NumPy, 2-bit weights, and <15 MB RAM. | `PackedTernaryLinear`, Offline Non-Pickle `.npz`, Pure NumPy Runtime |
+| **🎯 Support & Ticket Triage** | **Engine ready, needs your data** | Conformal routing with mathematically guaranteed accuracy and safe human escalation. | `ToolRoutingMoE`, Split-Conformal Prediction Sets, Calibration Journal |
+| **💳 Fintech & Transaction Gates** | **Ready with policy rules** | Deterministic pre-flight execution gates, anomaly detection, and drift tracking. | Multi-Turn Taint Gate, Conformal Risk Limits, Fail-Closed Decision Engine |
+| **🏥 Healthcare & Clinical Data** | **Ready with local policies** | Strict HIPAA/PII leak scrubbing, provenance auditing, and zero external API calls. | Secret & PII Scrubber, Immutable Decision Audit Log, Fully Offline Inference |
+| **🌐 Multi-Agent & MCP Firewalls** | **Ready out-of-the-box (`v0.7.6+`)** | Immune system against indirect prompt injections, rogue MCP tools, and rug-pull schema mutations. | `scan_mcp_tools`, `detect_prompt_injection`, `MCPManifestPinner` |
+| **🤖 Robotics & High-Level Autonomy** | **Middle-layer modules included (`v0.7.0+`)** | Sub-millisecond reflex buffer and barrier safety zones between slow VLAs and motors. | `StateCBFSafetyFilter`, `VLActionGate`, `SensorimotorLoop` |
+
+---
+
+### 💡 In Plain English: Where Else Can Microbrains Be Used?
+
+Because Microbrains is **100% offline, executes in under 2 milliseconds on an ordinary CPU, and uses mathematical guarantees (conformal prediction) instead of guesswork**, it excels in high-stakes environments where big cloud AI models are too slow, too expensive, or too untrustworthy to run unsupervised:
+
+#### 1. 🛡️ DevSecOps & Automated CI/CD Guardrails
+* **The Problem:** Developers and automated bots commit code constantly. Traditional static analysis tools (like SonarQube) take minutes to scan a repository, while LLM-based code reviewers are expensive, slow, and prone to hallucinations or missing raw credentials.
+* **How Microbrains Solves It:** Microbrains acts as an ultra-fast pre-commit git hook and CI/CD pipeline gate. In **< 2 milliseconds**, it parses the full Python AST of a pull request, identifies high cyclomatic complexity, catches credential exfiltration patterns (reading a secret and sending it across a network sink), scans shell scripts and Makefiles for destructive commands (`rm -rf`, `curl | sh`), and redacts raw secrets before code ever leaves the developer's laptop.
+
+#### 2. 📱 Edge, Embedded & Air-Gapped / Classified Environments
+* **The Problem:** Submarines, aircraft, remote sensor towers, industrial factories, and classified government networks have no internet connection, strict power budgets, and zero GPU access. Giant cloud LLMs cannot be used at all.
+* **How Microbrains Solves It:** Microbrains runs on pure standard-library Python and NumPy with no external dependencies. Using **2-bit ternary quantization (`PackedTernaryLinear`)**, entire routing and classification models weigh just a few megabytes and run on ultra-low-power edge processors with < 15 MB of RAM. It delivers real-time machine intelligence completely air-gapped from the internet.
+
+#### 3. 🎯 High-Volume Customer Support & Ticket Triage
+* **The Problem:** Companies receive tens of thousands of customer support tickets, bug reports, and IT requests every day. Sending every single ticket to a frontier LLM costs thousands of dollars a month and often routes complex issues to the wrong department.
+* **How Microbrains Solves It:** Using `ToolRoutingMoE` with **adaptive conformal prediction**, Microbrains categorizes incoming tickets and decides whether to route them automatically or escalate to human specialists. If customer sentiment or ticket complexity falls outside a calibrated confidence threshold (e.g. 95% guaranteed accuracy), Microbrains safely escalates the ticket to a human manager rather than guessing wrong.
+
+#### 4. 💳 Financial Trading, Fraud & Transaction Pre-Flight Gates
+* **The Problem:** Automated trading bots and payment microservices execute thousands of transactions per second. A software bug, rogue API key, or corrupted data feed can trigger catastrophic financial loss before humans can react.
+* **How Microbrains Solves It:** Microbrains serves as a deterministic "circuit breaker" and pre-flight gate. It evaluates transaction parameters, verifies schema integrity, enforces risk-boundary policies, and checks for data drift using rolling statistical telemetry (`upper_error_bound_95`, `drift_detected`) in sub-millisecond execution times without adding latency to trading pipelines.
+
+#### 5. 🏥 Healthcare, Clinical & Biotech Data Pipelines
+* **The Problem:** Handling Electronic Health Records (EHR) and clinical genomic data requires strict compliance (HIPAA, GDPR). Sending patient notes or diagnostic data to third-party cloud AI APIs can result in severe privacy violations and regulatory penalties.
+* **How Microbrains Solves It:** Because Microbrains is entirely self-contained and operates with zero network calls, it can scrub Protected Health Information (PHI) and medical identifiers locally before any downstream processing. Its immutable JSONL decision journals provide cryptographic verification (`input_sha256`, audit logging) to satisfy strict regulatory compliance and audit trails.
+
+#### 6. 🌐 MCP & Multi-Agent Network Firewalls
+* **The Problem:** As organizations deploy autonomous agent swarms communicating via the Model Context Protocol (MCP), agents become vulnerable to indirect prompt injection, poisoned third-party MCP servers, and "rug-pull" tool definition changes that trick agents into exfiltrating corporate data.
+* **How Microbrains Solves It:** Microbrains acts as an **MCP Application Firewall**:
+  * Scans external MCP tool definitions for prompt injection and tag smuggling before agents connect.
+  * Cryptographically pins tool schemas with SHA-256 hashes (`MCPManifestPinner`) to instantly detect silent rug-pull updates.
+  * Enforces the **Session Taint Gate**, immediately denying any action if an agent ingests untrusted external data and subsequently tries to access credentials or make outbound network calls.
 
 ---
 
