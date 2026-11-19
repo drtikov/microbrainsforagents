@@ -158,6 +158,7 @@ class PolicyConfig:
     max_diff_lines: int = 480
     strict_ast_allowlist: bool = False
     allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
+    profile: str = "strict"  # "strict" (default) or "dev" (permits routine dev ops on non-protected files)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PolicyConfig:
@@ -1434,7 +1435,13 @@ SAFE_SHELL_COMMANDS: Set[str] = {
     "grep", "rg", "find", "which", "where", "whoami", "date",
     "clang-format", "black", "ruff", "mypy", "pytest",
 }
+SAFE_DEV_SHELL_COMMANDS: Set[str] = {
+    "mkdir", "touch", "cp", "mv", "rm", "rmdir", "npm", "pnpm", "yarn", "cargo", "pip", "poetry",
+}
 SAFE_GIT_SUBCOMMANDS: Set[str] = {"status", "log", "diff", "branch", "show", "rev-parse", "describe"}
+SAFE_DEV_GIT_SUBCOMMANDS: Set[str] = {
+    "add", "commit", "checkout", "switch", "stash", "fetch", "pull", "merge", "tag", "clean",
+}
 
 _SHELL_WRAPPER_COMMANDS: Set[str] = {
     "env", "command", "nohup", "nice", "timeout", "time", "sudo", "doas", "exec", "strace", "xargs",
@@ -1636,8 +1643,10 @@ def _is_privileged_or_unsafe_redirect_target(target: str) -> bool:
     return False
 
 
-def _is_command_allowlisted(exe: str, args: List[str]) -> bool:
+def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Strict Layer 1 allowlist check for a parsed command executable and its arguments."""
+    cfg = policy or DEFAULT_POLICY
+    is_dev = getattr(cfg, "profile", "strict") == "dev"
     args_lower = [a.lower() for a in args]
     if exe in SAFE_SHELL_COMMANDS:
         if exe == "find" and any(a in {"-exec", "-execdir", "-ok", "-okdir", "-delete"} for a in args_lower):
@@ -1645,16 +1654,29 @@ def _is_command_allowlisted(exe: str, args: List[str]) -> bool:
         if exe == "pytest" and "--capture=sys" in args_lower:
             return True
         return True
+    if is_dev and exe in SAFE_DEV_SHELL_COMMANDS:
+        if exe == "rm":
+            # In dev profile, rm is only allowed for non-recursive single files
+            has_rec = any(a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a)) for a in args)
+            return not has_rec
+        return True
     if exe == "git":
         if not args_lower:
             return True
         if any(a == "-c" or a.startswith("--exec") or a == "--ext-diff" for a in args_lower):
             return False
-        return args_lower[0] in SAFE_GIT_SUBCOMMANDS
+        if args_lower[0] in SAFE_GIT_SUBCOMMANDS:
+            return True
+        if is_dev and args_lower[0] in SAFE_DEV_GIT_SUBCOMMANDS:
+            return True
+        return False
     if exe in {"python", "python3"}:
         if args_lower in (["--version"], ["-v"]):
             return True
         if len(args_lower) >= 2 and args_lower[0] == "-m" and args_lower[1] in {"pytest", "unittest", "py_compile"}:
+            return True
+        if is_dev and len(args_lower) >= 1 and not any(a.startswith("-c") for a in args_lower):
+            # Allow running python script.py under dev profile if not evaluating inline -c
             return True
         return False
     return False
@@ -1725,6 +1747,10 @@ def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
         return []
     if cleaned.startswith("<"):
         cleaned = cleaned.lstrip("<").strip()
+        if not cleaned:
+            return []
+    if cleaned.startswith("@"):
+        cleaned = cleaned.lstrip("@").strip()
         if not cleaned:
             return []
     candidates: List[str] = []
@@ -2028,7 +2054,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
         if wrappers_seen or had_inline_env:
             unrecognized.append(wrappers_seen[0] if wrappers_seen else "env_assignment")
-        if not _is_command_allowlisted(exe, args):
+        if not _is_command_allowlisted(exe, args, policy=policy):
             unrecognized.append(exe)
 
         # Bare or secret-targeted environment inspection commands
@@ -2070,6 +2096,8 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                 if is_protected_path(cand, policy=policy):
                     if exe in _SHELL_MUTATING_COMMANDS:
                         findings.append("shell_protected_path_mutation")
+                    elif exe in _SHELL_SECRET_EGRESS_COMMANDS:
+                        findings.append(f"shell_protected_path_egress:{exe}")
                     else:
                         protected_path_reads.append(cand)
                     break

@@ -119,19 +119,19 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 
 ---
 
-## 🌐 Beyond AI Agents: Other Use Cases & Readiness
+## 🌐 Beyond AI Agents: Architectural Applicability Across Domains
 
-Microbrains' deterministic AST/shell rules, pure-NumPy runtime, and split-conformal abstention engine apply far beyond developer coding agents:
+While developer agents (Claude Code, SWE-agent, MCP) are Microbrains' primary production target, its deterministic AST/shell rules, pure-NumPy runtime, and split-conformal abstention engine illustrate useful architectural building blocks across other low-latency and edge domains:
 
-| Domain | Status Today | Primary Benefit | Key Microbrain Engine |
+| Domain | Engineering Readiness | Practical Application & Building Blocks | Key Microbrain Engine |
 | :--- | :--- | :--- | :--- |
-| **🛡️ CI/CD & DevSecOps** | **Ready out-of-the-box** | Instant PR/diff security, secret detection, and shell sanitization in under 2 ms. | AST Inspector, Allowlist-First Shell Guard, Secret Egress Veto |
-| **📱 Edge & Air-Gapped Systems** | **Ready out-of-the-box** | Zero-GPU, zero-network intelligence with pure NumPy, 2-bit weights, and <15 MB RAM. | `PackedTernaryLinear`, Offline Non-Pickle `.npz`, Pure NumPy Runtime |
-| **🎯 Support & Ticket Triage** | **Engine ready, needs your data** | Conformal routing with mathematically guaranteed accuracy and safe human escalation. | `ToolRoutingMoE`, Split-Conformal Prediction Sets, Calibration Journal |
-| **💳 Fintech & Transaction Gates** | **Ready with policy rules** | Deterministic pre-flight execution gates, anomaly detection, and drift tracking. | Multi-Turn Taint Gate, Conformal Risk Limits, Fail-Closed Decision Engine |
-| **🏥 Healthcare & Clinical Data** | **Ready with local policies** | Strict HIPAA/PII leak scrubbing, provenance auditing, and zero external API calls. | Secret & PII Scrubber, Immutable Decision Audit Log, Fully Offline Inference |
-| **🌐 Multi-Agent & MCP Firewalls** | **Ready out-of-the-box (`v0.7.6+`)** | Immune system against indirect prompt injections, rogue MCP tools, and rug-pull schema mutations. | `scan_mcp_tools`, `detect_prompt_injection`, `MCPManifestPinner` |
-| **🤖 Robotics & High-Level Autonomy** | **Middle-layer modules included (`v0.7.0+`)** | Sub-millisecond reflex buffer and barrier safety zones between slow VLAs and motors. | `StateCBFSafetyFilter`, `VLActionGate`, `SensorimotorLoop` |
+| **🛡️ CI/CD & DevSecOps** | **Production-ready** | Instant pre-commit PR/diff screening, credential exfiltration vetoes, and shell sanitization in under 2 ms. | AST Inspector, Allowlist-First Shell Guard, Secret Egress Veto |
+| **📱 Edge & Air-Gapped Systems** | **Production-ready** | Zero-GPU, offline machine intelligence with pure NumPy, 2-bit weights, and <15 MB RAM. | `PackedTernaryLinear`, Offline Non-Pickle `.npz`, Pure NumPy Runtime |
+| **🎯 Support & Ticket Triage** | **Engine ready (needs domain data)** | Conformal routing with mathematically guaranteed accuracy and safe human escalation. | `ToolRoutingMoE`, Split-Conformal Prediction Sets, Calibration Journal |
+| **💳 Fintech Transaction Gates** | **Architectural building block (needs domain policies)** | Deterministic pre-flight circuit breakers, schema integrity verification, and drift telemetry (`upper_error_bound_95`). | Multi-Turn Taint Gate, Conformal Risk Limits, Fail-Closed Decision Engine |
+| **🏥 Clinical Data Scrubbing** | **Local redaction building block (not certified HIPAA)** | Local offline PII/secret scrubbing and immutable cryptographic audit logging (`input_sha256`) before downstream processing. | Secret & PII Scrubber, Immutable Decision Audit Log, Fully Offline Inference |
+| **🌐 Multi-Agent & MCP Firewalls** | **Production-ready (`v0.7.6+`)** | Defense against indirect prompt injections, rogue MCP tools, and rug-pull schema mutations. | `scan_mcp_tools`, `detect_prompt_injection`, `MCPManifestPinner` |
+| **🤖 Robotics & High-Level Autonomy** | **Middle-layer research modules (`v0.7.0+`)** | Sub-millisecond reflex buffer and barrier safety zones between slow VLAs and motors (requires hardware-in-the-loop validation). | `StateCBFSafetyFilter`, `VLActionGate`, `SensorimotorLoop` |
 
 ---
 
@@ -152,12 +152,12 @@ Because Microbrains is **100% offline, executes in under 2 milliseconds on an or
 * **How Microbrains Solves It:** Using `ToolRoutingMoE` with **adaptive conformal prediction**, Microbrains categorizes incoming tickets and decides whether to route them automatically or escalate to human specialists. If customer sentiment or ticket complexity falls outside a calibrated confidence threshold (e.g. 95% guaranteed accuracy), Microbrains safely escalates the ticket to a human manager rather than guessing wrong.
 
 #### 4. 💳 Financial Trading, Fraud & Transaction Pre-Flight Gates
-* **The Problem:** Automated trading bots and payment microservices execute thousands of transactions per second. A software bug, rogue API key, or corrupted data feed can trigger catastrophic financial loss before humans can react.
-* **How Microbrains Solves It:** Microbrains serves as a deterministic "circuit breaker" and pre-flight gate. It evaluates transaction parameters, verifies schema integrity, enforces risk-boundary policies, and checks for data drift using rolling statistical telemetry (`upper_error_bound_95`, `drift_detected`) in sub-millisecond execution times without adding latency to trading pipelines.
+* **The Problem:** Automated trading bots and payment microservices execute high volumes of transactions. A software bug, rogue API key, or corrupted schema can trigger unexpected behavior before humans can react.
+* **How Microbrains Serves as a Building Block:** Microbrains provides a deterministic local circuit breaker and pre-flight gate. It evaluates transaction payloads, verifies schema integrity, enforces risk-boundary policies, and checks for data drift using rolling statistical telemetry (`upper_error_bound_95`, `drift_detected`) in sub-millisecond execution times without adding latency to processing pipelines.
 
-#### 5. 🏥 Healthcare, Clinical & Biotech Data Pipelines
-* **The Problem:** Handling Electronic Health Records (EHR) and clinical genomic data requires strict compliance (HIPAA, GDPR). Sending patient notes or diagnostic data to third-party cloud AI APIs can result in severe privacy violations and regulatory penalties.
-* **How Microbrains Solves It:** Because Microbrains is entirely self-contained and operates with zero network calls, it can scrub Protected Health Information (PHI) and medical identifiers locally before any downstream processing. Its immutable JSONL decision journals provide cryptographic verification (`input_sha256`, audit logging) to satisfy strict regulatory compliance and audit trails.
+#### 5. 🏥 Healthcare & Clinical Data Scrubbing
+* **The Problem:** Handling Electronic Health Records (EHR) and clinical notes requires strict privacy controls. Sending patient notes with embedded identifiers to third-party cloud APIs risks privacy violations.
+* **How Microbrains Serves as a Building Block:** While not a standalone certified HIPAA solution, Microbrains operates 100% offline with zero network calls. It scrubs high-entropy tokens and identifiers locally before any downstream agent processing, appending cryptographic hashes (`input_sha256`) to append-only decision journals for forensic review.
 
 #### 6. 🌐 MCP & Multi-Agent Network Firewalls
 * **The Problem:** As organizations deploy autonomous agent swarms communicating via the Model Context Protocol (MCP), agents become vulnerable to indirect prompt injection, poisoned third-party MCP servers, and "rug-pull" tool definition changes that trick agents into exfiltrating corporate data.
