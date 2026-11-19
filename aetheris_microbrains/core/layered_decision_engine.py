@@ -159,6 +159,72 @@ class PolicyConfig:
     strict_ast_allowlist: bool = False
     allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PolicyConfig:
+        """Construct PolicyConfig from a dictionary (e.g., parsed JSON/YAML)."""
+        valid_fields = cls.__dataclass_fields__
+        kwargs: Dict[str, Any] = {}
+        for k, v in data.items():
+            if k in valid_fields:
+                if k in ("protected_patterns", "allowed_ast_imports") and isinstance(v, (list, tuple, set)):
+                    kwargs[k] = tuple(str(x) for x in v)
+                else:
+                    kwargs[k] = v
+        return cls(**kwargs)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> PolicyConfig:
+        """Load PolicyConfig from a JSON file (or YAML if PyYAML/ruamel is installed)."""
+        p = Path(path).expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"Policy file not found: {p}")
+        raw = p.read_text(encoding="utf-8")
+        if p.suffix.lower() in (".yaml", ".yml"):
+            try:
+                import yaml
+                loaded = yaml.safe_load(raw)
+            except ImportError:
+                # Lightweight pure-Python fallback for key: value / list YAML without PyYAML dependency
+                loaded = cls._parse_simple_yaml(raw)
+        else:
+            loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Expected dict in policy file, got {type(loaded).__name__}")
+        return cls.from_dict(loaded)
+
+    @staticmethod
+    def _parse_simple_yaml(raw: str) -> Dict[str, Any]:
+        """Simple YAML parser fallback for string/bool/int/list fields when pyyaml is absent."""
+        res: Dict[str, Any] = {}
+        curr_list_key: Optional[str] = None
+        for line in raw.splitlines():
+            line_str = line.split("#", 1)[0].rstrip()
+            if not line_str.strip():
+                continue
+            indent = len(line_str) - len(line_str.lstrip())
+            stripped = line_str.strip()
+            if stripped.startswith("- ") and curr_list_key and indent > 0:
+                val = stripped[2:].strip().strip("\"'")
+                res[curr_list_key].append(val)
+                continue
+            if ":" in stripped:
+                curr_list_key = None
+                k, v = stripped.split(":", 1)
+                k = k.strip()
+                v = v.strip().strip("\"'")
+                if not v:
+                    curr_list_key = k
+                    res[k] = []
+                elif v.lower() == "true":
+                    res[k] = True
+                elif v.lower() == "false":
+                    res[k] = False
+                elif v.isdigit():
+                    res[k] = int(v)
+                else:
+                    res[k] = v
+        return res
+
 
 DEFAULT_POLICY = PolicyConfig()
 
@@ -2288,11 +2354,23 @@ def decide(
             "deterministic_structural_rule" if layer in (0, 1) else "unmeasured"
         )
 
+        # Context preview snippet for human review in escalations / audits
+        payload_preview: Optional[str] = None
+        if cmd_str:
+            payload_preview = redact_secrets(str(cmd_str)[:200])
+        elif target_path:
+            payload_preview = redact_secrets(str(target_path)[:200])
+        elif diff_text:
+            payload_preview = redact_secrets(str(diff_text)[:200])
+        elif query_text:
+            payload_preview = redact_secrets(str(query_text)[:200])
+
         out: Dict[str, Any] = {
             "decision": decision,
             "decision_kind": resolved_kind,
             "authorizes_execution": False,
             "label": redact_secrets(label),
+            "payload_preview": payload_preview,
             "prediction_set": pred_set,
             "reason_code": reason_code,
             "layer": layer,

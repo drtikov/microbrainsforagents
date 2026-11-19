@@ -35,6 +35,9 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "record_decision_journal": (".core.layered_decision_engine", "record_decision_journal"),
     "redact_secrets": (".core.layered_decision_engine", "redact_secrets"),
     "scrub_tool_output": (".core.layered_decision_engine", "scrub_tool_output"),
+    # Audit & inspection
+    "get_journal_entries": (".audit", "get_journal_entries"),
+    "format_entry": (".audit", "format_entry"),
     # MCP security (Wave 3)
     "detect_prompt_injection": (".core.mcp_security", "detect_prompt_injection"),
     "scan_mcp_tools": (".core.mcp_security", "scan_mcp_tools"),

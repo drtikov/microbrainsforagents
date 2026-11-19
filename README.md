@@ -105,7 +105,11 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Post-Tool Output & Prompt Injection Screening (`evaluate_post_tool_use_payload` & `--event post-tool-use`):** Redacts raw credentials via `mb.scrub_tool_output()` and audits returned tool content for injected instructions before context assimilation, providing `additionalContext` warnings to the agent and appending redacted security journal entries.
 * **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
-* **Audit & Safe Rollout (`--shadow`, `--log-decisions`, `--journal-path`):** Shadow mode logs what would be blocked to `memory/decision_journal.jsonl` without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
+* **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
+  * Every decision writes a forensic entry to `memory/decision_journal.jsonl` containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, conformal error bounds, and a redacted `payload_preview`.
+  * Inspect reasons instantly in terminal: run `python -m aetheris_microbrains.audit --last` to see why an agent was stopped, or `--summary` for aggregate health metrics.
+  * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
+* **Configurable Rule Governance & File-Based Policies:** Load custom team policies without modifying Python code using `PolicyConfig.from_file("my_policy.yaml")` or JSON. See [SECURITY.md](SECURITY.md) for full threat model and governance details.
 
 ---
 
