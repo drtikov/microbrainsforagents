@@ -264,10 +264,25 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
 
     if basename == ".env" or basename.startswith(".env.") or basename in _PROTECTED_EXACT_BASENAMES:
         return True
-    if any(ch in basename for ch in "*?["):
-        stripped_glob = re.sub(r"[*?\[\]]", "", basename)
-        if len(stripped_glob) >= 3 and any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
+    clean_target = norm_path.strip("/")
+    if any(clean_target == pat.strip("/").lower() for pat in cfg.protected_patterns):
+        return True
+
+    # Glob and wildcard pattern matching (supporting wildcards anywhere in the path, e.g. .e?, .ss*, .s?h)
+    if any(ch in normalized for ch in "*?["):
+        # Match against exact basenames
+        if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
             return True
+        # Match against all protected patterns and directories
+        for pat in cfg.protected_patterns:
+            cpat = pat.strip("/").lower()
+            if not cpat:
+                continue
+            if fnmatch.fnmatch(cpat, basename) or fnmatch.fnmatch(cpat, clean_target) or fnmatch.fnmatch(pat.lower(), normalized):
+                return True
+            # Also handle trailing slash variations (e.g. .ss*/ vs .ssh)
+            if fnmatch.fnmatch(cpat + "/", normalized) or fnmatch.fnmatch(cpat, normalized.rstrip("/")):
+                return True
 
     for pat in cfg.protected_patterns:
         if pat == ".env":
@@ -1681,9 +1696,11 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
         if args_lower[0] in SAFE_GIT_SUBCOMMANDS:
             return True
         if is_dev and args_lower[0] in SAFE_DEV_GIT_SUBCOMMANDS:
-            # git clean in dev profile must not allow -x/-X (which deletes ignored files like .env)
+            # git clean in dev profile must not allow destructive flags (-f, -d, -x, -X) which delete untracked/ignored files
             if args_lower[0] == "clean":
-                if any("x" in a or "X" in a for a in args_lower[1:] if a.startswith("-")):
+                if any(a.startswith("-") and not a.startswith("--") and any(ch in a for ch in "fdxX") for a in args_lower[1:]):
+                    return False
+                if any(a in {"--force", "-f", "-d", "-x", "-X"} for a in args_lower[1:]):
                     return False
             return True
         return False
@@ -1691,20 +1708,20 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
         if args_lower in (["--version"], ["-v"]):
             return True
         if len(args_lower) >= 2 and args_lower[0] == "-m":
-            # Guard against serving local files/credentials over HTTP (e.g. python -m http.server)
             mod_target = args_lower[1].replace("-", "_")
-            if mod_target in {"http.server", "http_server"}:
+            if mod_target in {"http.server", "http_server", "pydoc"}:
                 return False
             if mod_target in {"pytest", "unittest", "py_compile"}:
                 return True
+            return False
         if is_dev and len(args_lower) >= 1:
             # Clustered or standalone short flags: -c, -Bc, -uc, -c<code>, etc.
             has_c_flag = any(
                 a.startswith("-") and not a.startswith("--") and "c" in a
                 for a in args_lower
             )
-            has_http = any(a in {"http.server", "http_server"} for a in args_lower)
-            if not has_c_flag and not has_http:
+            has_server = any(a in {"http.server", "http_server", "pydoc"} for a in args_lower)
+            if not has_c_flag and not has_server:
                 return True
         return False
     return False
@@ -2022,9 +2039,9 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             unprivileged_redirects.append(r_target)
 
     # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
-    for line_seg in re.split(r"\r?\n", cmd):
-        if "|" in line_seg and "||" not in line_seg:
-            pipe_segments = line_seg.split("|")
+    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", cmd):
+        if "|" in logical_block:
+            pipe_segments = logical_block.split("|")
             has_protected_read = False
             has_egress_sink = False
             for p in pipe_segments:
@@ -2043,11 +2060,11 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
 
-    # First inspect pipe sequences per line for download-and-execute (`curl ... | sh`), unwrapping prefixes
-    for line_seg in re.split(r"\r?\n", cmd):
-        if "|" in line_seg and "||" not in line_seg:
+    # First inspect pipe sequences per pipeline block for download-and-execute (`curl ... | sh`), unwrapping prefixes
+    for logical_block in re.split(r"(?:&&|\|\||;|\r?\n)", cmd):
+        if "|" in logical_block:
             pipe_cmds: List[str] = []
-            for p in line_seg.split("|"):
+            for p in logical_block.split("|"):
                 ptoks = _tokenize_shell_segment(p)
                 prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
                 eff = prem or ptoks

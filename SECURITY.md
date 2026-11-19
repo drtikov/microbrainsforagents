@@ -132,3 +132,14 @@ python -m aetheris_microbrains.audit --tail 5
 # View aggregate summary and latency statistics
 python -m aetheris_microbrains.audit --summary
 ```
+
+---
+
+## Defense in Depth & OS-Level Boundaries
+
+Aetheris Microbrains operates as an in-process, deterministic pre-flight evaluation and routing gate. It intercepts agent actions **prior** to tool execution to block obvious and syntactic hazards, credential theft, and catastrophic commands.
+
+> [!IMPORTANT]
+> **Static Analysis vs. Runtime Sandboxing:**
+> Static analysis and AST/shlex token inspection analyze command syntax and glob patterns at parse-time. Shell glob expansions, variable indirections, and OS syscalls are ultimately executed by the underlying operating system. For production multi-tenant or untrusted agent environments, Aetheris Microbrains should always be combined with OS-level sandboxing (e.g. Docker, gVisor, Firecracker, Bubblewrap, or Linux seccomp/eBPF confinement).
+
