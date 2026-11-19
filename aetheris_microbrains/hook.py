@@ -24,12 +24,29 @@ from typing import Any, Dict, Optional
 _DEFAULT_HOOK_JOURNAL_PATH = Path(__file__).resolve().parent / "memory" / "decision_journal.jsonl"
 
 _HOOK_REDACT_PATTERNS = (
-    (re.compile(r"sk-proj-[A-Za-z0-9_\-]{12,}"), "[REDACTED_OPENAI_KEY]"),
+    (
+        re.compile(
+            r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
+            r"[\s\S]*?"
+            r"-----END\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
+        ),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    (re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_ANTHROPIC_KEY]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_API_KEY]"),
     (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
-    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    (re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_GITLAB_TOKEN]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "[REDACTED_GOOGLE_API_KEY]"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
+    (re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[REDACTED_HF_TOKEN]"),
+    (re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "[REDACTED_NPM_TOKEN]"),
+    (re.compile(r"\bpypi-[A-Za-z0-9_\-]{24,}\b"), "[REDACTED_PYPI_TOKEN]"),
+    (re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
 )
 
 
@@ -95,6 +112,11 @@ def _load_decision_engine():
     return PolicyConfig, decide
 
 
+def _load_post_tool_helpers():
+    from .core.layered_decision_engine import record_decision_journal, scrub_tool_output
+    return scrub_tool_output, record_decision_journal
+
+
 def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize Claude Code / Codex / generic PreToolUse JSON into `decide()` input."""
     tool_raw = str(
@@ -140,6 +162,8 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if "query" in tool_input:
         normalized["query"] = tool_input["query"]
+    if isinstance(tool_input, dict):
+        normalized["tool_input"] = tool_input
     return normalized
 
 
@@ -260,6 +284,124 @@ def _format_hook_stdout(hook_specific: Dict[str, Any]) -> str:
     return json.dumps({"hookSpecificOutput": hook_specific})
 
 
+def evaluate_post_tool_use_payload(
+    payload: Dict[str, Any],
+    log_decisions: bool = False,
+    shadow_mode: bool = False,
+    host: str = "claude",
+    journal_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Audit and scrub raw credentials in PostToolUse tool outputs before they persist."""
+    scrub_tool_output, record_decision_journal = _load_post_tool_helpers()
+    resolved_host = str(host or "claude").strip().lower()
+    if resolved_host not in {"claude", "codex", "generic"}:
+        resolved_host = "claude"
+
+    tool_raw = str(
+        payload.get("tool_name")
+        or payload.get("tool")
+        or payload.get("name")
+        or ""
+    ).strip()
+
+    raw_output: Any = ""
+    for key in ("tool_response", "tool_output", "output", "result"):
+        if key in payload:
+            raw_output = payload[key]
+            break
+    else:
+        if "stdout" in payload and "stderr" in payload:
+            raw_output = {"stdout": payload.get("stdout"), "stderr": payload.get("stderr")}
+        elif "stdout" in payload:
+            raw_output = payload.get("stdout")
+        elif "stderr" in payload:
+            raw_output = payload.get("stderr")
+
+    total_count = 0
+    found_types: list[str] = []
+
+    def _scrub_node(node: Any) -> Any:
+        nonlocal total_count
+        if isinstance(node, str):
+            res = scrub_tool_output(node)
+            if res["secrets_found"]:
+                total_count += int(res["secret_count"])
+                for st in res["secret_types"]:
+                    if st not in found_types:
+                        found_types.append(st)
+            return res["redacted_text"]
+        if isinstance(node, dict):
+            return {k: _scrub_node(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_scrub_node(v) for v in node]
+        if isinstance(node, tuple):
+            return [_scrub_node(v) for v in node]
+        return node
+
+    redacted_output = _scrub_node(raw_output)
+    secret_types = sorted(found_types)
+    secrets_found = total_count > 0
+
+    host_specific: Optional[Dict[str, Any]] = None
+    if shadow_mode:
+        host_action = "shadow_observe"
+    elif resolved_host == "claude":
+        if secrets_found:
+            host_action = "warn_additional_context"
+            host_specific = {
+                "hookEventName": "PostToolUse",
+                "additionalContext": (
+                    "SECURITY WARNING (Aetheris Microbrains): Potential raw secret material "
+                    f"detected in tool output ({', '.join(secret_types)}; count={total_count}). "
+                    "Do not echo, transmit, or persist raw credentials."
+                ),
+            }
+        else:
+            host_action = "clean_passthrough"
+    elif resolved_host == "codex":
+        host_action = "warn_observed" if secrets_found else "clean_passthrough"
+    else:
+        host_action = "scrubbed" if secrets_found else "clean"
+
+    out: Dict[str, Any] = {
+        "event": "post-tool-use",
+        "tool": tool_raw,
+        "secrets_found": secrets_found,
+        "secret_count": total_count,
+        "secret_types": secret_types,
+        "redacted_output": redacted_output,
+        "host": resolved_host,
+        "host_action": host_action,
+        "authorizes_execution": False,
+        "hookSpecificOutput": host_specific,
+        "exit_code": 0,
+    }
+
+    explicit_journal = str(journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
+    target_jpath = _resolve_journal_path(explicit_journal) if explicit_journal else None
+    should_journal = bool((secrets_found and (log_decisions or shadow_mode)) or log_decisions)
+    if should_journal:
+        entry = {
+            "event_type": "post_tool_secret_exposure" if secrets_found else "post_tool_observation",
+            "timestamp": round(time.time(), 6),
+            "tool": tool_raw,
+            "secrets_found": secrets_found,
+            "secret_count": total_count,
+            "secret_types": secret_types,
+            "decision": "escalate" if shadow_mode else ("warn" if secrets_found else "clean"),
+            "shadow_mode": shadow_mode,
+            "authorizes_execution": False,
+            "host": resolved_host,
+            "label": f"post_tool_secrets:{','.join(secret_types)}" if secrets_found else "post_tool_clean",
+        }
+        j_res = record_decision_journal(entry, journal_path=target_jpath)
+        out["journal_written"] = bool(j_res.get("written", False))
+        if j_res.get("error"):
+            out["journal_error"] = j_res["error"]
+
+    return out
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
@@ -268,7 +410,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     raw: str = ""
     try:
-        parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse Hook")
+        parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse/PostToolUse Hook")
+        parser.add_argument(
+            "--event",
+            choices=["pre-tool-use", "post-tool-use"],
+            default="pre-tool-use",
+            help="Hook lifecycle event (default: pre-tool-use; post-tool-use audits/scrubs tool outputs)",
+        )
         parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
         parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
         parser.add_argument(
@@ -302,6 +450,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
         shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
         host = str(args.host)
+        event_kind = str(args.event)
         codex_escalate_deny = bool(args.codex_escalate_deny)
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
 
@@ -397,6 +546,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             )
             return 2
+
+        if event_kind == "post-tool-use":
+            post_res = evaluate_post_tool_use_payload(
+                payload,
+                log_decisions=log_decisions,
+                shadow_mode=shadow_mode,
+                host=host,
+                journal_path=journal_path,
+            )
+            if shadow_mode:
+                if post_res.get("journal_written") is False:
+                    j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
+                    print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
+                return 0
+            if host == "generic":
+                print(json.dumps(post_res, ensure_ascii=False))
+                return int(post_res.get("exit_code", 0))
+            if post_res.get("hookSpecificOutput") is not None:
+                print(_format_hook_stdout(post_res["hookSpecificOutput"]))
+            return int(post_res.get("exit_code", 0))
 
         result = evaluate_hook_payload(
             payload,

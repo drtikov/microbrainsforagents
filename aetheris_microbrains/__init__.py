@@ -16,11 +16,12 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Tuple
 
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # Hook
     "evaluate_hook_payload": (".hook", "evaluate_hook_payload"),
+    "evaluate_post_tool_use_payload": (".hook", "evaluate_post_tool_use_payload"),
     # Layered decision engine (stdlib-only)
     "PolicyConfig": (".core.layered_decision_engine", "PolicyConfig"),
     "analyze_code_diff": (".core.layered_decision_engine", "analyze_code_diff"),
@@ -32,6 +33,8 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "is_protected_path": (".core.layered_decision_engine", "is_protected_path"),
     "recalibrate_from_decision_journal": (".core.layered_decision_engine", "recalibrate_from_decision_journal"),
     "record_decision_journal": (".core.layered_decision_engine", "record_decision_journal"),
+    "redact_secrets": (".core.layered_decision_engine", "redact_secrets"),
+    "scrub_tool_output": (".core.layered_decision_engine", "scrub_tool_output"),
     # OpenCL & Core microbrains
     "OpenCLMicroBrainAccelerator": (".core.opencl_microbrain_accelerator", "OpenCLMicroBrainAccelerator"),
     "get_opencl_accelerator": (".core.opencl_microbrain_accelerator", "get_opencl_accelerator"),

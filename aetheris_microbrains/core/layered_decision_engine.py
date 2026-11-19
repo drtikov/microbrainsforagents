@@ -537,12 +537,42 @@ def _detect_interface_hazards(raw_lines: List[str], tree_new: ast.AST) -> List[s
     return list(dict.fromkeys(hazards))
 
 
-_SECRET_TOKEN_REGEXES: Tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+)?PRIVATE\s+KEY-----"),
+_SECRET_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "private_key_pem",
+        re.compile(
+            r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
+            r"[\s\S]*?"
+            r"-----END\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
+        ),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    (
+        "private_key_pem",
+        re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"),
+        "[REDACTED_PRIVATE_KEY]",
+    ),
+    ("openai_project_key", re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
+    ("anthropic_api_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_ANTHROPIC_KEY]"),
+    ("api_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_API_KEY]"),
+    ("github_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
+    ("gitlab_token", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_GITLAB_TOKEN]"),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "[REDACTED_GOOGLE_API_KEY]"),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[REDACTED_HF_TOKEN]"),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "[REDACTED_NPM_TOKEN]"),
+    ("pypi_token", re.compile(r"\bpypi-[A-Za-z0-9_\-]{24,}\b"), "[REDACTED_PYPI_TOKEN]"),
+    ("bearer_token", re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]{16,}=*"), "Bearer [REDACTED]"),
+)
+
+_SECRET_TOKEN_REGEXES: Tuple[re.Pattern[str], ...] = tuple(pat for _stype, pat, _repl in _SECRET_PATTERNS)
+_REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = tuple(
+    (pat, repl) for _stype, pat, repl in _SECRET_PATTERNS
+) + (
+    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
 )
 _SECRET_ASSIGN_RE = re.compile(
     r"""(?i)\b(?:api_key|secret_key|private_key|access_token|auth_token|client_secret|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{12,})["']"""
@@ -550,6 +580,82 @@ _SECRET_ASSIGN_RE = re.compile(
 _SECRET_PLACEHOLDER_MARKERS: Tuple[str, ...] = (
     "example", "placeholder", "changeme", "your_", "dummy", "test", "xxx", "***", "<your"
 )
+_DIFF_CONTENT_KEYS: Set[str] = {"diff", "payload_diff", "new_string", "old_string", "content", "file_content"}
+
+
+def redact_secrets(text: str) -> str:
+    """Mask known credential/token patterns before logging or printing errors."""
+    out = str(text or "")
+    for pat, repl in _REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def scrub_tool_output(text: Any) -> Dict[str, Any]:
+    """Scrub raw credential/token patterns from tool outputs before LLM context ingestion."""
+    out = "" if text is None else str(text)
+    found_types: List[str] = []
+    total_hits = 0
+    for secret_type, pat, repl in _SECRET_PATTERNS:
+        out, n_subs = pat.subn(repl, out)
+        if n_subs > 0:
+            total_hits += n_subs
+            if secret_type not in found_types:
+                found_types.append(secret_type)
+    return {
+        "redacted_text": out,
+        "secrets_found": total_hits > 0,
+        "secret_count": total_hits,
+        "secret_types": sorted(found_types),
+    }
+
+
+def _collect_strings_for_egress_scan(
+    obj: Any,
+    skip_diff_fields: bool,
+    depth: int,
+    out: List[str],
+) -> None:
+    if depth > 8 or obj is None:
+        return
+    if isinstance(obj, str):
+        if obj:
+            out.append(obj)
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if skip_diff_fields and str(k) in _DIFF_CONTENT_KEYS:
+                continue
+            _collect_strings_for_egress_scan(v, skip_diff_fields, depth + 1, out)
+        return
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            _collect_strings_for_egress_scan(item, skip_diff_fields, depth + 1, out)
+
+
+def _scan_outbound_secret_egress(
+    input_data: Any,
+    cmd_str: Optional[str],
+    query_text: str,
+    target_path: Optional[str],
+    skip_diff_fields: bool = False,
+) -> List[str]:
+    """Detect raw credentials across tool arguments to block outbound secret egress."""
+    candidates: List[str] = []
+    for s in (cmd_str, query_text, target_path):
+        if isinstance(s, str) and s:
+            candidates.append(s)
+    if isinstance(input_data, dict):
+        _collect_strings_for_egress_scan(input_data, skip_diff_fields=skip_diff_fields, depth=0, out=candidates)
+    elif isinstance(input_data, str) and input_data:
+        candidates.append(input_data)
+
+    matched_types: List[str] = []
+    for text in candidates:
+        for secret_type, pat, _repl in _SECRET_PATTERNS:
+            if pat.search(text) and secret_type not in matched_types:
+                matched_types.append(secret_type)
+    return sorted(matched_types)
 
 
 def _detect_secret_leaks(lines: Sequence[str]) -> List[str]:
@@ -1083,10 +1189,39 @@ def _tokenize_shell_segment(seg: str) -> List[str]:
 
 SAFE_SHELL_COMMANDS: Set[str] = {
     "ls", "pwd", "echo", "cat", "head", "tail", "wc", "sort", "uniq",
-    "grep", "rg", "find", "which", "where", "whoami", "date", "env",
+    "grep", "rg", "find", "which", "where", "whoami", "date",
     "clang-format", "black", "ruff", "mypy", "pytest",
 }
 SAFE_GIT_SUBCOMMANDS: Set[str] = {"status", "log", "diff", "branch", "show", "rev-parse", "describe"}
+
+_SHELL_WRAPPER_COMMANDS: Set[str] = {
+    "env", "command", "nohup", "nice", "timeout", "time", "sudo", "doas", "exec", "strace",
+}
+_DANGEROUS_ENV_OVERRIDES: Set[str] = {
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+    "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+}
+_SHELL_MUTATING_COMMANDS: Set[str] = {
+    "rm", "mv", "cp", "chmod", "chown", "sed", "awk", "perl", "tee",
+    "truncate", "shred", "dd", "ln", "touch", "del", "erase", "rmdir", "rd",
+}
+_SHELL_SECRET_EGRESS_COMMANDS: Set[str] = {
+    "echo", "printf", "printenv", "curl", "wget", "nc", "ncat", "netcat",
+    "socat", "ssh", "scp", "rsync", "ftp", "sftp", "iwr", "irm",
+    "invoke-webrequest", "invoke-restmethod", "write-output", "write-host",
+}
+_SENSITIVE_ENV_VAR_RE = re.compile(
+    r"(?i)(?:^|_)(?:"
+    r"SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY|API_KEY|PRIVATE_KEY|"
+    r"ACCESS_KEY|CLIENT_SECRET|AUTH_TOKEN|AUTH_HEADER|BEARER|JWT|SESSION_TOKEN|"
+    r"BOT_TOKEN|SIGNING_KEY|ENCRYPTION_KEY|MASTER_KEY|DATABASE_URL|DB_PASSWORD|"
+    r"DB_PASS|REDIS_URL|STRIPE_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|"
+    r"AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|"
+    r"HF_TOKEN|NPM_TOKEN|PYPI_TOKEN|API_SECRET|SECRET_KEY"
+    r")(?:$|_)"
+)
+_PROC_ENVIRON_RE = re.compile(r"(?:^|/)proc/(?:self|thread-self|\d+)/environ(?:$|/)", re.IGNORECASE)
+_ENV_ASSIGN_TOKEN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
@@ -1283,10 +1418,233 @@ def _is_command_allowlisted(exe: str, args: List[str]) -> bool:
     return False
 
 
-def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
+def _extract_unquoted_env_vars(cmd: str) -> List[str]:
+    """Extract environment variable names expanded outside single quotes (`$VAR`, `${VAR}`, `$env:VAR`, `%VAR%`)."""
+    found: List[str] = []
+    in_single = False
+    escaped = False
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and not in_single:
+            escaped = True
+            i += 1
+            continue
+        if ch == "'":
+            in_single = not in_single
+            i += 1
+            continue
+        if not in_single:
+            if ch == "$" and i + 1 < n:
+                rest = cmd[i + 1 :]
+                m_ps = re.match(r"env:([A-Za-z_][A-Za-z0-9_]*)", rest, re.IGNORECASE)
+                if m_ps:
+                    var = m_ps.group(1)
+                    if var not in found:
+                        found.append(var)
+                    i += 1 + m_ps.end()
+                    continue
+                if rest.startswith("{"):
+                    m_br = re.match(r"\{([A-Za-z_][A-Za-z0-9_]*)", rest)
+                    if m_br:
+                        var = m_br.group(1)
+                        if var not in found:
+                            found.append(var)
+                        i += 1 + m_br.end()
+                        continue
+                m_var = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", rest)
+                if m_var:
+                    var = m_var.group(1)
+                    if var not in found:
+                        found.append(var)
+                    i += 1 + m_var.end()
+                    continue
+            elif ch == "%" and i + 2 < n:
+                m_win = re.match(r"%([A-Za-z_][A-Za-z0-9_]*)%", cmd[i:])
+                if m_win:
+                    var = m_win.group(1)
+                    if var not in found:
+                        found.append(var)
+                    i += m_win.end()
+                    continue
+        i += 1
+    return found
+
+
+def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
+    """Extract filesystem path candidates from a shell argument (flags, `<file`, `rev:path`)."""
+    cleaned = str(arg or "").strip()
+    if not cleaned:
+        return []
+    if cleaned.startswith("<"):
+        cleaned = cleaned.lstrip("<").strip()
+        if not cleaned:
+            return []
+    candidates: List[str] = []
+    if cleaned.startswith("-"):
+        if "=" in cleaned:
+            rhs = cleaned.split("=", 1)[1].strip()
+            if rhs:
+                candidates.append(rhs)
+        return candidates
+    candidates.append(cleaned)
+    low = cleaned.lower()
+    if (
+        ":" in cleaned
+        and not low.startswith(("http://", "https://"))
+        and not re.match(r"^[A-Za-z]:[/\\]", cleaned)
+    ):
+        after_colon = cleaned.split(":", 1)[1].strip()
+        if after_colon:
+            candidates.append(after_colon)
+    return candidates
+
+
+def _unwrap_shell_prefix(tokens: List[str]) -> Tuple[List[str], List[str], List[str], bool, bool]:
+    """Unwrap inline `VAR=val` assignments and wrapper commands (`env`, `sudo`, `timeout`, `nohup`, ...)."""
+    idx = 0
+    n = len(tokens)
+    wrappers_seen: List[str] = []
+    wrapper_findings: List[str] = []
+    had_inline_env = False
+    last_wrapper = ""
+
+    while idx < n:
+        m_env = _ENV_ASSIGN_TOKEN_RE.match(tokens[idx])
+        if not m_env:
+            break
+        had_inline_env = True
+        var_name = m_env.group(1).upper()
+        if var_name in _DANGEROUS_ENV_OVERRIDES:
+            flag = f"dangerous_env_override:{var_name}"
+            if flag not in wrapper_findings:
+                wrapper_findings.append(flag)
+        idx += 1
+
+    while idx < n:
+        exe = os.path.basename(tokens[idx]).lower().removesuffix(".exe").removesuffix(".com")
+        if exe not in _SHELL_WRAPPER_COMMANDS:
+            break
+        wrappers_seen.append(exe)
+        last_wrapper = exe
+        idx += 1
+
+        if exe == "env":
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-u", "-C", "-S", "--unset", "--chdir"}:
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                m_env = _ENV_ASSIGN_TOKEN_RE.match(tok)
+                if m_env:
+                    var_name = m_env.group(1).upper()
+                    if var_name in _DANGEROUS_ENV_OVERRIDES:
+                        flag = f"dangerous_env_override:{var_name}"
+                        if flag not in wrapper_findings:
+                            wrapper_findings.append(flag)
+                    idx += 1
+                    continue
+                break
+        elif exe == "timeout":
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-s", "-k", "--signal", "--kill-after"}:
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                break
+            if idx < n and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", tokens[idx].lower()):
+                idx += 1
+        elif exe == "nice":
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-n", "--adjustment"}:
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                break
+        elif exe in {"sudo", "doas"}:
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-u", "-g", "-p", "-h", "-r", "-t", "-C", "-U", "--user", "--group", "--host"}:
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                m_env = _ENV_ASSIGN_TOKEN_RE.match(tok)
+                if m_env:
+                    var_name = m_env.group(1).upper()
+                    if var_name in _DANGEROUS_ENV_OVERRIDES:
+                        flag = f"dangerous_env_override:{var_name}"
+                        if flag not in wrapper_findings:
+                            wrapper_findings.append(flag)
+                    idx += 1
+                    continue
+                break
+        elif exe == "strace":
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok in {"-e", "-o", "-p", "-s", "-S", "-u", "-P", "-E"}:
+                    if tok == "-E" and idx + 1 < n:
+                        m_env = _ENV_ASSIGN_TOKEN_RE.match(tokens[idx + 1])
+                        if m_env and m_env.group(1).upper() in _DANGEROUS_ENV_OVERRIDES:
+                            flag = f"dangerous_env_override:{m_env.group(1).upper()}"
+                            if flag not in wrapper_findings:
+                                wrapper_findings.append(flag)
+                    idx += 2
+                    continue
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                break
+        else:
+            while idx < n:
+                tok = tokens[idx]
+                if tok == "--":
+                    idx += 1
+                    break
+                if tok.startswith("-"):
+                    idx += 1
+                    continue
+                break
+
+    bare_env_dump = bool(idx >= n and last_wrapper == "env")
+    return tokens[idx:], wrappers_seen, wrapper_findings, bare_env_dump, had_inline_env
+
+
+def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig] = None) -> Dict[str, Any]:
     """Layer 1 structural POSIX/Windows shell parser using shlex tokenization.
 
-    Combines explicit destructive pattern blocking with strict allowlist recognition
+    Combines explicit destructive pattern blocking, wrapper unwrapping (`env`, `sudo`,
+    `timeout`), protected-path/environ screening, and strict allowlist recognition
     so unrecognized shell commands escalate rather than auto-allowing.
     """
     if not cmd_str or not str(cmd_str).strip():
@@ -1297,6 +1655,9 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
             "findings": [],
             "commands": [],
             "risk_class": "READ_ONLY",
+            "protected_path_reads": [],
+            "sensitive_env_access": False,
+            "sensitive_env_vars": [],
         }
 
     cmd = str(cmd_str).strip()
@@ -1311,6 +1672,9 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
             "findings": ["destructive_sql_command"],
             "commands": [cmd.split()[0].lower()],
             "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+            "protected_path_reads": [],
+            "sensitive_env_access": False,
+            "sensitive_env_vars": [],
         }
 
     findings: List[str] = []
@@ -1334,10 +1698,15 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
         else:
             unprivileged_redirects.append(r_target)
 
-    # First inspect pipe sequences for download-and-execute (`curl ... | sh`)
+    # First inspect pipe sequences for download-and-execute (`curl ... | sh`), unwrapping prefixes
     if "|" in cmd and "||" not in cmd:
-        pipes = [_tokenize_shell_segment(p) for p in cmd.split("|")]
-        pipe_cmds = [os.path.basename(p[0]).lower() for p in pipes if p]
+        pipe_cmds: List[str] = []
+        for p in cmd.split("|"):
+            ptoks = _tokenize_shell_segment(p)
+            prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+            eff = prem or ptoks
+            if eff:
+                pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
         if any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(
             c in ("sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3")
             for c in pipe_cmds[1:]
@@ -1349,23 +1718,102 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
                 "findings": ["remote_code_execution_pipe"],
                 "commands": pipe_cmds,
                 "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+                "protected_path_reads": [],
+                "sensitive_env_access": False,
+                "sensitive_env_vars": [],
             }
 
     subcommands = re.split(r"(?:&&|\|\||;|\|)", cmd)
     parsed_cmds: List[str] = []
     unrecognized: List[str] = []
+    protected_path_reads: List[str] = []
+    sensitive_env_vars: List[str] = []
+    sensitive_env_access = False
 
     for sub in subcommands:
         tokens = _tokenize_shell_segment(sub)
         if not tokens:
             continue
-        exe = os.path.basename(tokens[0]).lower().removesuffix(".exe").removesuffix(".com")
+
+        rem_tokens, wrappers_seen, wrapper_findings, bare_env_dump, had_inline_env = _unwrap_shell_prefix(tokens)
+        findings.extend(wrapper_findings)
+
+        if bare_env_dump:
+            sensitive_env_access = True
+            parsed_cmds.append("env")
+            unrecognized.append("env")
+            continue
+
+        if not rem_tokens:
+            if wrappers_seen:
+                parsed_cmds.append(wrappers_seen[0])
+                unrecognized.append(wrappers_seen[0])
+            elif had_inline_env:
+                parsed_cmds.append("env_assignment")
+                unrecognized.append("env_assignment")
+            continue
+
+        exe = os.path.basename(rem_tokens[0]).lower().removesuffix(".exe").removesuffix(".com")
         parsed_cmds.append(exe)
-        args = tokens[1:]
+        args = rem_tokens[1:]
         args_lower = [a.lower() for a in args]
 
+        if wrappers_seen or had_inline_env:
+            unrecognized.append(wrappers_seen[0] if wrappers_seen else "env_assignment")
         if not _is_command_allowlisted(exe, args):
             unrecognized.append(exe)
+
+        # Bare or secret-targeted environment inspection commands
+        if exe == "printenv":
+            non_flag_args = [a for a in args if not a.startswith("-")]
+            if not non_flag_args:
+                sensitive_env_access = True
+            elif any(_SENSITIVE_ENV_VAR_RE.search(a) for a in non_flag_args):
+                findings.append("shell_sensitive_env_exposure")
+                for a in non_flag_args:
+                    if _SENSITIVE_ENV_VAR_RE.search(a):
+                        sensitive_env_vars.append(a)
+            else:
+                sensitive_env_access = True
+        elif exe in {"set", "export", "declare", "typeset"}:
+            non_flag_args = [a for a in args if not a.startswith("-")]
+            if not non_flag_args or any("=" not in a for a in non_flag_args):
+                sensitive_env_access = True
+        elif exe == "compgen" and any("e" in a.lstrip("-") for a in args_lower if a.startswith("-")):
+            sensitive_env_access = True
+
+        # Check PowerShell env: drive access and filesystem protected paths across all args
+        for a, a_low in zip(args, args_lower):
+            if a_low in {"env:", "env:\\", "env:/"}:
+                sensitive_env_access = True
+            elif a_low.startswith("env:"):
+                env_key = a[4:].lstrip("\\/")
+                if _SENSITIVE_ENV_VAR_RE.search(env_key):
+                    findings.append("shell_sensitive_env_exposure")
+                    sensitive_env_vars.append(env_key)
+                else:
+                    sensitive_env_access = True
+
+            for cand in _extract_candidate_paths_from_arg(a):
+                cand_norm = cand.replace("\\", "/")
+                if _PROC_ENVIRON_RE.search(cand_norm):
+                    findings.append("shell_proc_environ_access")
+                    break
+                if is_protected_path(cand, policy=policy):
+                    if exe in _SHELL_MUTATING_COMMANDS:
+                        findings.append("shell_protected_path_mutation")
+                    else:
+                        protected_path_reads.append(cand)
+                    break
+
+        # Detect unquoted shell variable expansions targeting secret/token names
+        for var_name in _extract_unquoted_env_vars(sub):
+            if _SENSITIVE_ENV_VAR_RE.search(var_name):
+                sensitive_env_vars.append(var_name)
+                if exe in _SHELL_SECRET_EGRESS_COMMANDS:
+                    findings.append("shell_sensitive_env_exposure")
+                else:
+                    sensitive_env_access = True
 
         if exe == "rm":
             has_recursive = any(
@@ -1412,9 +1860,16 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
         elif exe in {"sh", "bash", "zsh", "dash"}:
             for idx_arg, a in enumerate(args_lower):
                 if (a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a)) and idx_arg + 1 < len(args):
-                    inner_res = analyze_shell_command(args[idx_arg + 1])
+                    inner_res = analyze_shell_command(args[idx_arg + 1], policy=policy)
                     if not inner_res["is_safe"]:
                         findings.extend(inner_res["findings"])
+                    protected_path_reads.extend(inner_res.get("protected_path_reads", []))
+                    sensitive_env_vars.extend(inner_res.get("sensitive_env_vars", []))
+                    if inner_res.get("sensitive_env_access"):
+                        sensitive_env_access = True
+                    if not inner_res.get("allowlisted", False):
+                        for u in inner_res.get("unrecognized_commands", []):
+                            unrecognized.append(u)
 
         elif exe in {"python", "python3"}:
             for idx_arg, a in enumerate(args_lower):
@@ -1425,7 +1880,16 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
 
     is_safe = len(findings) == 0
     redirection_requires_escalation = bool(is_safe and unprivileged_redirects)
-    allowlisted = bool(is_safe and parsed_cmds and len(unrecognized) == 0 and not redirection_requires_escalation)
+    dedup_protected = list(dict.fromkeys(protected_path_reads))
+    dedup_env_vars = list(dict.fromkeys(sensitive_env_vars))
+    allowlisted = bool(
+        is_safe
+        and parsed_cmds
+        and len(unrecognized) == 0
+        and not redirection_requires_escalation
+        and not dedup_protected
+        and not sensitive_env_access
+    )
     risk_class = (
         "IRREVERSIBLE_DESTRUCTIVE"
         if not is_safe
@@ -1434,7 +1898,7 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
             if allowlisted
             else (
                 "REVERSIBLE_WRITE"
-                if redirection_requires_escalation and not unrecognized
+                if redirection_requires_escalation and not unrecognized and not dedup_protected and not sensitive_env_access
                 else "EXTERNAL_ACTION"
             )
         )
@@ -1442,31 +1906,16 @@ def analyze_shell_command(cmd_str: Optional[str]) -> Dict[str, Any]:
     return {
         "is_safe": is_safe,
         "allowlisted": allowlisted,
-        "unrecognized_commands": unrecognized,
+        "unrecognized_commands": list(dict.fromkeys(unrecognized)),
         "findings": list(dict.fromkeys(findings)),
         "commands": parsed_cmds,
         "risk_class": risk_class,
         "redirection_targets": unprivileged_redirects,
         "redirection_requires_escalation": redirection_requires_escalation,
+        "protected_path_reads": dedup_protected,
+        "sensitive_env_access": sensitive_env_access,
+        "sensitive_env_vars": dedup_env_vars,
     }
-
-
-_REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"sk-proj-[A-Za-z0-9_\-]{12,}"), "[REDACTED_OPENAI_KEY]"),
-    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
-    (re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY]"),
-)
-
-
-def redact_secrets(text: str) -> str:
-    """Mask known credential/token patterns before logging or printing errors."""
-    out = str(text or "")
-    for pat, repl in _REDACT_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
 
 
 def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -1680,11 +2129,43 @@ def decide(
         if l0["decision"] == "escalate":
             return _finish("escalate", "requires_confirmation", ["escalate", "deny"], l0["reason_code"], 0)
 
-        # --- Layer 1: Structural AST & Allowlist-First Shell Parsers ---
+        # --- Layer 1: Structural AST, Secret Egress & Allowlist-First Shell Parsers ---
+        egress_secret_types = _scan_outbound_secret_egress(
+            input_data,
+            cmd_str=cmd_str,
+            query_text=query_text,
+            target_path=target_path,
+            skip_diff_fields=(diff_text is not None),
+        )
+        if egress_secret_types:
+            return _finish(
+                "deny",
+                f"secret_egress_detected:{egress_secret_types[0]}",
+                ["deny"],
+                "layer1_secret_egress_veto",
+                1,
+            )
+
         if cmd_str:
-            sh_res = analyze_shell_command(cmd_str)
+            sh_res = analyze_shell_command(cmd_str, policy=cfg)
             if not sh_res["is_safe"]:
                 return _finish("deny", sh_res["findings"][0], ["deny"], "layer1_shell_parser_veto", 1)
+            if sh_res.get("protected_path_reads"):
+                return _finish(
+                    "escalate",
+                    "protected_path_shell_read",
+                    ["allow", "deny"],
+                    "layer1_protected_path_shell_read_escalate",
+                    1,
+                )
+            if sh_res.get("sensitive_env_access"):
+                return _finish(
+                    "escalate",
+                    "sensitive_env_access",
+                    ["allow", "deny"],
+                    "layer1_sensitive_env_access_escalate",
+                    1,
+                )
             if sh_res.get("redirection_requires_escalation"):
                 return _finish(
                     "escalate",
