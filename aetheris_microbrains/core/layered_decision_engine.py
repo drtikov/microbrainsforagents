@@ -110,6 +110,12 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "/etc/passwd",
     "/etc/shadow",
     "/etc/sudoers",
+    ".claude/",
+    ".claude",
+    ".cursor/",
+    ".cursor",
+    ".codex/",
+    ".codex",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks",
@@ -266,7 +272,14 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
     for pat in cfg.protected_patterns:
         if pat == ".env":
             continue
+        clean_pat = pat.strip("/").lower()
+        if not clean_pat:
+            continue
         if pat in norm_path or pat in normalized:
+            return True
+        if clean_pat in raw_segments:
+            return True
+        if norm_path == clean_pat or normalized == clean_pat:
             return True
     return False
 
@@ -1668,16 +1681,31 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
         if args_lower[0] in SAFE_GIT_SUBCOMMANDS:
             return True
         if is_dev and args_lower[0] in SAFE_DEV_GIT_SUBCOMMANDS:
+            # git clean in dev profile must not allow -x/-X (which deletes ignored files like .env)
+            if args_lower[0] == "clean":
+                if any("x" in a or "X" in a for a in args_lower[1:] if a.startswith("-")):
+                    return False
             return True
         return False
     if exe in {"python", "python3"}:
         if args_lower in (["--version"], ["-v"]):
             return True
-        if len(args_lower) >= 2 and args_lower[0] == "-m" and args_lower[1] in {"pytest", "unittest", "py_compile"}:
-            return True
-        if is_dev and len(args_lower) >= 1 and not any(a.startswith("-c") for a in args_lower):
-            # Allow running python script.py under dev profile if not evaluating inline -c
-            return True
+        if len(args_lower) >= 2 and args_lower[0] == "-m":
+            # Guard against serving local files/credentials over HTTP (e.g. python -m http.server)
+            mod_target = args_lower[1].replace("-", "_")
+            if mod_target in {"http.server", "http_server"}:
+                return False
+            if mod_target in {"pytest", "unittest", "py_compile"}:
+                return True
+        if is_dev and len(args_lower) >= 1:
+            # Clustered or standalone short flags: -c, -Bc, -uc, -c<code>, etc.
+            has_c_flag = any(
+                a.startswith("-") and not a.startswith("--") and "c" in a
+                for a in args_lower
+            )
+            has_http = any(a in {"http.server", "http_server"} for a in args_lower)
+            if not has_c_flag and not has_http:
+                return True
         return False
     return False
 
@@ -1754,11 +1782,13 @@ def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
         if not cleaned:
             return []
     candidates: List[str] = []
+    if "=" in cleaned:
+        rhs = cleaned.split("=", 1)[1].strip()
+        if rhs.startswith("@"):
+            rhs = rhs.lstrip("@").strip()
+        if rhs:
+            candidates.append(rhs)
     if cleaned.startswith("-"):
-        if "=" in cleaned:
-            rhs = cleaned.split("=", 1)[1].strip()
-            if rhs:
-                candidates.append(rhs)
         return candidates
     candidates.append(cleaned)
     low = cleaned.lower()
@@ -1991,6 +2021,28 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         else:
             unprivileged_redirects.append(r_target)
 
+    # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
+    for line_seg in re.split(r"\r?\n", cmd):
+        if "|" in line_seg and "||" not in line_seg:
+            pipe_segments = line_seg.split("|")
+            has_protected_read = False
+            has_egress_sink = False
+            for p in pipe_segments:
+                ptoks = _tokenize_shell_segment(p)
+                prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+                eff = prem or ptoks
+                if not eff:
+                    continue
+                pexe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com")
+                if pexe in _SHELL_SECRET_EGRESS_COMMANDS:
+                    has_egress_sink = True
+                for arg_tok in eff[1:]:
+                    for cand in _extract_candidate_paths_from_arg(arg_tok):
+                        if is_protected_path(cand, policy=policy):
+                            has_protected_read = True
+            if has_protected_read and has_egress_sink:
+                findings.append("shell_piped_protected_path_egress")
+
     # First inspect pipe sequences per line for download-and-execute (`curl ... | sh`), unwrapping prefixes
     for line_seg in re.split(r"\r?\n", cmd):
         if "|" in line_seg and "||" not in line_seg:
@@ -2187,10 +2239,18 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
         elif exe in {"python", "python3"}:
             for idx_arg, a in enumerate(args_lower):
-                if a == "-c" and idx_arg + 1 < len(args):
-                    inline_res = analyze_code_diff("<inline>.py", args[idx_arg + 1])
-                    if not inline_res["syntax_valid"] or not inline_res["security_clean"]:
-                        findings.extend(f"unsafe_inline_python:{f}" for f in inline_res["findings"])
+                has_inline_c = (a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a))
+                if has_inline_c:
+                    inline_code = ""
+                    if len(a) > 2 and a.startswith("-") and not a.startswith("--") and not a.endswith("c"):
+                        # E.g. -cprint(1)
+                        inline_code = a.split("c", 1)[1]
+                    elif idx_arg + 1 < len(args):
+                        inline_code = args[idx_arg + 1]
+                    if inline_code:
+                        inline_res = analyze_code_diff("<inline>.py", inline_code)
+                        if not inline_res["syntax_valid"] or not inline_res["security_clean"]:
+                            findings.extend(f"unsafe_inline_python:{f}" for f in inline_res["findings"])
 
     is_safe = len(findings) == 0
     redirection_requires_escalation = bool(is_safe and unprivileged_redirects)

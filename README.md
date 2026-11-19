@@ -115,7 +115,11 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
   * Every decision writes a forensic entry to `memory/decision_journal.jsonl` containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, conformal error bounds, and a redacted `payload_preview`.
   * Inspect reasons instantly in terminal: run `python -m aetheris_microbrains.audit --last` to see why an agent was stopped, or `--summary` for aggregate health metrics.
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
-* **Configurable Rule Governance & File-Based Policies:** Load custom team policies without modifying Python code using `PolicyConfig.from_file("my_policy.yaml")` or JSON. See [SECURITY.md](SECURITY.md) for full threat model and governance details.
+* **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
+  * Load team policies dynamically via `PolicyConfig.from_file("my_policy.yaml")` or JSON.
+  * **`strict` (default):** Zero-trust execution—escalates unknown commands or mutations to human confirmation.
+  * **`dev` profile:** Cuts human escalation fatigue by automatically allowing routine safe commands (`git add/commit`, `pip/npm install`, `python script.py`, `mkdir`, single-file `rm`) while **strictly denying** destructive operations (`rm -rf`, `git clean -fdx`), raw credential reads (`.ssh`, `.claude`, `.env`), and network exfiltration sinks (`curl -d @.env`, `cat .env | curl`).
+  * See [SECURITY.md](SECURITY.md) for full threat model, profile details, and governance rules.
 
 ---
 
