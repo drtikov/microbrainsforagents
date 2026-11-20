@@ -81,12 +81,11 @@ Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destruct
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
 Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations, Honest Statistics & Audit Trail (`v0.7.1`–`v0.7.6`)
+### 4. 🧭 Reliable Escalations, Safe Fallbacks & Audit Trail (`v0.7.1`–`v0.7.6`)
 - **Safe Timeout Contracts & Fail-Closed Boundaries:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission. Missing context (e.g. unsupplied `file_content` for ambiguous diffs) likewise degrades safely to `"ask"` rather than auto-allowing.
-- **Statistical Honesty & Conformal Discipline:**
-  - True split-conformal coverage requires sufficient calibration sample sizes ($n_{cal} \ge 120$). When sample sizes are small or uncalibrated, `decide()`, `calibrate_conformal()`, and `infer_conformal()` honestly emit `upper_error_bound_95: null` (`statistical_confidence_status: "unknown"`).
-  - Mondrian (per-class) conditioning requires $\ge 20$ samples per class to avoid trivial set collapse; when data is sparse, the engine safely flags `conformal_guarantee_valid = False` or pools calibration.
-  - On out-of-domain linguistic shifts, we openly report empirical accuracy drops (e.g. 70.0% on zero-token-overlap morphological shifts; see Section 6) rather than claiming synthetic exchangeability guarantees.
+- **Fail-Closed Fallback on Tool Ambiguity:**
+  - In tool routing, if the confidence score falls below the required threshold, the engine safely abstains from pruning and falls back to escalating the full catalog to avoid starving the agent of required tools.
+  - When calibration data is insufficient or out-of-domain linguistic shifts occur, confidence is reported honestly as unknown rather than outputting ungrounded heuristic probabilities.
 - **Flag-Aware Shell Unwrapping & Structural AST Inspection:**
   - Does not rely on naive command-name string matching: unwraps nested wrappers (`xargs`, `find -exec`, `env`, `sudo`, `timeout`, `nohup`, inline `VAR=val`, and `LD_PRELOAD` overrides), tokenizes arguments via `shlex`, and validates path-bearing flags (e.g. `git log --output=...`, `-o <path>`) against protected targets (`is_protected_path`).
   - Diffs are parsed into real Python Abstract Syntax Trees (`ast.parse`) with `SecurityASTVisitor` detecting dynamic code execution (`eval`, `exec`, `subprocess(shell=True)`), dynamic imports (`importlib.import_module`), obfuscated attribute access (`getattr(os, "sys" + "tem")`), and sensitive env reads piped into network sinks (`ast_secret_exfil_pattern`).
@@ -95,7 +94,7 @@ Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check wh
   - Microbrains solves this with **`SessionToolSurface(cluster_pinning=True)`**, keeping tool namespaces sticky across multi-turn sessions to preserve **56.8% cache-adjusted net savings** without cache churn.
 - **Outbound Secret Egress & Post-Tool Scrubbing:** Inspects tool arguments across all tools (shell commands, `WebFetch`, MCP payloads) to block raw credential exfiltration (`layer1_secret_egress_veto`), and provides `mb.scrub_tool_output()` / `python -m aetheris_microbrains.hook --event post-tool-use` to sanitize returned credentials before context persistence.
 - **Human-Friendly Audit CLI & Policy Governance:**
-  - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`, conformal bounds) to `memory/decision_journal.jsonl`.
+  - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`) to `memory/decision_journal.jsonl`.
   - Humans can inspect why an action stopped using `python -m aetheris_microbrains.audit --last` or `--summary`.
   - Security policies can be loaded from external files via `PolicyConfig.from_file("security_rules.yaml")` without modifying Python code (see [SECURITY.md](SECURITY.md)).
 
@@ -155,11 +154,10 @@ The repository also includes standalone research modules demonstrating pure-NumP
    * Hardcoded API secret detection (Stripe `sk_live_...`, JWT, database URIs, Anthropic, OpenAI, GitHub, Google, PEM private keys).
    * Allowlist-first `shlex` shell tokenizer with wrapper unwrapping (`xargs`, `find -exec`, `env`, `sudo`, `timeout`, `nohup`), newline separation handling, and shell script / Makefile scanning (`rm -rf`, `curl | sh`, `dd of=/dev/` deny; unknown commands safely escalate).
    * Uninspected tools without diffs or commands escalate to `"ask"` rather than auto-approving.
-3. **Layer 2: Tool Narrowing & Conformal Abstention**
+3. **Layer 2: Tool Narrowing & Fail-Safe Catalog Abstention**
    * Schema-driven hybrid retrieval (`ToolSchemaIndex`) combining Okapi BM25 (`k1=1.5`, `b=0.75`), character-3-gram cosine similarity, and optional dense embedding vectors via Reciprocal Rank Fusion (`k=60`).
    * Prompt-cache-friendly namespace cluster pinning (`SessionToolSurface(cluster_pinning=True)`) preserving coherent namespaces (`git_*`, `docker_*`) to avoid prompt-prefix cache invalidation.
-   * Online Adaptive Conformal Inference (`ToolRoutingMoE.update_online_crc()`) dynamically adjusting per-expert nonconformity quantiles under live feedback with honest provenance.
-   * Calibrated micro-classifiers with empirical conformal prediction sets, exact Clopper-Pearson bounds, and cross-process decision journal drift detection.
+   * Calibrated routing with fail-safe abstention: if a query cannot be matched to the top tools with high confidence, the router abstains from pruning and provides the full tool surface to prevent task degradation.
 4. **Layer 3: Honest Escalation**
    * Structured fallback returning `escalate` (in Claude Code hooks: `permissionDecision: "ask"`) with full context for human or LLM review.
 
