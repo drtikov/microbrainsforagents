@@ -267,6 +267,46 @@ app = FastAPI(
 )
 
 
+def _is_loopback_address(host: Optional[str]) -> bool:
+    """True if *host* refers to a loopback interface (127.0.0.0/8, ::1, localhost).
+
+    Non-IP hostnames (e.g. "testclient" used by Starlette's TestClient, empty
+    unix-socket hosts) are treated as loopback: the hard bind-time guard in
+    ``__main__`` refuses non-loopback binds without a token, so this check is
+    only defense in depth for actual remote client addresses.
+    """
+    if not host:
+        return True
+    h = str(host).strip().lower().strip("[]")
+    if h in {"localhost", "::1"}:
+        return True
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return True
+
+
+def _validate_bind_host(host: str) -> Optional[str]:
+    """Return a refusal reason when binding *host* would be unsafe without auth.
+
+    Returns None when the bind is acceptable: loopback, or a token is
+    configured, or the operator explicitly set AETHERIS_ALLOW_UNAUTHENTICATED=1.
+    """
+    if _is_loopback_address(host):
+        return None
+    if str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip():
+        return None
+    if os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1":
+        return None
+    return (
+        f"Refusing to bind non-loopback host {host!r} without authentication. "
+        "Set AETHERIS_SERVER_TOKEN to require a bearer token, bind 127.0.0.1, or "
+        "set AETHERIS_ALLOW_UNAUTHENTICATED=1 only for isolated local testing."
+    )
+
+
 @app.middleware("http")
 async def _security_and_size_middleware(request: Request, call_next):
     max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
@@ -281,24 +321,38 @@ async def _security_and_size_middleware(request: Request, call_next):
     if len(body_bytes) > max_body:
         return JSONResponse({"detail": "Payload too large"}, status_code=413)
 
+    # Auth (fail-closed, 2026-11-20): previously auth ran only when
+    # AETHERIS_SERVER_TOKEN was set, and even then only on /microbrain/* paths -
+    # tokenless deployments silently served every endpoint (intent, validate,
+    # prefilter, gate, load) to any client, and /metrics, /dashboard stayed
+    # unauthenticated even with a token configured.
     req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
-    if request.url.path.startswith("/microbrain/"):
-        # Enforce authentication on all /microbrain/ endpoints unless explicitly bound to loopback without token
-        if req_token:
+    if req_token:
+        if request.url.path != "/health":
             auth_hdr = request.headers.get("authorization", "")
             if not auth_hdr.lower().startswith("bearer "):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             supplied = auth_hdr[7:].strip()
-            if not hmac.compare_digest(supplied, req_token):
+            if not hmac.compare_digest(
+                supplied.encode("utf-8"), req_token.encode("utf-8")
+            ):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-        else:
-            # If no token is configured, deny external non-loopback requests
-            client_host = getattr(request.client, "host", "") if request.client else ""
-            if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
-                return JSONResponse(
-                    {"detail": "Authentication token required for non-loopback access"},
-                    status_code=403,
-                )
+    else:
+        # No token configured: only loopback clients may proceed. This keeps an
+        # accidental 0.0.0.0 bind from exposing the computational endpoints to
+        # the network; remote callers get 403 with a remediation hint.
+        client_host = getattr(getattr(request, "client", None), "host", None)
+        if not _is_loopback_address(client_host):
+            log.warning(
+                "Rejected unauthenticated non-loopback request from %s; set AETHERIS_SERVER_TOKEN to enable remote access",
+                client_host,
+            )
+            return JSONResponse(
+                {
+                    "detail": "Forbidden: no AETHERIS_SERVER_TOKEN configured; only loopback clients are permitted."
+                },
+                status_code=403,
+            )
 
     return await call_next(request)
 
@@ -915,6 +969,24 @@ if __name__ == "__main__":
     microbrain_cfg = _microbrain_config
     host = microbrain_cfg.get("host", os.environ.get("MICROBRAIN_HOST", "127.0.0.1"))
     port = microbrain_cfg.get("port", int(os.environ.get("MICROBRAIN_PORT", "8080")))
-    
+
+    if os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1":
+        log.warning(
+            "AETHERIS_ALLOW_UNAUTHENTICATED=1: tokenless remote access explicitly "
+            "enabled (fail-closed network guard disabled) - do NOT use in production."
+        )
+
+    refusal = _validate_bind_host(str(host))
+    if refusal:
+        log.error(refusal)
+        raise SystemExit(2)
+
+    req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
+    if req_token and len(req_token) < 16:
+        log.warning(
+            "AETHERIS_SERVER_TOKEN is shorter than 16 characters; generate a long "
+            "random token instead (e.g. `openssl rand -hex 32`)."
+        )
+
     log.info(f"Starting Microbrain HTTP Server on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="info")
