@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Dict, Tuple
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # Hook
