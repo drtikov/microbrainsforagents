@@ -309,7 +309,11 @@ def _validate_bind_host(host: str) -> Optional[str]:
 
 @app.middleware("http")
 async def _security_and_size_middleware(request: Request, call_next):
-    max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
+    try:
+        max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
+    except (ValueError, TypeError):
+        max_body = 1048576
+
     cl_hdr = request.headers.get("content-length")
     if cl_hdr:
         try:
@@ -338,11 +342,11 @@ async def _security_and_size_middleware(request: Request, call_next):
             ):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     else:
-        # No token configured: only loopback clients may proceed. This keeps an
-        # accidental 0.0.0.0 bind from exposing the computational endpoints to
-        # the network; remote callers get 403 with a remediation hint.
+        # No token configured: only loopback clients may proceed unless
+        # AETHERIS_ALLOW_UNAUTHENTICATED=1 is explicitly set.
+        allow_unauth = os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1"
         client_host = getattr(getattr(request, "client", None), "host", None)
-        if not _is_loopback_address(client_host):
+        if not allow_unauth and not _is_loopback_address(client_host):
             log.warning(
                 "Rejected unauthenticated non-loopback request from %s; set AETHERIS_SERVER_TOKEN to enable remote access",
                 client_host,

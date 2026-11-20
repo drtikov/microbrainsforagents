@@ -210,3 +210,17 @@ class TestHookContentInspectionIntegration:
         assert res["decision"] == "deny"
         assert res["exit_code"] == 2
         assert "shell_direct_rce_builtin" in res["reason"]
+
+
+def test_error_text_redaction_scrubs_secrets():
+    """The error-text redaction layer (reason text, shadow journal error
+    records) must scrub credentials. Restored from the original reviewer test
+    pack: the adopted 212-line version dropped this test, so the H4 mutant
+    (redaction disabled) survived mutation round 3 at 10/11."""
+    from aetheris_microbrains.hook import _redact_error_text
+    raw = "boom at sk-proj-abcdefghijklmnop1234 and AKIAIOSFODNN7EXAMPLE and ghp_abcdefghijklmnopqrstuvwxyzab"
+    out = _redact_error_text(raw)
+    assert "sk-proj-abcdefghijklmnop1234" not in out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+    assert "ghp_abcdefghijklmnopqrstuvwxyzab" not in out
+    assert "[REDACTED" in out
