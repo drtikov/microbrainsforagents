@@ -2213,37 +2213,98 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
 
-    # First inspect pipe sequences per pipeline block for code injection and download-and-execute, unwrapping prefixes
+    # Inspect pipe sequences per pipeline block for RCE patterns:
+    # (1) remote download-and-execute: curl|sh, wget|bash
+    # (2) local-data-into-executor: echo|sh, base64 -d|sh, cat script|python, etc.
+    # (3) xargs acting as an executor of piped input: echo path | xargs rm
+    # Uses BOTH raw (pre-unwrap) and unwrapped executables so that wrapper commands
+    # (sudo, env, xargs) are retained in the source/sink lists even after unwrapping.
     for logical_block in _split_command_pipeline_blocks(cmd):
         # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
         norm_block = logical_block.replace("|&", "|")
         if "|" in norm_block:
             pipe_cmds: List[str] = []
+            # Also track raw (pre-unwrap) executables so that `xargs <cmd>` and `sudo <cmd>`
+            # retain `xargs`/`sudo` as the segment's effective executor. Without this, the
+            # wrapper-unwrapping in _unwrap_shell_prefix discards `xargs`, hiding the fact
+            # that `echo payload | xargs rm` is an RCE pattern (xargs runs `rm` on piped data).
+            raw_executables: List[str] = []
             for p in norm_block.split("|"):
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
                 sub_segments = re.split(r"(?:&&|\|\||;|\r?\n)", p)
                 for sub_seg in sub_segments:
                     ptoks = _tokenize_shell_segment(sub_seg)
+                    if ptoks:
+                        raw_executables.append(
+                            os.path.basename(ptoks[0]).lower().removesuffix(".exe").removesuffix(".com")
+                        )
                     prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
                     eff = prem or ptoks
                     if eff:
                         pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
-            code_exec_sinks = {"sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3"}
-            data_source_cmds = {"curl", "wget", "echo", "printf", "cat", "base64", "openssl"}
-            if (any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(c in code_exec_sinks for c in pipe_cmds[1:])) or (
-                any(c in data_source_cmds for c in pipe_cmds[:-1]) and any(c in code_exec_sinks for c in pipe_cmds[1:])
-            ):
+            # RCE sinks: any pipe destination (or later segment) that executes its input as code.
+            # NOTE: `xargs <cmd>` is tokenized as ['xargs', '<cmd>']; only `xargs` lands in
+            # pipe_cmds, so `xargs` is treated as a sink (it runs its arg on piped data).
+            # NOTE: `tee` is intentionally NOT a sink — `echo x | tee file` is benign.
+            _RCE_PIPE_SINKS = {
+                "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell",
+                "python", "python3", "perl", "ruby", "node", "exec", "eval",
+                "source", "xargs",
+            }
+            # Sources: segments producing attacker-controllable data flowing into an RCE sink.
+            # Conservative list — only commands whose stdout is the *payload* being executed.
+            # NOTE: `git`/`find`/`ls` are intentionally NOT sources: their stdout is filenames,
+            # not shell code, so `git ls-files | xargs grep` is benign.
+            _RCE_PIPE_SOURCES = {
+                # Remote fetchers (existing remote_code_execution_pipe behavior).
+                "curl", "wget",
+                # Local data producers whose stdout can carry attacker-controlled shell code.
+                "echo", "printf", "cat", "head", "tail", "sed", "awk", "cut", "tr",
+                "base64", "base32", "openssl", "xxd", "od", "jq", "yq",
+            }
+            # Use a UNION of raw_executables (pre-unwrap) and pipe_cmds (post-unwrap) so that
+            # both `echo payload | xargs rm` (xargs unwrapped away) AND `env curl | env sh`
+            # (env unwrapped away) are detected.
+            all_executors = list(dict.fromkeys(raw_executables + pipe_cmds))  # de-dup, preserve order
+            # Source = any non-final segment; Sink = any non-first segment.
+            sources = all_executors[:-1]
+            sinks = all_executors[1:]
+            if any(c in _RCE_PIPE_SOURCES for c in sources) and any(c in _RCE_PIPE_SINKS for c in sinks):
                 return {
                     "is_safe": False,
                     "allowlisted": False,
-                    "unrecognized_commands": pipe_cmds,
+                    "unrecognized_commands": all_executors,
                     "findings": ["remote_code_execution_pipe"],
-                    "commands": pipe_cmds,
+                    "commands": all_executors,
                     "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
                     "protected_path_reads": [],
                     "sensitive_env_access": False,
                     "sensitive_env_vars": [],
                 }
+
+    # `eval`/`exec`/`source`/`.` invoked directly (no pipe) execute attacker-controlled
+    # argument strings as shell code. Flag as RCE. Checked here (outside the pipe block)
+    # so it also fires for standalone `eval "..."`, `source script`, `. ./init.sh`.
+    _DIRECT_RCE_BUILTINS = {"eval", "exec", "source"}
+    for logical_block in _split_command_pipeline_blocks(cmd):
+        for sub_seg in re.split(r"(?:&&|\|\||;|\r?\n)", logical_block):
+            toks = _tokenize_shell_segment(sub_seg)
+            prem, _, _, _, _ = _unwrap_shell_prefix(toks)
+            eff = prem or toks
+            if eff:
+                exe0 = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com")
+                if exe0 in _DIRECT_RCE_BUILTINS or (exe0 == "." and len(eff) > 1):
+                    return {
+                        "is_safe": False,
+                        "allowlisted": False,
+                        "unrecognized_commands": [exe0],
+                        "findings": ["shell_direct_rce_builtin"],
+                        "commands": [exe0],
+                        "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+                        "protected_path_reads": [],
+                        "sensitive_env_access": False,
+                        "sensitive_env_vars": [],
+                    }
 
     subcommands = re.split(r"(?:&&|\|\||;|\||\r?\n)", cmd)
     parsed_cmds: List[str] = []
@@ -2355,7 +2416,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                 for a in args_lower
                 if not a.startswith("-")
             )
-            if has_recursive and (targets_danger or "xargs" in wrappers_seen):
+            if has_recursive and targets_danger:
                 findings.append("destructive_rm_rf")
 
         elif exe == "dd":
@@ -2412,20 +2473,6 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     if not inner_res.get("allowlisted", False):
                         for u in inner_res.get("unrecognized_commands", []):
                             unrecognized.append(u)
-
-        elif exe == "eval":
-            if args:
-                eval_inner_cmd = " ".join(args)
-                inner_res = analyze_shell_command(eval_inner_cmd, policy=policy)
-                if not inner_res["is_safe"]:
-                    findings.extend(inner_res["findings"])
-                protected_path_reads.extend(inner_res.get("protected_path_reads", []))
-                sensitive_env_vars.extend(inner_res.get("sensitive_env_vars", []))
-                if inner_res.get("sensitive_env_access"):
-                    sensitive_env_access = True
-                if not inner_res.get("allowlisted", False):
-                    for u in inner_res.get("unrecognized_commands", []):
-                        unrecognized.append(u)
 
         elif exe in {"python", "python3"}:
             for idx_arg, a in enumerate(args_lower):
