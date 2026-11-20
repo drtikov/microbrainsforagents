@@ -444,11 +444,40 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
     def __init__(self) -> None:
         self.findings: List[str] = []
+        self.structural_findings: List[Dict[str, Any]] = []
+        self.scope_stack: List[str] = []
         self.dangerous_aliases: Set[str] = set()
         self.module_aliases: Dict[str, str] = {}
         self.decoded_vars: Set[str] = set()
         self.has_network_sink: bool = False
         self.has_env_secret_read: bool = False
+
+    def _record_finding(self, rule: str, node: ast.AST, target_symbol: str = "") -> None:
+        self.findings.append(rule)
+        scope = "::".join(self.scope_stack) if self.scope_stack else "module"
+        self.structural_findings.append({
+            "rule": rule,
+            "scope": scope,
+            "lineno": getattr(node, "lineno", 0),
+            "col_offset": getattr(node, "col_offset", 0),
+            "node_type": type(node).__name__,
+            "symbol": target_symbol,
+        })
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
 
     @staticmethod
     def _attr_chain(node: ast.AST) -> str:
@@ -561,14 +590,14 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             for tgt in targets:
                 if isinstance(tgt, ast.Name):
                     self.dangerous_aliases.add(tgt.id)
-                    self.findings.append(f"dangerous_alias:{tgt.id}")
+                    self._record_finding(f"dangerous_alias:{tgt.id}", tgt, tgt.id)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         sub_key = self._check_subscript_lookup(node)
         if sub_key is not None:
             flag = f"obfuscated_subscript_builtin:{sub_key}"
             if flag not in self.findings:
-                self.findings.append(flag)
+                self._record_finding(flag, node, str(sub_key))
         if isinstance(node.value, ast.Attribute) and node.value.attr == "environ":
             env_k = _const_str(node.slice)
             if env_k and _SENSITIVE_ENV_VAR_RE.search(env_k):
@@ -581,35 +610,35 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         # Case 1: Direct or aliased name call (`eval(...)`, `run(...)`)
         if isinstance(func, ast.Name):
             if func.id in self.DANGEROUS_BUILTINS:
-                self.findings.append(f"dangerous_builtin:{func.id}")
+                self._record_finding(f"dangerous_builtin:{func.id}", node, func.id)
                 if self._uses_decoded_payload(node.args):
-                    self.findings.append("obfuscated_encoded_payload")
+                    self._record_finding("obfuscated_encoded_payload", node, func.id)
             elif func.id in self.dangerous_aliases:
-                self.findings.append(f"aliased_dangerous_call:{func.id}")
+                self._record_finding(f"aliased_dangerous_call:{func.id}", node, func.id)
                 if self._uses_decoded_payload(node.args):
-                    self.findings.append("obfuscated_encoded_payload")
+                    self._record_finding("obfuscated_encoded_payload", node, func.id)
             elif func.id == "getattr":
                 self._check_getattr(node)
             elif func.id == "open" and node.args:
                 open_path = _const_str(node.args[0])
                 if open_path and is_protected_path(open_path):
-                    self.findings.append("ast_protected_file_access")
+                    self._record_finding("ast_protected_file_access", node, open_path)
 
         # Case 2: Obfuscated dynamic dispatch `getattr(os, 'sys' + 'tem')(...)`
         elif isinstance(func, ast.Call):
             if isinstance(func.func, ast.Name) and func.func.id == "getattr":
                 self._check_getattr(func)
-                self.findings.append("obfuscated_dynamic_invocation:getattr")
+                self._record_finding("obfuscated_dynamic_invocation:getattr", node, "getattr")
             if self._uses_decoded_payload(node.args):
-                self.findings.append("obfuscated_encoded_payload")
+                self._record_finding("obfuscated_encoded_payload", node)
 
         # Case 2b: Direct subscript invocation (`globals()['eval'](...)`, `__builtins__['exec'](...)`)
         elif isinstance(func, ast.Subscript):
             sub_key = self._check_subscript_lookup(func)
             if sub_key is not None:
-                self.findings.append(f"obfuscated_dynamic_subscript_call:{sub_key}")
+                self._record_finding(f"obfuscated_dynamic_subscript_call:{sub_key}", node, str(sub_key))
                 if self._uses_decoded_payload(node.args):
-                    self.findings.append("obfuscated_encoded_payload")
+                    self._record_finding("obfuscated_encoded_payload", node)
 
         # Case 3: Attribute call (`os.system`, `subprocess.run`, `shutil.rmtree`, `pickle.loads`, ...)
         elif isinstance(func, ast.Attribute):
@@ -638,7 +667,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 if func.value.args:
                     p_str = _const_str(func.value.args[0])
                     if p_str and is_protected_path(p_str):
-                        self.findings.append("ast_protected_file_access")
+                        self._record_finding("ast_protected_file_access", node, p_str)
 
             if attr in {"getenv", "get"} and node.args:
                 env_k = _const_str(node.args[0])
@@ -646,36 +675,38 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                     self.has_env_secret_read = True
 
             if attr in {"eval", "exec", "system", "popen"}:
-                self.findings.append(f"dangerous_method:{resolved_mod}.{attr}" if resolved_mod else f"dangerous_method:{attr}")
+                sym = f"{resolved_mod}.{attr}" if resolved_mod else attr
+                self._record_finding(f"dangerous_method:{sym}", node, sym)
                 if self._uses_decoded_payload(node.args):
-                    self.findings.append("obfuscated_encoded_payload")
+                    self._record_finding("obfuscated_encoded_payload", node, sym)
             elif resolved_mod == "importlib" and attr == "import_module":
-                self.findings.append("dynamic_import:importlib.import_module")
+                self._record_finding("dynamic_import:importlib.import_module", node, "importlib.import_module")
             elif resolved_mod == "subprocess" or (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
                 if attr in {"run", "Popen", "call", "check_output", "check_call", "getoutput", "getstatusoutput"}:
                     has_shell_true = any(
                         kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
                         for kw in node.keywords
                     )
-                    self.findings.append("subprocess_shell_true" if has_shell_true else f"subprocess_call:{attr}")
+                    rule_tag = "subprocess_shell_true" if has_shell_true else f"subprocess_call:{attr}"
+                    self._record_finding(rule_tag, node, f"subprocess.{attr}")
                     if self._uses_decoded_payload(node.args):
-                        self.findings.append("obfuscated_encoded_payload")
+                        self._record_finding("obfuscated_encoded_payload", node, f"subprocess.{attr}")
             elif resolved_mod == "shutil" or (isinstance(func.value, ast.Name) and func.value.id == "shutil"):
                 if attr == "rmtree":
-                    self.findings.append("destructive_fs_call:shutil.rmtree")
+                    self._record_finding("destructive_fs_call:shutil.rmtree", node, "shutil.rmtree")
             elif resolved_mod == "os" or (isinstance(func.value, ast.Name) and func.value.id == "os"):
                 if attr in {"system", "popen", "remove", "unlink", "rmdir", "execl", "execv", "spawnl"}:
-                    self.findings.append(f"dangerous_os_call:os.{attr}")
+                    self._record_finding(f"dangerous_os_call:os.{attr}", node, f"os.{attr}")
             elif resolved_mod in {"pickle", "cpickle", "marshal", "shelve"}:
                 if attr in {"loads", "load", "open"}:
-                    self.findings.append(f"unsafe_deserialization:{resolved_mod}.{attr}")
+                    self._record_finding(f"unsafe_deserialization:{resolved_mod}.{attr}", node, f"{resolved_mod}.{attr}")
             elif resolved_mod == "yaml" and attr in {"unsafe_load", "load"}:
                 has_safe_loader = any(
                     kw.arg == "Loader" and isinstance(kw.value, (ast.Name, ast.Attribute)) and "Safe" in ast.dump(kw.value)
                     for kw in node.keywords
                 )
                 if not has_safe_loader:
-                    self.findings.append(f"unsafe_yaml_load:yaml.{attr}")
+                    self._record_finding(f"unsafe_yaml_load:yaml.{attr}", node, f"yaml.{attr}")
 
         self.generic_visit(node)
 
@@ -688,12 +719,12 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 target_obj = node.args[0].func.id.lower()
         attr_str = _const_str(node.args[1]) if len(node.args) >= 2 else None
         if target_obj in self.DANGEROUS_MODULES or target_obj in self.SUBSCRIPT_SCOPE_NAMES:
-            self.findings.append(f"obfuscated_getattr:{target_obj}.{attr_str or '<dynamic>'}")
+            self._record_finding(f"obfuscated_getattr:{target_obj}.{attr_str or '<dynamic>'}", node, target_obj)
         elif attr_str in {"system", "popen", "eval", "exec", "__import__", "rmtree"}:
             if len(node.args) >= 2 and isinstance(node.args[1], ast.BinOp):
-                self.findings.append(f"obfuscated_getattr_concat:{attr_str}")
+                self._record_finding(f"obfuscated_getattr_concat:{attr_str}", node, attr_str)
             else:
-                self.findings.append(f"obfuscated_getattr_sink:{attr_str}")
+                self._record_finding(f"obfuscated_getattr_sink:{attr_str}", node, attr_str)
 
 
 def _extract_defs_from_lines(lines: List[str]) -> Tuple[Dict[str, Tuple[int, int]], int]:
@@ -1386,6 +1417,7 @@ def analyze_code_diff(
         }
 
     hunk_findings: List[str] = []
+    structural_findings: List[Dict[str, Any]] = []
     if tree is not None and tree is not patched_tree:
         visitor = _SecurityASTVisitor()
         if seed_visitor is not None:
@@ -1394,6 +1426,7 @@ def analyze_code_diff(
             visitor.decoded_vars.update(seed_visitor.decoded_vars)
         visitor.visit(tree)
         hunk_findings.extend(visitor.findings)
+        structural_findings.extend(visitor.structural_findings)
         if visitor.has_network_sink and (
             visitor.has_env_secret_read or any("ast_protected_file_access" in f for f in visitor.findings)
         ):
@@ -1412,6 +1445,8 @@ def analyze_code_diff(
         for finding, cnt in delta_counts.items():
             if cnt > 0:
                 hunk_findings.append(finding)
+        if not structural_findings:
+            structural_findings.extend(patched_visitor.structural_findings)
 
     all_findings = list(dict.fromkeys(hunk_findings + secret_findings))
     interface_hazards = _detect_interface_hazards(raw_lines, analysis_tree) if has_unified else []
@@ -1482,6 +1517,7 @@ def analyze_code_diff(
         "patched_file_ast_verified": patched_file_ast_verified,
         "imported_modules": imported_modules,
         "dynamic_calls": dynamic_calls,
+        "structural_context": structural_findings,
     }
 
 
@@ -1571,13 +1607,20 @@ SAFE_SHELL_COMMANDS: Set[str] = {
     "ls", "pwd", "echo", "cat", "head", "tail", "wc", "sort", "uniq",
     "grep", "rg", "find", "which", "where", "whoami", "date",
     "clang-format", "black", "ruff", "mypy", "pytest",
+    "jq", "yq", "column", "cut", "tr",
 }
 SAFE_DEV_SHELL_COMMANDS: Set[str] = {
     "mkdir", "touch", "cp", "mv", "rm", "rmdir", "npm", "pnpm", "yarn", "cargo", "pip", "poetry",
 }
-SAFE_GIT_SUBCOMMANDS: Set[str] = {"status", "log", "diff", "branch", "show", "rev-parse", "describe"}
+SAFE_GIT_SUBCOMMANDS: Set[str] = {
+    "status", "log", "diff", "branch", "show", "rev-parse", "describe", "ls-files",
+}
 SAFE_DEV_GIT_SUBCOMMANDS: Set[str] = {
     "add", "commit", "checkout", "switch", "stash", "fetch", "pull", "merge", "tag", "clean",
+}
+
+_SAFE_ANALYTICAL_TOOLS: Set[str] = {
+    "grep", "rg", "wc", "sort", "uniq", "head", "tail", "cat", "column", "cut", "tr", "jq", "yq", "file",
 }
 
 _SHELL_WRAPPER_COMMANDS: Set[str] = {
@@ -2342,7 +2385,14 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         args_lower = [a.lower() for a in args]
 
         if wrappers_seen or had_inline_env:
-            unrecognized.append(wrappers_seen[0] if wrappers_seen else "env_assignment")
+            is_safe_analytical_xargs = bool(
+                wrappers_seen == ["xargs"]
+                and not had_inline_env
+                and exe in _SAFE_ANALYTICAL_TOOLS
+                and not any(a.startswith(("-I", "-P", "--max-procs", "--replace")) for a in args)
+            )
+            if not is_safe_analytical_xargs:
+                unrecognized.append(wrappers_seen[0] if wrappers_seen else "env_assignment")
         if not _is_command_allowlisted(exe, args, policy=policy):
             unrecognized.append(exe)
 
@@ -2532,6 +2582,8 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] = None) -> Dict[str, Any]:
     """Record structured decision telemetry into ring buffer and optional JSONL journal."""
     sanitized = dict(entry)
+    if "timestamp" not in sanitized:
+        sanitized["timestamp"] = time.time()
     if isinstance(sanitized.get("label"), str):
         sanitized["label"] = redact_secrets(sanitized["label"])
     _DECISION_RING_BUFFER.append(sanitized)
@@ -2619,6 +2671,8 @@ def decide(
         clean_tool,
         "EXTERNAL_ACTION" if (cmd_str or clean_tool) else ("REVERSIBLE_WRITE" if diff_text is not None else "READ_ONLY"),
     )
+
+    diff_structural_context: List[Dict[str, Any]] = []
 
     def _tail_journal_recent(path: Path, limit: int = 12) -> List[Dict[str, Any]]:
         if not path.exists():
@@ -2724,11 +2778,37 @@ def decide(
             "drift_detected": drift_detected,
         }
         if decision == "escalate":
+            # Risk-annotated escalation contract to combat alert fatigue
+            if reason_code == "layer1_unrecognized_shell_command_escalate" and label in _SAFE_ANALYTICAL_TOOLS:
+                risk_lvl = "LOW"
+                risk_assess = f"Analytical/inspection tool '{label}' outside active profile allowlist; no destructive side-effects."
+            elif reason_code in ("layer1_shell_redirection_escalate", "layer1_sensitive_env_access_escalate", "layer1_protected_path_shell_read"):
+                risk_lvl = "HIGH"
+                risk_assess = f"Potentially sensitive shell behavior: {label}"
+            elif reason_code == "layer1_diff_scale_exceeded":
+                risk_lvl = "HIGH"
+                risk_assess = "Diff scale exceeded configured threshold (high blast radius)."
+            elif reason_code in ("layer1_ast_syntax_error", "layer1_partial_hunk_without_source"):
+                risk_lvl = "MEDIUM"
+                risk_assess = f"Syntactic or structural ambiguity: {label}"
+            elif reason_code.startswith("strict_ast_"):
+                risk_lvl = "MEDIUM"
+                risk_assess = f"Strict AST policy unapproved element: {label}"
+            else:
+                risk_lvl = "MEDIUM"
+                risk_assess = f"Escalated for human confirmation: {label}"
+
+            out["risk_level"] = risk_lvl
+            out["risk_assessment"] = risk_assess
             out["escalation_contract"] = {
                 "recipient": "human_or_llm_supervisor",
                 "timeout_sec": cfg.escalation_timeout_sec,
                 "default_on_timeout": cfg.default_on_escalation_timeout,
+                "risk_level": risk_lvl,
+                "risk_assessment": risk_assess,
             }
+        if diff_structural_context:
+            out["structural_context"] = diff_structural_context
         if shadow_mode:
             out["shadow_decision"] = decision
             out["shadow_reason_code"] = reason_code
@@ -2859,6 +2939,7 @@ def decide(
                 and ("@@" in diff_text or diff_text.lstrip().startswith(("diff --git", "--- ", "+++ ")))
             )
             diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source)
+            diff_structural_context.extend(diff_res.get("structural_context", []))
             if not diff_res["security_clean"]:
                 return _finish("deny", diff_res["findings"][0], ["deny"], "layer1_ast_security_veto", 1)
             if not diff_res["syntax_valid"]:
