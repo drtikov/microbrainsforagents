@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -166,6 +166,12 @@ class StateCBFSafetyFilter:
 
     def _halfspaces(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List[float]]:
         """Rows (A_i, b_i) with A_i u >= b_i, one per inflated barrier."""
+        if not self.barriers:
+            return (
+                np.zeros((0, self.dynamics.control_dim), dtype=np.float64),
+                np.zeros(0, dtype=np.float64),
+                [],
+            )
         f_x = self.dynamics.f(x)
         G_x = self.dynamics.g(x)
         A_rows, b_rows, alphas = [], [], []

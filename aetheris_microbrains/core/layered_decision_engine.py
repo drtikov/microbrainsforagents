@@ -38,7 +38,7 @@ import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 log = logging.getLogger(__name__)
 
@@ -2972,7 +2972,7 @@ def decide(
 def recalibrate_from_decision_journal(
     journal_entries: Optional[Sequence[Dict[str, Any]]] = None,
     alpha: float = 0.05,
-    journal_path: Optional[Path] = None,
+    journal_path: Optional[Union[Path, str]] = None,
     error_metric: str = "verified_decision_error",
     sample_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -2983,14 +2983,18 @@ def recalibrate_from_decision_journal(
     if journal_entries is not None:
         entries = [dict(e) for e in journal_entries if isinstance(e, dict)]
     else:
-        target = journal_path or DEFAULT_JOURNAL_PATH
+        target = Path(journal_path) if journal_path else DEFAULT_JOURNAL_PATH
         if _DECISION_RING_BUFFER:
             entries = list(_DECISION_RING_BUFFER)
         elif target.is_file():
             try:
                 for ln in target.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if ln.strip():
-                        entries.append(json.loads(ln))
+                    ln_str = ln.strip()
+                    if ln_str:
+                        try:
+                            entries.append(json.loads(ln_str))
+                        except Exception:
+                            continue
             except Exception:
                 entries = []
 

@@ -951,7 +951,7 @@ async def gate_action(req: GateRequest):
         raise
     except Exception as e:
         log.warning(f"Gate failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal safety filter evaluation failed")
 
 
 # --- Main ---
