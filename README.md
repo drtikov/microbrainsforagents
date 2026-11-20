@@ -117,7 +117,7 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
-  * Every decision writes a forensic entry to `memory/decision_journal.jsonl` containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, conformal error bounds, and a redacted `payload_preview`.
+  * Every decision writes a forensic entry to `memory/decision_journal.jsonl` containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, and a redacted `payload_preview`.
   * Inspect reasons instantly in terminal: run `python -m aetheris_microbrains.audit --last` to see why an agent was stopped, or `--summary` for aggregate health metrics.
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
 * **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
