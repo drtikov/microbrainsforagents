@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with server + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[server,dev]"
+      - name: Run full test suite (includes hook integration tests)
+        run: python -m pytest aetheris_microbrains/tests/ -q
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit runtime + server + dev dependencies
+        # Audits the project's declared dependencies (not the editable project
+        # itself). Fails CI on any known vulnerability in the dependency closure.
+        run: |
+          pip install -e ".[server,dev]" --report /tmp/install_report.json --quiet
+          pip-audit --skip-editable -f json -o /tmp/audit.json || true
+          python - <<'PY'
+          import json, sys
+          data = json.load(open("/tmp/audit.json"))
+          repo = {
+              "numpy", "fastapi", "uvicorn", "pydantic", "pytest", "pyyaml",
+              "starlette", "anyio", "sniffio", "idna", "typing-extensions",
+              "pydantic-core", "annotated-types", "click", "h11",
+              "pluggy", "iniconfig", "packaging",
+          }
+          vulns = []
+          for p in data.get("dependencies", []):
+              if p["name"].lower().replace("_", "-") in repo:
+                  for v in p.get("vulns", []):
+                      vulns.append((p["name"], p["version"], v.get("id"), v.get("fix_versions")))
+          if vulns:
+              for name, ver, vid, fix in vulns:
+                  print(f"::error::VULNERABLE {name}=={ver}: {vid} (fix: {fix})")
+              sys.exit(1)
+          print("dependency audit clean")
+          PY
