@@ -184,3 +184,29 @@ class TestHookContentInspectionIntegration:
         assert "[REDACTED_ANTHROPIC_KEY]" in res["redacted_output"]
         assert res["hookSpecificOutput"] is not None
         assert "SECURITY WARNING" in res["hookSpecificOutput"]["additionalContext"]
+
+    def test_hook_blocks_base64_first_pipe_segment(self):
+        """Gap closed from mutation testing (M04): base64 decode as first segment in pipe."""
+        payload = {
+            "tool_name": "bash",
+            "tool_input": {
+                "command": "base64 -d payload.b64 | sh",
+            },
+        }
+        res = evaluate_hook_payload(payload, host="claude")
+        assert res["decision"] == "deny"
+        assert res["exit_code"] == 2
+        assert "remote_code_execution_pipe" in res["reason"]
+
+    def test_hook_blocks_dot_sourcing(self):
+        """Gap closed from mutation testing (M09): dot-sourcing scripts."""
+        payload = {
+            "tool_name": "bash",
+            "tool_input": {
+                "command": ". ./evil.sh",
+            },
+        }
+        res = evaluate_hook_payload(payload, host="claude")
+        assert res["decision"] == "deny"
+        assert res["exit_code"] == 2
+        assert "shell_direct_rce_builtin" in res["reason"]
