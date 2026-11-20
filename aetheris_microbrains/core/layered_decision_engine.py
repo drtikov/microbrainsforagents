@@ -2213,7 +2213,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
 
-    # First inspect pipe sequences per pipeline block for download-and-execute (`curl ... | sh`), unwrapping prefixes
+    # First inspect pipe sequences per pipeline block for code injection and download-and-execute, unwrapping prefixes
     for logical_block in _split_command_pipeline_blocks(cmd):
         # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
         norm_block = logical_block.replace("|&", "|")
@@ -2228,9 +2228,10 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     eff = prem or ptoks
                     if eff:
                         pipe_cmds.append(os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
-            if any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(
-                c in ("sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3")
-                for c in pipe_cmds[1:]
+            code_exec_sinks = {"sh", "bash", "zsh", "dash", "pwsh", "powershell", "python", "python3"}
+            data_source_cmds = {"curl", "wget", "echo", "printf", "cat", "base64", "openssl"}
+            if (any(c in ("curl", "wget") for c in pipe_cmds[:-1]) and any(c in code_exec_sinks for c in pipe_cmds[1:])) or (
+                any(c in data_source_cmds for c in pipe_cmds[:-1]) and any(c in code_exec_sinks for c in pipe_cmds[1:])
             ):
                 return {
                     "is_safe": False,
@@ -2354,7 +2355,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                 for a in args_lower
                 if not a.startswith("-")
             )
-            if has_recursive and targets_danger:
+            if has_recursive and (targets_danger or "xargs" in wrappers_seen):
                 findings.append("destructive_rm_rf")
 
         elif exe == "dd":
@@ -2411,6 +2412,20 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     if not inner_res.get("allowlisted", False):
                         for u in inner_res.get("unrecognized_commands", []):
                             unrecognized.append(u)
+
+        elif exe == "eval":
+            if args:
+                eval_inner_cmd = " ".join(args)
+                inner_res = analyze_shell_command(eval_inner_cmd, policy=policy)
+                if not inner_res["is_safe"]:
+                    findings.extend(inner_res["findings"])
+                protected_path_reads.extend(inner_res.get("protected_path_reads", []))
+                sensitive_env_vars.extend(inner_res.get("sensitive_env_vars", []))
+                if inner_res.get("sensitive_env_access"):
+                    sensitive_env_access = True
+                if not inner_res.get("allowlisted", False):
+                    for u in inner_res.get("unrecognized_commands", []):
+                        unrecognized.append(u)
 
         elif exe in {"python", "python3"}:
             for idx_arg, a in enumerate(args_lower):
@@ -2517,9 +2532,13 @@ def decide(
     cfg = policy or DEFAULT_POLICY
 
     if isinstance(input_data, dict):
-        tool_name = str(input_data.get("tool") or input_data.get("action") or "")
+        tool_name = str(input_data.get("tool") or input_data.get("action") or input_data.get("tool_name") or "")
         target_path = input_data.get("path") or input_data.get("file_path")
         diff_text = input_data.get("diff") or input_data.get("payload_diff")
+        if diff_text is None and "new_string" in input_data:
+            diff_text = str(input_data.get("new_string") or "")
+        elif diff_text is None and "content" in input_data:
+            diff_text = str(input_data.get("content") or "")
         cmd_str = input_data.get("cmd") or input_data.get("command") or (target_path if tool_name in ("run_command", "execute_shell") else None)
         query_text = str(input_data.get("query") or input_data.get("task_prompt") or "")
         original_source = input_data.get("file_content") or ctx.get("file_content")
@@ -2527,6 +2546,10 @@ def decide(
         tool_name = str(ctx.get("tool") or "")
         target_path = ctx.get("path")
         diff_text = ctx.get("diff")
+        if diff_text is None and "new_string" in ctx:
+            diff_text = str(ctx.get("new_string") or "")
+        elif diff_text is None and "content" in ctx:
+            diff_text = str(ctx.get("content") or "")
         cmd_str = ctx.get("cmd")
         query_text = str(input_data or "")
         original_source = ctx.get("file_content")
