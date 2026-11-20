@@ -225,6 +225,7 @@ class TestHardwareRouterHonesty:
             stdout = "NVIDIA GeForce GT 710, 2048 MiB\n"
             stderr = ""
 
+        monkeypatch.setattr(hr.shutil, "which", lambda cmd: "/usr/bin/nvidia-smi" if cmd == "nvidia-smi" else None)
         monkeypatch.setattr(hr.subprocess, "run", lambda *a, **k: _FakeRes())
 
         class _FakeAcc:
