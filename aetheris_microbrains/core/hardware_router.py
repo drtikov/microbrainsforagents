@@ -1,6 +1,7 @@
 import logging
 import os
 import platform
+import shutil
 import subprocess
 from typing import Any, Dict
 
@@ -53,24 +54,23 @@ def get_hardware_report() -> Dict[str, Any]:
         "best_provider": "CPU",
     }
 
-    # Check GPU availability via nvidia-smi if available
+    # Check GPU availability via nvidia-smi if safe and available
     try:
-        res = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if res.returncode == 0:
-            report["gpu_detected"] = True
-            report["gpu_type"] = "NVIDIA"
-            line = (res.stdout or "").strip().splitlines()
-            if line:
-                report["gpu_name"] = line[0].split(",")[0].strip()
-            # A visible driver is NOT a CUDA execution provider (no
-            # CUDAExecutionProvider exists in this box's onnxruntime build).
-            # Provider selection below only reports real, usable providers.
-            report["cuda_driver_present"] = True
+        smi_path = shutil.which("nvidia-smi")
+        if smi_path:
+            res = subprocess.run(
+                [smi_path, "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0:
+                report["gpu_detected"] = True
+                report["gpu_type"] = "NVIDIA"
+                line = (res.stdout or "").strip().splitlines()
+                if line:
+                    report["gpu_name"] = line[0].split(",")[0].strip()
+                report["cuda_driver_present"] = True
     except Exception:
         pass
 

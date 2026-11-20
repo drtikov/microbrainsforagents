@@ -77,6 +77,9 @@ class DSHMicrobrainClient:
         """Make HTTP request to microbrain server."""
         url = f"{self.config.endpoint.rstrip('/')}{path}"
         headers = {"Content-Type": "application/json"}
+        token = os.environ.get("AETHERIS_SERVER_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         
         data = None
         if body is not None:

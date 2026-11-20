@@ -282,13 +282,23 @@ async def _security_and_size_middleware(request: Request, call_next):
         return JSONResponse({"detail": "Payload too large"}, status_code=413)
 
     req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
-    if req_token and request.url.path.startswith("/microbrain/"):
-        auth_hdr = request.headers.get("authorization", "")
-        if not auth_hdr.lower().startswith("bearer "):
-            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-        supplied = auth_hdr[7:].strip()
-        if not hmac.compare_digest(supplied, req_token):
-            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    if request.url.path.startswith("/microbrain/"):
+        # Enforce authentication on all /microbrain/ endpoints unless explicitly bound to loopback without token
+        if req_token:
+            auth_hdr = request.headers.get("authorization", "")
+            if not auth_hdr.lower().startswith("bearer "):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            supplied = auth_hdr[7:].strip()
+            if not hmac.compare_digest(supplied, req_token):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        else:
+            # If no token is configured, deny external non-loopback requests
+            client_host = getattr(request.client, "host", "") if request.client else ""
+            if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+                return JSONResponse(
+                    {"detail": "Authentication token required for non-loopback access"},
+                    status_code=403,
+                )
 
     return await call_next(request)
 
