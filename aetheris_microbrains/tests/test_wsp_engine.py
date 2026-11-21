@@ -10,10 +10,10 @@ import json
 import numpy as np
 import pytest
 
-from evolution.wsp_substrate import CPUMicroRouter, ROMEAssociativeMemory
-from evolution.wsp_sae import ConceptSparseAutoencoder
-from evolution.wsp_lenses import EpigeneticLensManager
-from evolution.wsp_engine import WSPEngine, WSPSpectralInvariantViolation
+from aetheris_microbrains.evolution.wsp_substrate import CPUMicroRouter, ROMEAssociativeMemory
+from aetheris_microbrains.evolution.wsp_sae import ConceptSparseAutoencoder
+from aetheris_microbrains.evolution.wsp_lenses import EpigeneticLensManager
+from aetheris_microbrains.evolution.wsp_engine import WSPEngine, WSPSpectralInvariantViolation
 
 
 @pytest.fixture
@@ -23,19 +23,19 @@ def clean_wsp_env(tmp_path, monkeypatch):
     lenses_dir = test_store / "wsp_lenses"
     lenses_dir.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr("evolution.wsp_substrate.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_substrate.BASE_WEIGHTS_FILE", test_store / "wsp_base_weights.npz")
-    monkeypatch.setattr("evolution.wsp_substrate.ACTIVE_PATCHES_FILE", test_store / "wsp_active_patches.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.BASE_WEIGHTS_FILE", test_store / "wsp_base_weights.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.ACTIVE_PATCHES_FILE", test_store / "wsp_active_patches.npz")
 
-    monkeypatch.setattr("evolution.wsp_sae.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_sae.SAE_DICTIONARY_FILE", test_store / "wsp_sae_dictionary.npz")
-    monkeypatch.setattr("evolution.wsp_sae.CONCEPT_REGISTRY_FILE", test_store / "wsp_concept_registry.json")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.SAE_DICTIONARY_FILE", test_store / "wsp_sae_dictionary.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.CONCEPT_REGISTRY_FILE", test_store / "wsp_concept_registry.json")
 
-    monkeypatch.setattr("evolution.wsp_lenses.LENSES_DIR", lenses_dir)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_lenses.LENSES_DIR", lenses_dir)
 
-    monkeypatch.setattr("evolution.wsp_engine.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_engine.WSP_LEDGER_FILE", test_store / "wsp_ledger.jsonl")
-    monkeypatch.setattr("evolution.wsp_engine.REPETITIVE_FAILURES_FILE", test_store / "wsp_failure_tracker.json")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.WSP_LEDGER_FILE", test_store / "wsp_ledger.jsonl")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.REPETITIVE_FAILURES_FILE", test_store / "wsp_failure_tracker.json")
 
     return test_store
 

@@ -12,17 +12,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from core.bitnet_ternary_engine import BitLinearLayer
-from core.brain_moe_orchestrator import MicroMoEOrchestrator
-from core.brain_nursery import AutonomousBrainNursery
-from core.hardware_router import (
+from aetheris_microbrains.core.bitnet_ternary_engine import BitLinearLayer
+from aetheris_microbrains.core.brain_moe_orchestrator import MicroMoEOrchestrator
+from aetheris_microbrains.core.brain_nursery import AutonomousBrainNursery
+from aetheris_microbrains.core.hardware_router import (
     get_best_execution_provider,
     get_hardware_report,
     recommended_microbrain_dispatch,
 )
-from core.liquid_state_reservoir import LiquidStateReservoir
-from core.microbrain_hypernetwork import MicroBrainHypernetwork
-from core.opencl_microbrain_accelerator import OpenCLMicroBrainAccelerator
+from aetheris_microbrains.core.liquid_state_reservoir import LiquidStateReservoir
+from aetheris_microbrains.core.microbrain_hypernetwork import MicroBrainHypernetwork
+from aetheris_microbrains.core.opencl_microbrain_accelerator import OpenCLMicroBrainAccelerator
 
 
 def test_hardware_router_and_opencl_detection():
@@ -87,7 +87,7 @@ def test_proposal_5_bitnet_hybrid_cpu_and_opencl_parity():
 
 def test_proposal_1_eggroll_low_rank_neuroevolution_rollout(tmp_path, monkeypatch):
     """EGGROLL low-rank population neuroevolution evaluates 256 daughter brains in parallel on GPU."""
-    import core.brain_nursery as nursery_mod
+    import aetheris_microbrains.core.brain_nursery as nursery_mod
 
     monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
     nursery = AutonomousBrainNursery()
@@ -171,7 +171,7 @@ def test_proposal_3_hdc_10240_bit_associative_memory_and_moe_router(tmp_path, mo
         assert backend == "OpenCL_GPU"
 
     # Also test MicroMoEOrchestrator.route_query_hdc
-    import core.brain_nursery as nursery_mod
+    import aetheris_microbrains.core.brain_nursery as nursery_mod
 
     monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
     # monkeypatch restores the previous singleton at teardown — a bare
@@ -220,7 +220,7 @@ def test_proposal_4_ttt_linear_fast_weight_adaptation():
 
 def test_proposal_6_blelloch_parallel_associative_scan_mamba_ssm():
     """Blelloch / Hillis-Steele O(log N) parallel associative scan matches sequential SSM step-by-step."""
-    from core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
+    from aetheris_microbrains.core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
 
     rng = np.random.default_rng(606)
     seq = rng.standard_normal((128, 32)).astype(np.float32)
@@ -249,7 +249,7 @@ def test_proposal_6_blelloch_parallel_associative_scan_mamba_ssm():
 
 def test_proposal_7_difflogic_bitplane_logic_gate_tree():
     """Bitplane Differentiable Logic Gate Tree evaluates 64 samples in 2 uint32 words on GPU."""
-    from core.mixture_of_depths_router import MixtureOfDepthsRouter
+    from aetheris_microbrains.core.mixture_of_depths_router import MixtureOfDepthsRouter
 
     router = MixtureOfDepthsRouter(latent_dim=64, exit_threshold=0.5)
     rng = np.random.default_rng(707)
@@ -279,7 +279,7 @@ def test_proposal_7_difflogic_bitplane_logic_gate_tree():
 
 def test_proposal_8_kuramoto_hopfield_micro_transformer():
     """Kuramoto oscillatory phase synchronization + collision-free Modern Hopfield associative MLP."""
-    from core.analytical_micro_transformer import AnalyticalMicroTransformer
+    from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 
     brain = AnalyticalMicroTransformer(name="kuramoto_hopfield_test", d_model=32, n_heads=2, d_mlp=8)
 
@@ -304,7 +304,7 @@ def test_proposal_8_kuramoto_hopfield_micro_transformer():
 
 def test_proposal_9_predictive_coding_sram_variational_relaxation():
     """Iterative Variational Free-Energy Relaxation in GPU SRAM reduces free energy F."""
-    from core.predictive_coding_engine import HierarchicalPredictiveCodingEngine
+    from aetheris_microbrains.core.predictive_coding_engine import HierarchicalPredictiveCodingEngine
 
     pc = HierarchicalPredictiveCodingEngine(layer_dims=[32, 24, 16])
     rng = np.random.default_rng(909)
@@ -323,7 +323,7 @@ def test_proposal_9_predictive_coding_sram_variational_relaxation():
 
 def test_proposal_10_active_inference_monte_carlo_efe_rollout():
     """1,024-particle multi-step Expected Free Energy (EFE) rollout on GT 710 GPU."""
-    from core.active_inference import ActiveInferenceCluster
+    from aetheris_microbrains.core.active_inference import ActiveInferenceCluster
 
     cluster = ActiveInferenceCluster()
     state = {
@@ -351,7 +351,7 @@ def test_proposal_10_active_inference_monte_carlo_efe_rollout():
 
 def test_proposal_11_multiscale_vietoris_rips_geodesic_slerp():
     """Multi-scale Vietoris-Rips persistence filtration (16 x 32 = 512 graphs) on GPU."""
-    from core.topological_persistence_merger import TopologicalPersistenceMerger
+    from aetheris_microbrains.core.topological_persistence_merger import TopologicalPersistenceMerger
 
     merger = TopologicalPersistenceMerger()
     rng = np.random.default_rng(1111)
@@ -462,7 +462,7 @@ def test_wave3_proposal_3_true_eggroll_es_step_on_device_rng(tmp_path, monkeypat
     assert es_res["behavior_descriptors"].shape == (64, 8)
 
     # Test through nursery
-    import core.brain_nursery as nursery_mod
+    import aetheris_microbrains.core.brain_nursery as nursery_mod
 
     monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
     nursery = AutonomousBrainNursery()
@@ -480,7 +480,7 @@ def test_wave3_proposal_3_true_eggroll_es_step_on_device_rng(tmp_path, monkeypat
 
 def test_wave3_proposal_4_evolution_surrogate_prefilter():
     """Chronological 80/20 train/test split and honesty gate on evolution surrogate."""
-    from core.evolution_surrogate_prefilter import EvolutionSurrogatePrefilter, ResidentHDCExperienceMemory
+    from aetheris_microbrains.core.evolution_surrogate_prefilter import EvolutionSurrogatePrefilter, ResidentHDCExperienceMemory
 
     mem = ResidentHDCExperienceMemory.get_instance()
     assert mem.n_records >= 4
@@ -504,7 +504,7 @@ def test_wave3_proposal_4_evolution_surrogate_prefilter():
 
 def test_wave3_proposal_5_split_conformal_calibration_and_calibrated_abstention():
     """Split-conformal calibration with guaranteed singleton coverage & OOD abstention."""
-    from core.analytical_micro_transformer import AnalyticalMicroTransformer
+    from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 
     brain = AnalyticalMicroTransformer(name="conformal_brain_test", d_model=32, n_heads=2)
     # Compile 6 rules
@@ -533,7 +533,7 @@ def test_wave3_proposal_5_split_conformal_calibration_and_calibrated_abstention(
 
 def test_wave3_proposal_6_resident_hdc_experience_memory():
     """Large-scale resident HDC memory for near-duplicate and nearest-failure lookup."""
-    from core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
+    from aetheris_microbrains.core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
 
     mem = ResidentHDCExperienceMemory.get_instance()
     # Test near-duplicate query for identical text
@@ -567,7 +567,7 @@ def test_wave3_proposal_7_dominated_novelty_search_quality_diversity(tmp_path, m
     assert dns_res["dns_scores"][0] > 10.0
 
     # Test nursery integration
-    import core.brain_nursery as nursery_mod
+    import aetheris_microbrains.core.brain_nursery as nursery_mod
 
     monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
     nursery = AutonomousBrainNursery()

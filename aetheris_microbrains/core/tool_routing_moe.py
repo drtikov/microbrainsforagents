@@ -1285,9 +1285,6 @@ class SessionToolSurface:
         self.cache_hits: int = 0
         self.cache_invalidations: int = 0
 
-        if self.cluster_pinning:
-            self._pin_initial_clusters()
-
     def _pin_initial_clusters(self) -> None:
         """Groups tools by namespace prefix (e.g. git_*, docker_*) and selects whole coherent clusters."""
         clusters: Dict[str, List[str]] = {}
@@ -1348,18 +1345,27 @@ class SessionToolSurface:
                     cat_ns = cat_parts[0] if len(cat_parts) > 1 and cat_parts[0] else str(cat_tool)
                     if cat_ns == ns and cat_tool not in expanded_cands:
                         expanded_cands.append(cat_tool)
-            new_cands = expanded_cands
+            if prev is not None:
+                # Append-only growth keeps the previously cached prefix byte-identical
+                new_cands = list(prev) + [t for t in expanded_cands if t not in prev]
+            else:
+                new_cands = expanded_cands
 
         self.active_tools = new_cands
         self.expanded_to_full = len(new_cands) >= len(self.full_catalog)
-        if prev is not None and new_cands != prev:
+        prefix_preserved = prev is None or (len(new_cands) >= len(prev) and new_cands[: len(prev)] == prev)
+        if not prefix_preserved:
             self.cache_invalidations += 1
+        actual_reduction = round(
+            max(0.0, 1.0 - (len(self.active_tools) / float(max(1, len(self.full_catalog))))),
+            4,
+        )
         return {
             "mode": str(nar.get("mode", "narrowed")),
             "candidate_tools": list(self.active_tools),
-            "cache_prefix_preserved": prev is None or new_cands == prev,
+            "cache_prefix_preserved": prefix_preserved,
             "expanded_to_full": self.expanded_to_full,
-            "reduction_ratio": float(nar.get("reduction_ratio", 0.0)),
+            "reduction_ratio": actual_reduction,
         }
 
     def expand_to_full(self) -> List[str]:

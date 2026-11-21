@@ -23,14 +23,14 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-_PKG_ROOT = Path(__file__).resolve().parents[1]
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import pytest
-from core.analytical_micro_transformer import AnalyticalMicroTransformer
-from core.critical_ensemble_abstention import get_critical_ensemble, CriticalEnsemble
-from core.cascade_ensemble import get_cascade_ensemble_router
+from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
+from aetheris_microbrains.core.critical_ensemble_abstention import get_critical_ensemble, CriticalEnsemble
+from aetheris_microbrains.core.cascade_ensemble import get_cascade_ensemble_router
 
 
 def generate_adversarial_dataset() -> list[dict]:
@@ -332,8 +332,8 @@ class TestAdversarialSafetySuite:
 
     def test_unicode_and_ood_coverage_gating(self):
         """Verifies Unicode tokenization and Conformal OOD coverage gating."""
-        from tools.microbrain import _tokenize
-        from core.analytical_micro_transformer import AnalyticalMicroTransformer
+        from aetheris_microbrains.tools.microbrain import _tokenize
+        from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 
         # 1. Unicode tokenization preserves Cyrillic words
         ru_tokens = _tokenize("исправь критическую ошибку в коде")

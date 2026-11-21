@@ -120,8 +120,42 @@ def _append_shadow_error_journal(
 
 
 def _load_decision_engine():
-    from .core.layered_decision_engine import PolicyConfig, decide
-    return PolicyConfig, decide
+    from .core.layered_decision_engine import PolicyConfig, decide, is_protected_path
+    return PolicyConfig, decide, is_protected_path
+
+
+def _scope_session_state_path(base_path: Optional[str], payload: Dict[str, Any]) -> Optional[str]:
+    """Scope SessionSecurityState file path by `session_id` when provided in hook payload."""
+    explicit = str(base_path or "").strip()
+    if not explicit:
+        return None
+    sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+    if not sess_id:
+        return explicit
+    digest = hashlib.sha256(sess_id.encode("utf-8")).hexdigest()[:16]
+    p = Path(explicit)
+    if p.suffix.lower() == ".json":
+        return str(p.with_name(f"{p.stem}_{digest}.json"))
+    return str(p / f"{digest}.json")
+
+
+def _resolve_hook_policy(
+    PolicyConfig,
+    strict_ast: bool = False,
+    profile: Optional[str] = None,
+    policy_path: Optional[str] = None,
+):
+    resolved_policy_path = str(policy_path or os.getenv("AETHERIS_POLICY_PATH") or "").strip()
+    if resolved_policy_path:
+        policy = PolicyConfig.from_file(resolved_policy_path)
+    else:
+        policy = PolicyConfig()
+    resolved_profile = str(profile or os.getenv("AETHERIS_PROFILE") or "").strip().lower()
+    if resolved_profile in {"strict", "dev"}:
+        policy.profile = resolved_profile
+    if strict_ast:
+        policy.strict_ast_allowlist = True
+    return policy
 
 
 def _load_post_tool_helpers():
@@ -164,9 +198,32 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "file_path" in tool_input or "path" in tool_input:
         normalized["path"] = tool_input.get("file_path") or tool_input.get("path")
 
-    # Build diff text from edit/write payloads (new_string, content, diff)
-    diff = tool_input.get("diff") or tool_input.get("payload_diff")
-    if diff is None and "new_string" in tool_input:
+    # Extract structured Edit / MultiEdit operations so Layer 1 can reconstruct patched full-file ASTs
+    edit_ops: list[Dict[str, Any]] = []
+    if tool_lower == "multiedit" and isinstance(tool_input.get("edits"), list):
+        for item in tool_input["edits"]:
+            if isinstance(item, dict) and "new_string" in item:
+                edit_ops.append({
+                    "old_string": str(item.get("old_string") or ""),
+                    "new_string": str(item.get("new_string") or ""),
+                    "replace_all": bool(item.get("replace_all", False)),
+                })
+    elif "old_string" in tool_input and "new_string" in tool_input:
+        old_s = str(tool_input.get("old_string") or "")
+        if old_s:
+            edit_ops.append({
+                "old_string": old_s,
+                "new_string": str(tool_input.get("new_string") or ""),
+                "replace_all": bool(tool_input.get("replace_all", False)),
+            })
+    if edit_ops:
+        normalized["edit_ops"] = edit_ops
+
+    # Build diff text from edit/multiedit/write/apply_patch payloads
+    diff = tool_input.get("diff") or tool_input.get("payload_diff") or tool_input.get("patch")
+    if diff is None and edit_ops and tool_lower == "multiedit":
+        diff = "\n".join(op["new_string"] for op in edit_ops)
+    elif diff is None and "new_string" in tool_input:
         diff = str(tool_input.get("new_string") or "")
     elif diff is None and "content" in tool_input and tool_name in {"write_file", "edit_file"}:
         diff = str(tool_input.get("content") or "")
@@ -190,18 +247,29 @@ def evaluate_hook_payload(
     codex_escalate_deny: bool = False,
     journal_path: Optional[str] = None,
     session_state_path: Optional[str] = None,
+    profile: Optional[str] = None,
+    policy_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
-    PolicyConfig, decide = _load_decision_engine()
+    PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
     if resolved_host not in {"claude", "codex", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
-    policy = PolicyConfig(strict_ast_allowlist=strict_ast)
+    policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
     ctx: Dict[str, Any] = {}
     if file_content is not None:
         ctx["file_content"] = file_content
+    elif norm.get("edit_ops") and norm.get("path"):
+        target_p = str(norm["path"])
+        if target_p.lower().endswith(".py") and not is_protected_path(target_p, policy):
+            try:
+                p_obj = Path(target_p)
+                if p_obj.is_file() and p_obj.stat().st_size <= 512 * 1024:
+                    ctx["file_content"] = p_obj.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                pass
     if log_decisions or shadow_mode:
         ctx["log_decisions"] = True
     if shadow_mode:
@@ -209,7 +277,8 @@ def evaluate_hook_payload(
     explicit_journal = str(journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
     if explicit_journal:
         ctx["journal_path"] = str(_resolve_journal_path(explicit_journal))
-    explicit_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    raw_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    explicit_sess = _scope_session_state_path(raw_sess, payload)
     if explicit_sess:
         ctx["session_state_path"] = explicit_sess
     verdict = decide(norm, context=ctx or None, policy=policy)
@@ -371,7 +440,8 @@ def evaluate_post_tool_use_payload(
     injection_detected = len(injection_findings) > 0
     any_alert = secrets_found or injection_detected
 
-    explicit_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    raw_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    explicit_sess = _scope_session_state_path(raw_sess, payload)
     if explicit_sess:
         SessionSecurityState(Path(explicit_sess)).record_post_tool(
             tool_name=tool_raw,
@@ -510,6 +580,17 @@ def main(argv: Optional[list[str]] = None) -> int:
             action="store_true",
             help="With --host codex, treat escalated actions as deny (exit 2) instead of emitting empty stdout (which leaves decisions to Codex's configured approval policy and does not prompt under auto-approve)",
         )
+        parser.add_argument(
+            "--profile",
+            choices=["strict", "dev"],
+            default=str(os.getenv("AETHERIS_PROFILE") or "").strip().lower() or None,
+            help="Policy profile (strict or dev; or set AETHERIS_PROFILE)",
+        )
+        parser.add_argument(
+            "--policy",
+            default=str(os.getenv("AETHERIS_POLICY_PATH") or "").strip() or None,
+            help="Path to JSON/YAML PolicyConfig file (or set AETHERIS_POLICY_PATH)",
+        )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
@@ -517,6 +598,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         host = str(args.host)
         event_kind = str(args.event)
         codex_escalate_deny = bool(args.codex_escalate_deny)
+        profile_arg = args.profile
+        policy_arg = args.policy
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
         session_state_path = str(args.session_state or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip() or None
 
@@ -643,6 +726,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             codex_escalate_deny=codex_escalate_deny,
             journal_path=journal_path,
             session_state_path=session_state_path,
+            profile=profile_arg,
+            policy_path=policy_arg,
         )
         if shadow_mode:
             if result.get("journal_written") is False:

@@ -22,7 +22,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from core.opencl_microbrain_accelerator import (
+from aetheris_microbrains.core.opencl_microbrain_accelerator import (
     OpenCLMicroBrainAccelerator,
     get_opencl_accelerator,
 )
@@ -106,7 +106,7 @@ class TestCrossoverTableHonesty:
         )
 
     def test_eggroll_es_no_longer_forces_gpu_by_default(self):
-        import core.brain_nursery as nursery_mod
+        import aetheris_microbrains.core.brain_nursery as nursery_mod
 
         acc = get_opencl_accelerator()
         assert inspect.signature(acc.eggroll_es_step).parameters["force_gpu"].default is False
@@ -170,7 +170,7 @@ class TestAutotuneHonesty:
 
 class TestMoECortexHonesty:
     def _cortex(self, tmp_path, monkeypatch, tool_stems):
-        from core import hierarchical_moe_cortex as hmod
+        from aetheris_microbrains.core import hierarchical_moe_cortex as hmod
 
         tools = tmp_path / "tools"
         tools.mkdir(exist_ok=True)
@@ -180,7 +180,7 @@ class TestMoECortexHonesty:
         return hmod.HierarchicalMoECortex(brains_dir=str(tmp_path / "no_brains"))
 
     def test_empty_catalog_is_unrouted_not_routed_success(self, tmp_path, monkeypatch):
-        from core import hierarchical_moe_cortex as hmod
+        from aetheris_microbrains.core import hierarchical_moe_cortex as hmod
 
         monkeypatch.setattr(hmod, "DYNAMIC_TOOLS_DIR", tmp_path / "no_tools_dir")
         cortex = hmod.HierarchicalMoECortex(brains_dir=str(tmp_path / "no_brains"))
@@ -218,7 +218,7 @@ class TestMoECortexHonesty:
         assert res["resolved_brain_file"] is None
 
     def test_route_with_real_brain_weights_succeeds(self, tmp_path, monkeypatch):
-        from core import hierarchical_moe_cortex as hmod
+        from aetheris_microbrains.core import hierarchical_moe_cortex as hmod
 
         tools = tmp_path / "tools"
         tools.mkdir(exist_ok=True)
@@ -251,9 +251,9 @@ class TestVisionHonesty:
         import asyncio
 
         try:
-            from core.vision import describe_image
+            from aetheris_microbrains.core.vision import describe_image
         except ImportError:
-            from tools.microbrain import microbrain_consult
+            from aetheris_microbrains.tools.microbrain import microbrain_consult
 
             res = microbrain_consult("describe PNG 16x32px pixel bitmap image channels")
             assert res["success"] is True

@@ -38,7 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 except ImportError:
-    from core.analytical_micro_transformer import AnalyticalMicroTransformer
+    from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 
 
 # ==============================================================================

@@ -157,7 +157,7 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
   * `detect_prompt_injection()` intercepts Unicode tag smuggling (`\U000E0000-\U000E007F`), bidirectional text overrides (`\u202E`), zero-width obfuscation, and spoofed system delimiters (`<IMPORTANT>`, `<system>`, `[OVERRIDE]`).
   * `MCPManifestPinner` cryptographically hashes MCP schemas with SHA-256 and detects rug-pull mutations on restart.
 * **Multi-Turn Session Taint Gate (`SessionSecurityState`):** Tracks taint across multi-step agent conversations. Flags untrusted external inputs (web pages, user inputs) and sensitive file reads. Triggers immediate hard denial (`decision: "deny"`) if the **lethal trifecta** occurs (untrusted external ingestion + sensitive credential access + egress or mutation tool call).
-* **Post-Tool Output & Prompt Injection Screening (`evaluate_post_tool_use_payload` & `--event post-tool-use`):** Redacts raw credentials via `mb.scrub_tool_output()` and audits returned tool content for injected instructions before context assimilation, providing `additionalContext` warnings to the agent and appending redacted security journal entries.
+* **Post-Tool Output & Prompt Injection Screening (`evaluate_post_tool_use_payload` & `--event post-tool-use`):** Audits returned tool content for leaked credentials and indirect prompt injection before context assimilation and writes redacted security journal entries. Note that Claude Code's `PostToolUse` hook protocol injects an `additionalContext` security warning rather than rewriting tool stdout in place (while `mb.scrub_tool_output()` and `--host generic` return `redacted_output` directly for custom harnesses).
 * **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
@@ -333,7 +333,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 287 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 293 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 

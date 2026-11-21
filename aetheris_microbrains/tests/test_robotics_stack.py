@@ -37,6 +37,8 @@ import aetheris_microbrains as mb
 
 class TestMetricsHonesty:
     def _metrics_text(self, monkeypatch, tmp_path, seed_events):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("yaml")
         from aetheris_microbrains.core import microbrain_server
         from aetheris_microbrains.core import microbrain_telemetry as mt
 
@@ -75,6 +77,8 @@ class TestMetricsHonesty:
         assert line.strip().endswith("1.0")
 
     def test_dashboard_page_carries_demo_banner(self, monkeypatch, tmp_path):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("yaml")
         from aetheris_microbrains.core import microbrain_server
         from aetheris_microbrains.core import microbrain_telemetry as mt
 
@@ -637,6 +641,8 @@ class TestVLAGating:
         assert "best_action" in out.get("efe_deliberation", {})
 
     def test_server_gate_endpoint_wired(self):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("yaml")
         from aetheris_microbrains.core.microbrain_server import GateRequest, gate_action
 
         req = GateRequest(
@@ -664,6 +670,8 @@ class TestVLAGating:
         assert resp_bad.decision == "escalate_human"
 
     def test_unknown_barrier_type_rejected(self):
+        pytest.importorskip("fastapi")
+        pytest.importorskip("yaml")
         from aetheris_microbrains.core.microbrain_server import GateRequest, gate_action
         from fastapi import HTTPException
 

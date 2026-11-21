@@ -20,8 +20,14 @@ import os
 import re
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
 
 _UNICODE_TAG_RE = re.compile(r"[\U000E0000-\U000E007F]")
 _BIDI_OVERRIDE_RE = re.compile(r"[\u202A-\u202E\u2066-\u2069]")
@@ -305,8 +311,9 @@ class MCPManifestPinner:
 class SessionSecurityState:
     """Cross-turn session taint tracker implementing the 'lethal trifecta' guard."""
 
-    def __init__(self, state_path: Optional[Path] = None):
+    def __init__(self, state_path: Optional[Path] = None, ttl_sec: float = 86400.0):
         self.state_path = Path(state_path) if state_path else None
+        self.ttl_sec = float(ttl_sec)
         self.untrusted_external_ingested: bool = False
         self.sensitive_local_read: bool = False
         self.prompt_injection_seen: bool = False
@@ -314,12 +321,39 @@ class SessionSecurityState:
         if self.state_path is not None:
             self._load()
 
+    @contextmanager
+    def _state_lock(self) -> Iterator[None]:
+        if _fcntl is None or self.state_path is None:
+            yield
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_path.with_name(f".{self.state_path.name}.lock")
+        fh = open(lock_path, "a+", encoding="utf-8")
+        try:
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+            finally:
+                fh.close()
+
     def _load(self) -> None:
         if self.state_path is None or not self.state_path.is_file():
             return
         try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            with self._state_lock():
+                if not self.state_path.is_file():
+                    return
+                data = json.loads(self.state_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                updated_at = data.get("updated_at")
+                if (
+                    self.ttl_sec > 0
+                    and isinstance(updated_at, (int, float))
+                    and (time.time() - float(updated_at)) > self.ttl_sec
+                ):
+                    return
                 self.untrusted_external_ingested = bool(data.get("untrusted_external_ingested", False))
                 self.sensitive_local_read = bool(data.get("sensitive_local_read", False))
                 self.prompt_injection_seen = bool(data.get("prompt_injection_seen", False))
@@ -338,7 +372,8 @@ class SessionSecurityState:
             "taint_events": self.taint_events[-20:],
             "updated_at": round(time.time(), 6),
         }
-        _atomic_write_json(self.state_path, payload)
+        with self._state_lock():
+            _atomic_write_json(self.state_path, payload)
 
     def _append_event(self, tag: str) -> None:
         self.taint_events.append(tag)

@@ -8,21 +8,21 @@ Unit tests for Astra-Style Weight-Space Programming Improvements:
 import numpy as np
 import pytest
 
-from evolution.wsp_substrate import CPUMicroRouter
-from evolution.wsp_engine import WSPEngine
-from evolution.wsp_sandbox_tracer import AstraSandboxTracer
-from evolution.wsp_ab_probe import InMemoryABProbe
+from aetheris_microbrains.evolution.wsp_substrate import CPUMicroRouter
+from aetheris_microbrains.evolution.wsp_engine import WSPEngine
+from aetheris_microbrains.evolution.wsp_sandbox_tracer import AstraSandboxTracer
+from aetheris_microbrains.evolution.wsp_ab_probe import InMemoryABProbe
 
 
 @pytest.fixture
 def clean_astra_env(tmp_path, monkeypatch):
     test_store = tmp_path / "memory_store"
     test_store.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("evolution.wsp_substrate.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_substrate.BASE_WEIGHTS_FILE", test_store / "wsp_base_weights.npz")
-    monkeypatch.setattr("evolution.wsp_substrate.ACTIVE_PATCHES_FILE", test_store / "wsp_active_patches.npz")
-    monkeypatch.setattr("evolution.wsp_engine.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_engine.WSP_LEDGER_FILE", test_store / "wsp_ledger.jsonl")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.BASE_WEIGHTS_FILE", test_store / "wsp_base_weights.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.ACTIVE_PATCHES_FILE", test_store / "wsp_active_patches.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.WSP_LEDGER_FILE", test_store / "wsp_ledger.jsonl")
     return test_store
 
 

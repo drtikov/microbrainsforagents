@@ -8,7 +8,7 @@ Verifies:
 
 import pytest
 import numpy as np
-from core.wsp_neural_surgeon import WSPNeuralSurgeon
+from aetheris_microbrains.core.wsp_neural_surgeon import WSPNeuralSurgeon
 
 
 def test_wsp_attractor_deflation():

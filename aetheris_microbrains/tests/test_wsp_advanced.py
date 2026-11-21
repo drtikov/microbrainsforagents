@@ -6,9 +6,9 @@ and CPU Epistemic Uncertainty Oracle.
 import numpy as np
 import pytest
 
-from evolution.wsp_merger import WeightSpaceMerger
-from evolution.wsp_epistemic_oracle import EpistemicOracle
-from evolution.wsp_lenses import EpigeneticLensManager
+from aetheris_microbrains.evolution.wsp_merger import WeightSpaceMerger
+from aetheris_microbrains.evolution.wsp_epistemic_oracle import EpistemicOracle
+from aetheris_microbrains.evolution.wsp_lenses import EpigeneticLensManager
 
 
 @pytest.fixture
@@ -20,12 +20,12 @@ def clean_merger_env(tmp_path, monkeypatch):
     soups_dir = test_store / "wsp_soups"
     soups_dir.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr("evolution.wsp_epistemic_oracle.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_epistemic_oracle.ORACLE_WEIGHTS_FILE", test_store / "wsp_epistemic_oracle.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_epistemic_oracle.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_epistemic_oracle.ORACLE_WEIGHTS_FILE", test_store / "wsp_epistemic_oracle.npz")
 
-    monkeypatch.setattr("evolution.wsp_merger.STORE_DIR", test_store)
-    monkeypatch.setattr("evolution.wsp_merger.SOUPS_DIR", soups_dir)
-    monkeypatch.setattr("evolution.wsp_lenses.LENSES_DIR", lenses_dir)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_merger.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_merger.SOUPS_DIR", soups_dir)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_lenses.LENSES_DIR", lenses_dir)
 
     return {"store": test_store, "lenses": lenses_dir, "soups": soups_dir}
 

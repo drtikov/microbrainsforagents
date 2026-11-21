@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class TestSurrogatePrefilterHonesty:
     def _memory(self, tmp_path, journal_events):
-        from core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
+        from aetheris_microbrains.core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
 
         journal = tmp_path / "journal.jsonl"
         journal.write_text(
@@ -68,7 +68,7 @@ class TestSurrogatePrefilterHonesty:
         assert recs_by_goal["refactor the dispatcher import cycle"]["failed"] is True
 
     def test_anchors_and_tool_catalogue_carry_no_fabricated_labels(self, tmp_path):
-        from core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
+        from aetheris_microbrains.core.evolution_surrogate_prefilter import ResidentHDCExperienceMemory
 
         mem = self._memory(tmp_path, [])
         for r in mem.metadata:
@@ -78,7 +78,7 @@ class TestSurrogatePrefilterHonesty:
                 )
 
     def test_training_uses_only_labeled_records(self, tmp_path):
-        from core.evolution_surrogate_prefilter import (
+        from aetheris_microbrains.core.evolution_surrogate_prefilter import (
             EvolutionSurrogatePrefilter,
             ResidentHDCExperienceMemory,
         )
@@ -97,7 +97,7 @@ class TestSurrogatePrefilterHonesty:
 
 class TestBitnetEngineHonesty:
     def test_effective_bits_measured_from_artifact(self, tmp_path):
-        from core.bitnet_ternary_engine import BitNetQuantizer
+        from aetheris_microbrains.core.bitnet_ternary_engine import BitNetQuantizer
 
         brain = tmp_path / "probe_meta.json"
         weights = [[0.9, -0.2, 0.1, -0.8], [0.3, 0.7, -0.9, 0.05]]
@@ -117,7 +117,7 @@ class TestBitnetEngineHonesty:
 
 class TestAnalyticalMicroTransformerHonesty:
     def _brain(self, name="m_probe"):
-        from core.analytical_micro_transformer import AnalyticalMicroTransformer
+        from aetheris_microbrains.core.analytical_micro_transformer import AnalyticalMicroTransformer
 
         return AnalyticalMicroTransformer(
             name=name, d_model=16, n_heads=2, d_mlp=32, max_seq_len=8
@@ -156,7 +156,7 @@ class TestAnalyticalMicroTransformerHonesty:
 
 class TestEggrollPerCandidateFitness:
     def test_es_step_returns_per_candidate_mses(self):
-        from core.opencl_microbrain_accelerator import get_opencl_accelerator
+        from aetheris_microbrains.core.opencl_microbrain_accelerator import get_opencl_accelerator
 
         acc = get_opencl_accelerator()
         rng = np.random.RandomState(7)
@@ -175,8 +175,8 @@ class TestEggrollPerCandidateFitness:
     def test_es_path_discloses_identity_substitution_and_skips_writeback(
         self, tmp_path, monkeypatch
     ):
-        import core.brain_nursery as nursery_mod
-        from core.brain_nursery import AutonomousBrainNursery
+        import aetheris_microbrains.core.brain_nursery as nursery_mod
+        from aetheris_microbrains.core.brain_nursery import AutonomousBrainNursery
 
         monkeypatch.setattr(nursery_mod, "STORE_DIR", tmp_path)
         # monkeypatch restores the previous singleton at teardown — a bare
@@ -201,14 +201,14 @@ class TestEggrollPerCandidateFitness:
 
 class TestKanAndModHonesty:
     def test_kan_formulas_labeled_untrained(self):
-        from core.kolmogorov_arnold_microbrain import KolmogorovArnoldMicroBrain
+        from aetheris_microbrains.core.kolmogorov_arnold_microbrain import KolmogorovArnoldMicroBrain
 
         res = KolmogorovArnoldMicroBrain.get_instance().extract_symbolic_formula()
         assert res["status"] == "extracted_untrained_basis"
         assert res["trained"] is False
 
     def test_mod_gate_discloses_untrained_status_and_measures_latency(self):
-        from core.mixture_of_depths_router import MixtureOfDepthsRouter
+        from aetheris_microbrains.core.mixture_of_depths_router import MixtureOfDepthsRouter
 
         res = MixtureOfDepthsRouter.get_instance().forward([0.5, -1.0, 2.0])
         assert res["gate_status"] == "untrained_heuristic_gate"
@@ -218,7 +218,7 @@ class TestKanAndModHonesty:
 
 class TestHardwareRouterHonesty:
     def test_driver_presence_never_claims_cuda_provider(self, monkeypatch):
-        import core.hardware_router as hr
+        import aetheris_microbrains.core.hardware_router as hr
 
         class _FakeRes:
             returncode = 0
@@ -231,7 +231,7 @@ class TestHardwareRouterHonesty:
         class _FakeAcc:
             gpu_available = False
 
-        import core.opencl_microbrain_accelerator as acc_mod
+        import aetheris_microbrains.core.opencl_microbrain_accelerator as acc_mod
         monkeypatch.setattr(acc_mod, "get_opencl_accelerator", lambda: _FakeAcc())
 
         report = hr.get_hardware_report()
@@ -244,7 +244,7 @@ class TestHardwareRouterHonesty:
 
 class TestTopologicalMergerGate:
     def test_persistence_energy_is_not_trace_zero(self):
-        from core.topological_persistence_merger import TopologicalPersistenceMerger
+        from aetheris_microbrains.core.topological_persistence_merger import TopologicalPersistenceMerger
 
         rng = np.random.RandomState(3)
         points = rng.randn(6, 4).astype(np.float32)
@@ -286,7 +286,7 @@ class TestPipelineFixedSurfacesStayHonest:
             assert "ollama_reachable" in src
             assert '"is_configured": True,\n        "masked_key": ollama_url' not in src
         else:
-            from tools.microbrain import microbrain_status
+            from aetheris_microbrains.tools.microbrain import microbrain_status
 
             src = (ROOT / "tools/microbrain.py").read_text(encoding="utf-8")
             assert 'BRAINS_DIR.glob("*_meta.json")' in src

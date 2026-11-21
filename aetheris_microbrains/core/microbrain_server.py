@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 import hmac
 import html
+import ipaddress
 import logging
 import os
 import re
+import socket
 import sys
 import time
 import yaml
@@ -26,14 +28,12 @@ from pydantic import BaseModel, Field
 try:
     from .. import __version__ as _PKG_VERSION
 except Exception:
-    _PKG_VERSION = "0.7.5"
+    _PKG_VERSION = "0.7.6"
 
 log = logging.getLogger("microbrain_server")
 log.setLevel(logging.INFO)
 
-# Add project root to path for imports
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
 
 # Load config from config.yaml
 def _load_microbrain_config() -> Dict[str, Any]:
@@ -267,25 +267,33 @@ app = FastAPI(
 )
 
 
-def _is_loopback_address(host: Optional[str]) -> bool:
+def _is_loopback_address(host: Optional[str], *, allow_testclient: bool = False) -> bool:
     """True if *host* refers to a loopback interface (127.0.0.0/8, ::1, localhost).
 
-    Non-IP hostnames (e.g. "testclient" used by Starlette's TestClient, empty
-    unix-socket hosts) are treated as loopback: the hard bind-time guard in
-    ``__main__`` refuses non-loopback binds without a token, so this check is
-    only defense in depth for actual remote client addresses.
+    Non-IP hostnames are resolved via DNS and must map solely to loopback IPs
+    (fail-closed on resolution errors). `"testclient"` (or missing client host)
+    is permitted only when ``allow_testclient=True`` (ASGI TestClient middleware).
     """
     if not host:
-        return True
+        return allow_testclient
     h = str(host).strip().lower().strip("[]")
     if h in {"localhost", "::1"}:
         return True
+    if h == "testclient":
+        return allow_testclient
     try:
-        import ipaddress
-
         return ipaddress.ip_address(h).is_loopback
     except ValueError:
-        return True
+        try:
+            infos = socket.getaddrinfo(h, None)
+        except OSError:
+            return False
+        if not infos:
+            return False
+        try:
+            return all(ipaddress.ip_address(str(info[4][0]).split("%")[0]).is_loopback for info in infos)
+        except ValueError:
+            return False
 
 
 def _validate_bind_host(host: str) -> Optional[str]:
@@ -294,7 +302,7 @@ def _validate_bind_host(host: str) -> Optional[str]:
     Returns None when the bind is acceptable: loopback, or a token is
     configured, or the operator explicitly set AETHERIS_ALLOW_UNAUTHENTICATED=1.
     """
-    if _is_loopback_address(host):
+    if _is_loopback_address(host, allow_testclient=False):
         return None
     if str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip():
         return None
@@ -346,7 +354,7 @@ async def _security_and_size_middleware(request: Request, call_next):
         # AETHERIS_ALLOW_UNAUTHENTICATED=1 is explicitly set.
         allow_unauth = os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1"
         client_host = getattr(getattr(request, "client", None), "host", None)
-        if not allow_unauth and not _is_loopback_address(client_host):
+        if not allow_unauth and not _is_loopback_address(client_host, allow_testclient=True):
             log.warning(
                 "Rejected unauthenticated non-loopback request from %s; set AETHERIS_SERVER_TOKEN to enable remote access",
                 client_host,
@@ -464,6 +472,13 @@ async def prometheus_metrics():
     return PlainTextResponse("\n".join(lines), media_type="text/plain; version=0.0.4")
 
 
+_HTML_SECURITY_HEADERS: Dict[str, str] = {
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+
+
 @app.get("/dashboard")
 async def telemetry_dashboard():
     """Live observability dashboard backed by MicrobrainTelemetry (zero hardcoded showcase numbers)."""
@@ -578,7 +593,7 @@ async def telemetry_dashboard():
     </div>
 </body>
 </html>"""
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=html_content, headers=_HTML_SECURITY_HEADERS)
 
 
 @app.get("/demo/dashboard")
@@ -656,7 +671,7 @@ async def demo_dashboard():
     </div>
 </body>
 </html>"""
-    return HTMLResponse(content=html_content)
+    return HTMLResponse(content=html_content, headers=_HTML_SECURITY_HEADERS)
 
 
 @app.post("/microbrain/intent", response_model=IntentResponse)

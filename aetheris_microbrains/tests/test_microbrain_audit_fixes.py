@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from core.opencl_microbrain_accelerator import (
+from aetheris_microbrains.core.opencl_microbrain_accelerator import (
     OpenCLMicroBrainAccelerator,
     get_opencl_accelerator,
 )
@@ -169,7 +169,7 @@ class TestKuramotoSynchronousSemantics:
 
 class TestHypernetDisclosure:
     def test_synthesize_discloses_untrained_generator(self):
-        from core.microbrain_hypernetwork import MicroBrainHypernetwork
+        from aetheris_microbrains.core.microbrain_hypernetwork import MicroBrainHypernetwork
 
         hn = MicroBrainHypernetwork()
         res = hn.synthesize_weights("compile the rust module and report errors")
@@ -199,7 +199,7 @@ class TestStatusAndDocHonesty:
 
 class TestParallelScanChunkDisclosure:
     def test_chunk_count_reported_for_multi_chunk_sequences(self):
-        from core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
+        from aetheris_microbrains.core.linear_state_space_microbrain import LinearStateSpaceMicroBrain
 
         ssm = LinearStateSpaceMicroBrain(d_model=8, d_state=4)
         seq = np.zeros((600, 8), dtype=np.float32)
@@ -210,7 +210,7 @@ class TestParallelScanChunkDisclosure:
 
 class TestKanReshapeCollapse:
     def test_fit_still_learns_after_the_refactor(self):
-        from core.kolmogorov_arnold_microbrain import KolmogorovArnoldMicroBrain
+        from aetheris_microbrains.core.kolmogorov_arnold_microbrain import KolmogorovArnoldMicroBrain
 
         kan = KolmogorovArnoldMicroBrain(in_features=2, out_features=1, degree=4)
         X = np.random.default_rng(0).uniform(-1, 1, size=(120, 2))

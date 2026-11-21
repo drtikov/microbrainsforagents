@@ -380,3 +380,140 @@ def test_reviewer_bypass_hardening():
         assert res["decision"] == "deny", f"Expected deny for {cmd}: {res}"
     assert decide({"tool": "execute_shell", "cmd": "node -e 'console.log(1+1)'"}, policy=strict)["decision"] == "escalate"
 
+
+def test_wave1_security_routing_hook_and_server_fixes(tmp_path, monkeypatch):
+    """Comprehensive verification for Wave 1 fixes: cluster_pinning, MultiEdit/Edit AST, shell/AST bypasses, dev escalation, is_protected_path, session isolation, and server loopback guard."""
+    import importlib.util
+    import json
+    import time
+    import aetheris_microbrains as mb
+    from aetheris_microbrains import hook as hook_mod
+    from aetheris_microbrains.core.layered_decision_engine import analyze_code_diff, is_protected_path
+    from aetheris_microbrains.core.mcp_security import SessionSecurityState
+
+    strict = PolicyConfig(profile="strict")
+    dev = PolicyConfig(profile="dev")
+
+    # 1. SessionToolSurface(cluster_pinning=True): turn 1 honors query & append-only preserves prefix
+    sts = mb.SessionToolSurface(
+        ["aws_s3_ls", "aws_ec2_list", "billing_invoice", "billing_pay", "git_status", "git_commit", "docker_ps"],
+        top_k=3,
+        cluster_pinning=True,
+    )
+    t1 = sts.select_for_turn("check git status and commit changes")
+    assert any(t.startswith("git_") for t in t1["candidate_tools"]), f"Turn 1 ignored query: {t1}"
+    prefix_snap = list(t1["candidate_tools"])
+    t2 = sts.select_for_turn("list aws s3 buckets", force_refresh=True)
+    assert t2["cache_prefix_preserved"] is True
+    assert t2["candidate_tools"][: len(prefix_snap)] == prefix_snap
+    expected_ratio = round(max(0.0, 1.0 - len(t2["candidate_tools"]) / 7.0), 4)
+    assert t2["reduction_ratio"] == expected_ratio
+
+    # 2. MultiEdit AST inspection + full-file Edit reconstruction
+    res_me = mb.evaluate_hook_payload({
+        "tool_name": "MultiEdit",
+        "tool_input": {
+            "file_path": "app.py",
+            "edits": [{"old_string": "x = 1", "new_string": "import os; os.system('rm -rf /')"}],
+        },
+    })
+    assert res_me["decision"] == "deny"
+
+    py_file = tmp_path / "app.py"
+    py_file.write_text("import os\n\ndef f():\n    x = 1\n    return x\n", encoding="utf-8")
+    res_ed = mb.evaluate_hook_payload({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(py_file), "old_string": "x = 1", "new_string": "x = 2"},
+    })
+    assert res_ed["decision"] == "allow"
+    diff_verified = analyze_code_diff(
+        str(py_file),
+        "x = 2",
+        original_source=py_file.read_text(encoding="utf-8"),
+        edit_ops=[{"old_string": "x = 1", "new_string": "x = 2", "replace_all": False}],
+    )
+    assert diff_verified["patched_file_ast_verified"] is True
+
+    res_missing_old = mb.evaluate_hook_payload({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": str(py_file), "old_string": "not_present_xyz", "new_string": "x = 2"},
+    })
+    assert res_missing_old["decision"] == "deny"
+    assert res_missing_old["label"] == "edit_old_string_not_found"
+
+    # 3. hook.py --profile dev & --policy <yaml> + session_id isolation + no taint on deny
+    pol_yaml = tmp_path / "team.yaml"
+    pol_yaml.write_text("profile: dev\n", encoding="utf-8")
+    assert mb.evaluate_hook_payload(
+        {"tool_name": "Bash", "tool_input": {"command": "git add src/"}},
+        profile="dev",
+    )["decision"] == "allow"
+    assert mb.evaluate_hook_payload(
+        {"tool_name": "Bash", "tool_input": {"command": "git add src/"}},
+        policy_path=str(pol_yaml),
+    )["decision"] == "allow"
+
+    sess_base = tmp_path / "sess.json"
+    # Denied protected write must NOT poison future turns in that session
+    mb.evaluate_hook_payload(
+        {"session_id": "sess-alpha", "tool_name": "Write", "tool_input": {"file_path": ".env", "content": "X=1"}},
+        session_state_path=str(sess_base),
+    )
+    scoped_alpha = hook_mod._scope_session_state_path(str(sess_base), {"session_id": "sess-alpha"})
+    assert scoped_alpha is not None and scoped_alpha != str(sess_base)
+
+    # Expired TTL state resets cleanly
+    stale_path = tmp_path / "stale_sess.json"
+    stale_path.write_text(
+        json.dumps({"untrusted_external_ingested": True, "sensitive_local_read": True, "updated_at": time.time() - 90000}),
+        encoding="utf-8",
+    )
+    assert SessionSecurityState(stale_path, ttl_sec=3600).evaluate_taint_gate("write_file", True)["decision"] == "pass"
+
+    # 4. Shell & AST bypass fixes + dev escalation of subprocess.run(shell=False)/os.remove
+    assert decide({"tool": "execute_shell", "cmd": "cat $'\\x2e\\x65\\x6e\\x76'"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "execute_shell", "cmd": "cat <(cat .env)"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "execute_shell", "cmd": "rg -uu PASSWORD ."}, policy=strict)["decision"] == "escalate"
+    assert decide({"tool": "execute_shell", "cmd": "grep -r PASSWORD ."}, policy=strict)["decision"] == "escalate"
+    assert decide({"tool": "execute_shell", "cmd": 'grep -E "foo|bar" app.py'}, policy=strict)["decision"] == "allow"
+
+    for bad_diff in (
+        "import pty\npty.spawn('/bin/sh')\n",
+        "import io\nio.open('.env').read()\n",
+        "import codecs\ncodecs.open('.env').read()\n",
+        "import os\nos.open('.env', 0)\n",
+        "import os\nos.execvp('sh', ['sh'])\n",
+        "import ctypes\nctypes.CDLL('libc.so.6')\n",
+    ):
+        assert decide({"tool": "edit_file", "path": "pwn.py", "diff": bad_diff}, policy=strict)["decision"] == "deny"
+
+    subp_safe = "import subprocess\nsubprocess.run(['pytest'], check=True)\n"
+    os_rm = "import os\nos.remove('tmp.txt')\n"
+    assert decide({"tool": "edit_file", "path": "run.py", "diff": subp_safe}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "edit_file", "path": "run.py", "diff": subp_safe}, policy=dev)["decision"] == "escalate"
+    assert decide({"tool": "edit_file", "path": "rm.py", "diff": os_rm}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "edit_file", "path": "rm.py", "diff": os_rm}, policy=dev)["decision"] == "escalate"
+    assert decide({"tool": "edit_file", "path": "bad.py", "diff": "import subprocess\nsubprocess.run(cmd, shell=True)\n"}, policy=dev)["decision"] == "deny"
+    assert decide({"tool": "edit_file", "path": "bad2.py", "diff": "import subprocess\nsubprocess.getoutput(cmd)\n"}, policy=dev)["decision"] == "deny"
+
+    # 5. is_protected_path: CLAUDE.md/AGENTS.md/.github/workflows protected, no false positives on ui.cursor.ts / totem_auth.py
+    assert is_protected_path("CLAUDE.md") is True
+    assert is_protected_path("AGENTS.md") is True
+    assert is_protected_path(".cursorrules") is True
+    assert is_protected_path(".github/workflows/ci.yml") is True
+    assert is_protected_path("ancestral/totem_guidelines.md") is True
+    assert is_protected_path("src/ui.cursor.ts") is False
+    assert is_protected_path("src/totem_auth.py") is False
+
+    # 6. microbrain_server DNS loopback check & security headers (when [server] installed)
+    if importlib.util.find_spec("fastapi") is not None and importlib.util.find_spec("yaml") is not None:
+        import asyncio
+        from aetheris_microbrains.core import microbrain_server
+
+        assert microbrain_server._is_loopback_address("prod-node.invalid.example") is False
+        assert microbrain_server._validate_bind_host("prod-node.invalid.example") is not None
+        resp = asyncio.run(microbrain_server.telemetry_dashboard())
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        assert resp.headers.get("x-frame-options") == "DENY"
+        assert "default-src 'none'" in (resp.headers.get("content-security-policy") or "")
+
