@@ -318,7 +318,7 @@ def test_claude_skill_security_and_installer_regressions(tmp_path, monkeypatch):
     pre_entries = installed["hooks"]["PreToolUse"]
     aetheris_pre = [e for e in pre_entries if mod._is_aetheris_entry(e)]
     assert len(aetheris_pre) == 1
-    assert aetheris_pre[0]["hooks"][0]["command"].startswith("'C:/Program Files/Python310/python.exe' -m aetheris_microbrains.hook")
+    assert aetheris_pre[0]["hooks"][0]["command"].startswith('"C:/Program Files/Python310/python.exe" -m aetheris_microbrains.hook')
     assert "--strict-ast" in aetheris_pre[0]["hooks"][0]["command"]
 
     assert mod.remove(shared=False, settings_path=settings_file) == 0

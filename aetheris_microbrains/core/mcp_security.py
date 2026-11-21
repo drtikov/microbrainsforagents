@@ -81,6 +81,7 @@ _UNTRUSTED_INGEST_TOOLS: Set[str] = {
     "web_fetch",
     "webfetch",
     "web_search",
+    "websearch",
     "http_request",
     "browser_open",
     "fetch_url",
@@ -240,16 +241,25 @@ class MCPManifestPinner:
     """Persistent SHA-256 pinner for MCP tool definitions to detect rug-pull mutations."""
 
     def __init__(self, pin_path: Optional[Path] = None):
-        default_pins = Path(__file__).resolve().parents[1] / "memory" / "mcp_manifest_pins.json"
-        self.pin_path = Path(pin_path) if pin_path else default_pins
+        if pin_path is not None:
+            self.pin_path = Path(pin_path)
+        else:
+            from .runtime_paths import get_state_dir
+
+            self.pin_path = get_state_dir() / "mcp_manifest_pins.json"
+        self.corrupted: bool = False
 
     def _load(self) -> Dict[str, Any]:
         if not self.pin_path.is_file():
             return {}
         try:
             data = json.loads(self.pin_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                self.corrupted = True
+                return {}
+            return data
         except Exception:
+            self.corrupted = True
             return {}
 
     def pin_server(
@@ -264,6 +274,7 @@ class MCPManifestPinner:
             "tool_hashes": scan["tool_hashes"],
             "pinned_at": round(time.time(), 6),
         }
+        self.corrupted = False
         _atomic_write_json(self.pin_path, data)
         return {
             "status": "pinned",
@@ -282,6 +293,18 @@ class MCPManifestPinner:
     ) -> Dict[str, Any]:
         scan = scan_mcp_tools(tools, builtin_tool_names=builtin_tool_names)
         data = self._load()
+        if self.corrupted:
+            return {
+                "verified": False,
+                "unpinned_server": False,
+                "rug_pull_detected": True,
+                "corrupted_pin_store": True,
+                "modified_tools": [],
+                "added_tools": list(scan["tool_hashes"].keys()),
+                "removed_tools": [],
+                "scan_report": scan,
+                "authorizes_execution": False,
+            }
         pinned_rec = data.get(str(server_name))
         if not isinstance(pinned_rec, dict):
             return {

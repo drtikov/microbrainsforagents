@@ -33,11 +33,11 @@ Standalone, portable suite of pure-NumPy analytical microbrains, a 4-layer struc
     - `plasticity_cycle.py`: Automated scheduled plasticity candidate staging with measured rule-retention telemetry.
     - `microbrain_telemetry.py`: Nanosecond-precision inference telemetry with 10MB log rotation, ECE calculation, and health dashboard export.
     - `counterfactual_simulation_pipeline.py`: Pre-commit blast-radius gate backed by Layer 1 Python AST & hunk analysis.
-- `evolution/` — Weight-Space Programming (WSP) & client modules (13 modules + `__init__.py`):
-  - `wsp_engine.py`, `wsp_substrate.py`, `wsp_lenses.py`, `wsp_sae.py`, `wsp_merger.py`, `wsp_hebbian.py`, `wsp_sleep_consolidation.py`, `wsp_liquid_router.py`, `wsp_ab_probe.py`, `wsp_epistemic_oracle.py`, `wsp_sandbox_tracer.py`, `dsh_microbrain_client.py`, `opencl_microbrain_accelerator.py` (compatibility shim)
+- `evolution/` — Weight-Space Programming (WSP) & client modules (12 modules + `__init__.py`):
+  - `wsp_engine.py`, `wsp_substrate.py`, `wsp_lenses.py`, `wsp_sae.py`, `wsp_merger.py`, `wsp_hebbian.py`, `wsp_sleep_consolidation.py`, `wsp_liquid_router.py`, `wsp_ab_probe.py`, `wsp_epistemic_oracle.py`, `wsp_sandbox_tracer.py`, `dsh_microbrain_client.py`
 - `tools/` — Agent tool wrappers (`microbrain.py`, `microbrain_lab.py`, `neuro_brain_incubator.py`, `neuro_route.py`, `wsp_tensor_surgeon.py`, `conformal_collector.py`)
-- `memory/` — Fleet registries (`fleet_lifecycle_registry.json`), pickle-safe projected weight-space VSA store (`store/weight_space_vsa.npz`), and analytically compiled, clean-vocabulary (zero numbered placeholder series), `W_embed_anchor`-pinned & SHA-256 verified `store/neuro_brains/` fleet (42 models / 86 files, 33 distinct `q_hat` quantiles), plus `opencl_crossover.json`
-- `tests/` — Verification suites (17 `test_*.py` suites + `conftest.py`; **203 passed, 0 skipped**), including `test_fable_review_fixes.py` (`test_fable_1`..`35`), `test_end_to_end_economics_and_drift.py`, `test_layer_ablation_and_baselines.py`, `test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py` (with held-out paraphrased split), and `test_ouroboros_sota_extensions.py`
+- `memory/` — Fleet registries (`fleet_lifecycle_registry.json`), pickle-safe projected weight-space VSA store (`store/weight_space_vsa.npz`), and analytically compiled, clean-vocabulary (zero numbered placeholder series), `W_embed_anchor`-pinned & SHA-256 verified `store/neuro_brains/` fleet (41 models, 33 distinct `q_hat` quantiles), plus `opencl_crossover.json`
+- `tests/` — Verification suites (26 `test_*.py` suites + `conftest.py` + `corpus/`; **376 passed, 2 skipped**), including `test_fable_review_fixes.py`, `test_wave3_security_contracts.py`, `test_wave4_skill_and_audit_fixes.py`, `test_end_to_end_economics_and_drift.py`, `test_layer_ablation_and_baselines.py`, `test_reviewer_probe_suite.py`, `test_adversarial_safety_suite.py`, `test_colony_swe_shadow.py` (with held-out paraphrased split), and `test_ouroboros_sota_extensions.py`
 
 ## Exported SDK Symbols
 

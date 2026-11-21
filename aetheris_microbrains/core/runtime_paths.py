@@ -8,9 +8,21 @@ when running tests or examples.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import sys
 from pathlib import Path
+from typing import Iterator
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
 
 DEFAULT_JOURNAL_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB before .1 rotation
 
@@ -49,26 +61,58 @@ def get_default_audit_log_path() -> Path:
     return get_state_dir() / "continual_learning_audit.json"
 
 
+@contextmanager
+def _journal_lock(target: Path) -> Iterator[None]:
+    """Cross-platform advisory file lock serializing rotation and appends."""
+    if _fcntl is None and _msvcrt is None:
+        yield
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(f".{target.name}.lock")
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+        else:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                fh.write("0")
+                fh.flush()
+            fh.seek(0)
+            _msvcrt.locking(fh.fileno(), _msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
+    finally:
+        fh.close()
+
+
 def append_jsonl_bounded(
     target: Path,
     line: str,
     max_bytes: int = DEFAULT_JOURNAL_MAX_BYTES,
 ) -> None:
-    """Atomically append one JSONL line with 0o600 permissions and size rotation."""
+    """Atomically append one JSONL line with 0o600 permissions and lock-serialized rotation."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    if max_bytes > 0 and target.exists():
-        try:
-            if target.stat().st_size >= max_bytes:
-                rotated = target.with_name(target.name + ".1")
-                os.replace(str(target), str(rotated))
-        except OSError:
-            pass
+    with _journal_lock(target):
+        if max_bytes > 0 and target.exists():
+            try:
+                if target.stat().st_size >= max_bytes:
+                    rotated = target.with_name(target.name + ".1")
+                    os.replace(str(target), str(rotated))
+            except OSError:
+                pass
 
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    fd = os.open(str(target), flags, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(line.rstrip("\n") + "\n")
-    except Exception:
-        # os.fdopen closes fd once constructed, but guard early constructor errors.
-        raise
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        fd = os.open(str(target), flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(line.rstrip("\n") + "\n")
+        except Exception:
+            raise

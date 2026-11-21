@@ -5,30 +5,36 @@ description: Pre-flight safety gate and economics toolkit for Claude Code. Use w
 
 # Aetheris Pre-Flight Gate Skill
 
-Aetheris Microbrains runs a deterministic, <2ms local pre-flight gate in front of
-tool execution: AST lint of diffs, shlex-aware shell analysis, secret-egress veto,
-protected-path guard, and fail-closed escalation. It is a static-analysis layer,
-NOT an OS sandbox.
+Aetheris Microbrains runs a deterministic local pre-flight gate (`<2 ms` in-process;
+~50–155 ms per fresh CLI hook process spawn) in front of tool execution: AST lint
+of diffs, shlex-aware shell analysis, secret-egress veto, protected-path guard,
+and fail-closed escalation. It is a static-analysis layer, NOT an OS sandbox.
 
 ## Commands
 
 ### 1. Install the hooks into `.claude/settings.local.json`
 
-Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable); pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
+Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"`), and registers synchronous `PostToolUse` (`Bash|Read|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts apply before context ingestion. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
 
 ```bash
 python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny)
 python .claude/skills/microbrains/install_hook.py --shadow      # observe-only, never blocks
 python .claude/skills/microbrains/install_hook.py --strict-ast  # also allowlist dynamic calls/imports
+python .claude/skills/microbrains/install_hook.py --profile dev # developer workflow allowlist
+python .claude/skills/microbrains/install_hook.py --policy security.toml --session-state ~/.local/state/aetheris/sess.json
+python .claude/skills/microbrains/install_hook.py --project-dir /path/to/repo  # target another project
 python .claude/skills/microbrains/install_hook.py --shared      # write portable config to .claude/settings.json
-python .claude/skills/microbrains/install_hook.py --auto-allow   # emit allow on safe verdicts (skips host prompts)
+python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts)
+python .claude/skills/microbrains/install_hook.py --async-post  # run PostToolUse asynchronously instead of blocking
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
 ```
 
-Verify with a probe payload (expect `permissionDecision: "deny"` for the rm probe):
+Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
+
+Verify with a probe payload (expect `permissionDecision: "deny"` and exit code `2` for the root rm probe):
 
 ```bash
-echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/aetheris_probe"}}' | python -m aetheris_microbrains.hook
+echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | python -m aetheris_microbrains.hook
 ```
 
 If `aetheris_microbrains` is not installed (`python -c "import aetheris_microbrains"` fails),
@@ -55,7 +61,11 @@ For a proposed Python edit (in-process, no file touched):
 import aetheris_microbrains as mb
 verdict = mb.evaluate_hook_payload({
     "tool_name": "Edit",
-    "tool_input": {"file_path": "src/app.py", "new_string": "<proposed code>"},
+    "tool_input": {
+        "file_path": "src/app.py",
+        "old_string": "<existing code>",
+        "new_string": "<proposed code>",
+    },
 })
 print(verdict["decision"], verdict["reason_code"], verdict["reason"])
 ```
@@ -80,7 +90,7 @@ scrubbed = mb.scrub_tool_output(<tool_output_text>)            # returns dict: s
 
 - `--host claude|codex|generic` - host contract (codex omits unsupported `ask`)
 - `--profile strict|dev` - policy profile (or `AETHERIS_PROFILE`)
-- `--policy <file>` - JSON/YAML PolicyConfig override (or `AETHERIS_POLICY_PATH`)
+- `--policy <file>` - JSON/TOML/YAML PolicyConfig override (or `AETHERIS_POLICY_PATH`)
 - `--journal-path <file>` / `AETHERIS_JOURNAL_PATH` - decision journal location
 - `--session-state <file>` - cross-turn SessionSecurityState JSON
 - `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts

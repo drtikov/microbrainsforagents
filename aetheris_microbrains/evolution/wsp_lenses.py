@@ -15,9 +15,11 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
+from ..core.runtime_paths import get_state_dir
+
 logger = logging.getLogger(__name__)
 
-LENSES_DIR = Path("memory/store/wsp_lenses")
+LENSES_DIR = get_state_dir() / "wsp_lenses"
 
 
 class EpigeneticLensManager:

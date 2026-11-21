@@ -89,11 +89,11 @@ TOOL_RISK_CLASSES: Dict[str, str] = {
     "git_push": "IRREVERSIBLE_DESTRUCTIVE",
     "delete_file": "IRREVERSIBLE_DESTRUCTIVE",
     "drop_db": "IRREVERSIBLE_DESTRUCTIVE",
-    # Harness-native informational tools: no state mutation and no payload the
-    # AST/shell layers could inspect. Task/Agent sub-tool calls are gated when
-    # they execute; web tool outputs are scrubbed by the post-tool-use hook.
-    "webfetch": "READ_ONLY",
-    "websearch": "READ_ONLY",
+    # Harness-native external web vs local informational tools:
+    # `webfetch`/`websearch` are external network tools so `require_approval_for_external`
+    # governs them; `task`/`agent`/`todowrite` remain `READ_ONLY`.
+    "webfetch": "EXTERNAL_ACTION",
+    "websearch": "EXTERNAL_ACTION",
     "task": "READ_ONLY",
     "agent": "READ_ONLY",
     "todowrite": "READ_ONLY",
@@ -106,7 +106,7 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "immutable_axioms",
     "aboriginal",
     "sacred_site",
-    "kinship",
+    "kinship_charter",
     "totem_guidelines",
     "integrity_seal.json",
     "integrity_manifest",
@@ -455,6 +455,7 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
                 fnmatch.fnmatch(clean_target, clean_pat)
                 or fnmatch.fnmatch(norm_path, clean_pat)
                 or ("/" not in clean_pat and fnmatch.fnmatch(basename, clean_pat))
+                or ("/" in clean_pat and fnmatch.fnmatch(clean_target, "*/" + clean_pat))
             ):
                 return True
             continue
@@ -1112,7 +1113,7 @@ _SECRET_ASSIGN_RE = re.compile(
 _SECRET_PLACEHOLDER_MARKERS: Tuple[str, ...] = (
     "example", "placeholder", "changeme", "your_", "dummy", "test", "xxx", "***", "<your"
 )
-_DIFF_CONTENT_KEYS: Set[str] = {"diff", "payload_diff", "new_string", "old_string", "content", "file_content"}
+_DIFF_CONTENT_KEYS: Set[str] = {"diff", "payload_diff", "new_string", "old_string", "content", "file_content", "new_source", "patch"}
 # `'abc' + 'def'` / `"abc" + 'def'` / template-literal joins collapsed before secret matching
 _LITERAL_CONCAT_RE = re.compile(r"""['"`]\s*\+\s*['"`]""")
 _JS_REQUIRE_CALL_RE = re.compile(r"\b(?:require|import)\s*\(\s*([^)]*)\)")
@@ -1504,7 +1505,7 @@ def analyze_code_diff(
     patched file in memory and verifies full-file `ast.parse` plus delta security and
     signature hazards. Falls back to context-wrapped hunk parsing for standalone diffs.
     """
-    if not diff_text:
+    if not diff_text and not edit_ops:
         return {
             "language": "empty",
             "syntax_valid": True,
@@ -1521,15 +1522,16 @@ def analyze_code_diff(
             "patched_file_ast_verified": False,
         }
 
+    diff_text = diff_text or ""
     path_str = str(file_path or "").strip()
     ext = Path(path_str).suffix.lower() if path_str else ""
     line_count = len(diff_text.splitlines())
 
     resolved_source = original_source
-    if resolved_source is None and path_str and (ext == ".py" or not ext):
+    if resolved_source is None and path_str and (ext == ".py" or not ext or (edit_ops and ext == ".json")):
         try:
             candidate_path = Path(path_str)
-            if candidate_path.is_file():
+            if candidate_path.is_file() and candidate_path.stat().st_size <= 512 * 1024:
                 resolved_source = candidate_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             resolved_source = None
@@ -1573,12 +1575,26 @@ def analyze_code_diff(
 
     # Non-Python files: skip Python ast.parse and validate format appropriately
     if ext == ".json":
-        try:
-            json.loads(dedented)
-            json_ok = True
-        except Exception:
-            json_ok = bool(has_unified and (('"' in dedented and ":" in dedented) or dedented.strip().startswith(("{", "["))))
-        findings = ([] if json_ok else ["malformed_json_hunk"]) + secret_findings
+        json_target_text = dedented
+        edit_err: Optional[str] = None
+        if resolved_source is not None and edit_ops and not has_unified:
+            patched_json, edit_err = _apply_edit_ops_to_source(resolved_source, edit_ops)
+            if patched_json is not None:
+                json_target_text = patched_json
+        if edit_err is not None:
+            json_ok = False
+            findings = [edit_err] + secret_findings
+        else:
+            try:
+                json.loads(json_target_text)
+                json_ok = True
+            except Exception:
+                unreconstructed_hunk = has_unified and not (resolved_source is not None and edit_ops)
+                json_ok = bool(
+                    unreconstructed_hunk
+                    and (('"' in dedented and ":" in dedented) or dedented.strip().startswith(("{", "[")))
+                )
+            findings = ([] if json_ok else ["malformed_json_hunk"]) + secret_findings
         dedup_json_findings = list(dict.fromkeys(findings))
         return {
             "language": "json",
@@ -1595,8 +1611,8 @@ def analyze_code_diff(
             "ast_nodes": [],
             "cyclomatic_complexity": 0,
             "is_static_data_or_doc": bool(json_ok and len(secret_findings) == 0),
-            "context_ast_parsed": False,
-            "patched_file_ast_verified": False,
+            "context_ast_parsed": bool(resolved_source is not None and edit_ops),
+            "patched_file_ast_verified": bool(resolved_source is not None and edit_ops and edit_err is None),
         }
 
     fname_lower = Path(path_str).name.lower() if path_str else ""
@@ -2148,11 +2164,17 @@ def _split_unquoted_pipes(block: str) -> List[str]:
     return segs
 
 
-def _tokenize_shell_segment(seg: str) -> List[str]:
+def _tokenize_shell_segment_checked(seg: str) -> Tuple[List[str], bool]:
+    """Tokenize a shell segment with shlex, reporting whether quotes were unbalanced."""
     try:
-        return shlex.split(seg, posix=True)
+        return shlex.split(seg, posix=True), False
     except ValueError:
-        return seg.strip().split()
+        return seg.strip().split(), True
+
+
+def _tokenize_shell_segment(seg: str) -> List[str]:
+    tokens, _unbalanced = _tokenize_shell_segment_checked(seg)
+    return tokens
 
 
 SAFE_SHELL_COMMANDS: Set[str] = {
@@ -2479,6 +2501,13 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             for a in args_lower
         ):
             return False
+        if exe == "black" and not is_dev:
+            return any(a in {"--check", "--diff"} for a in args_lower)
+        if exe == "ruff" and not is_dev:
+            if any(a in {"--fix", "--unsafe-fixes", "--fix-only"} for a in args_lower):
+                return False
+            if args_lower and args_lower[0] == "format" and not any(a in {"--check", "--diff"} for a in args_lower):
+                return False
         if exe == "pytest" and "--capture=sys" in args_lower:
             return True
         return True
@@ -2493,7 +2522,11 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
     if exe == "git":
         if not args_lower:
             return True
-        if any(a == "-c" or a.startswith("--exec") or a == "--ext-diff" for a in args_lower):
+        if any(
+            a in {"-c", "-o", "--output", "--open-files-in-pager", "--ext-diff", "--textconv"}
+            or a.startswith(("--exec", "--output=", "--open-files-in-pager="))
+            for a in args_lower
+        ):
             return False
         subcmd = args_lower[0]
         if subcmd == "branch":
@@ -2547,8 +2580,18 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
     if exe in {"python", "python3"}:
         if args_lower in (["--version"], ["-v"]):
             return True
-        if len(args_lower) >= 2 and args_lower[0] == "-m":
-            mod_target = args_lower[1].replace("-", "_")
+        scan_idx = 0
+        while scan_idx < len(args_lower):
+            tok = args_lower[scan_idx]
+            if tok == "-w":
+                scan_idx += 2
+                continue
+            if tok.startswith("-w") or re.fullmatch(r"-[ubiesoqvx]+", tok):
+                scan_idx += 1
+                continue
+            break
+        if scan_idx + 1 < len(args_lower) and args_lower[scan_idx] == "-m":
+            mod_target = args_lower[scan_idx + 1].replace("-", "_")
             if mod_target in {"http.server", "http_server", "pydoc"}:
                 return False
             if mod_target in {"pytest", "unittest", "py_compile"}:
@@ -2558,9 +2601,9 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                 return True
             if mod_target == "pip" or mod_target.startswith("pip."):
                 if is_dev and mod_target == "pip":
-                    return _is_safe_dev_pkg_command("pip", args_lower[2:])
+                    return _is_safe_dev_pkg_command("pip", args_lower[scan_idx + 2 :])
                 # Read-only pip introspection is safe in any profile; anything else stays dev-only.
-                sub = args_lower[2] if len(args_lower) > 2 else ""
+                sub = args_lower[scan_idx + 2] if len(args_lower) > scan_idx + 2 else ""
                 return sub in {"show", "list", "--version"}
             return False
         if is_dev and len(args_lower) >= 1:
@@ -2905,7 +2948,7 @@ def _is_destructive_rm_target(arg: str, policy: Optional[PolicyConfig] = None) -
     if not norm:
         return False
     exact_danger = {
-        "/", "/*", "~", "~/", "$home", "*", "..", "c:", "c:/",
+        "/", "/*", "~", "~/", "$home", "${home}", "*", ".", "./", "./*", "..", "c:", "c:/",
         "/tmp", "/tmp/", "/tmp/*",
         "/var/tmp", "/var/tmp/", "/var/tmp/*",
         "/private/tmp", "/private/tmp/", "/private/tmp/*",
@@ -2913,7 +2956,7 @@ def _is_destructive_rm_target(arg: str, policy: Optional[PolicyConfig] = None) -
     }
     if norm in exact_danger or norm.rstrip("/").endswith("/.git"):
         return True
-    if norm.startswith("~/") or ".." in [seg for seg in norm.split("/") if seg]:
+    if norm.startswith(("~/", "$home/", "${home}/")) or ".." in [seg for seg in norm.split("/") if seg]:
         return True
     # Concrete scratch subdirectories inside /tmp/ /var/tmp/ /private/tmp/ escalate instead of hard-denying
     for tmp_pref in ("/tmp/", "/var/tmp/", "/private/tmp/"):
@@ -2931,7 +2974,7 @@ def _is_destructive_rm_target(arg: str, policy: Optional[PolicyConfig] = None) -
 
 
 def _split_shell_subcommands(cmd: str) -> List[str]:
-    """Split shell command on separators (&&, ||, |&, ;, |, newline) outside quotes."""
+    """Split shell command on separators (&&, ||, |&, ;, |, &, newline) outside quotes."""
     parts: List[str] = []
     buf: List[str] = []
     in_single = False
@@ -2986,8 +3029,8 @@ def _split_shell_subcommands(cmd: str) -> List[str]:
                 i += 1
 
     if in_single or in_double:
-        # Unbalanced quotes: fail closed by falling back to raw separator splitting.
-        return re.split(r"(?:&&|\|\||\|&|;|\||\r?\n)", cmd)
+        # Unbalanced quotes: fail closed by falling back to raw separator splitting (including single `&`).
+        return re.split(r"(?:&&|\|\||\|&|;|\||\r?\n|(?<![<>])&(?!>))", cmd)
 
     if buf:
         parts.append("".join(buf))
@@ -3029,24 +3072,38 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         }
     lower_cmd = cmd.lower()
 
-    # Check destructive SQL statements while avoiding false positives on quoted text inside echo/grep/rg
+    # Check destructive SQL statements while avoiding false positives on standalone echo/grep/rg
     _SQL_TEXT_PRINT_CMDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg"}
+    _SQL_DB_CLIENTS = {"psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "mongosh", "clickhouse-client"}
     if re.search(r"\b(drop\s+database|truncate\s+table)\b", lower_cmd):
         is_destructive_sql = bool(re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", lower_cmd))
         if not is_destructive_sql:
-            for seg in _split_shell_subcommands(cmd):
-                seg_low = seg.lower()
-                if not re.search(r"\b(drop\s+database|truncate\s+table)\b", seg_low):
-                    continue
-                if re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", seg_low):
-                    is_destructive_sql = True
-                    break
-                toks = _tokenize_shell_segment(seg)
-                prem, _, _, _, _ = _unwrap_shell_prefix(toks)
-                eff = prem or toks
-                seg_exe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com") if eff else ""
-                if seg_exe not in _SQL_TEXT_PRINT_CMDS:
-                    is_destructive_sql = True
+            pipe_blocks = _split_command_pipeline_blocks(cmd)
+            for block in pipe_blocks:
+                pipe_segs = _split_unquoted_pipes(block)
+                block_exes: List[str] = []
+                for ps in pipe_segs:
+                    ps_toks = _tokenize_shell_segment(_clean_shell_grouping(ps))
+                    ps_prem, _, _, _, _ = _unwrap_shell_prefix(ps_toks)
+                    ps_eff = ps_prem or ps_toks
+                    if ps_eff:
+                        block_exes.append(os.path.basename(ps_eff[0]).lower().removesuffix(".exe").removesuffix(".com"))
+                piped_to_db = any(e in _SQL_DB_CLIENTS for e in block_exes[1:])
+                for seg in _split_shell_subcommands(block):
+                    seg_low = seg.lower()
+                    if not re.search(r"\b(drop\s+database|truncate\s+table)\b", seg_low):
+                        continue
+                    if re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", seg_low):
+                        is_destructive_sql = True
+                        break
+                    toks = _tokenize_shell_segment(seg)
+                    prem, _, _, _, _ = _unwrap_shell_prefix(toks)
+                    eff = prem or toks
+                    seg_exe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com") if eff else ""
+                    if seg_exe not in _SQL_TEXT_PRINT_CMDS or piped_to_db:
+                        is_destructive_sql = True
+                        break
+                if is_destructive_sql:
                     break
         if is_destructive_sql:
             return {
@@ -3214,8 +3271,10 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     sensitive_env_access = False
 
     for sub in subcommands:
-        tokens = _tokenize_shell_segment(sub)
+        tokens, unbalanced_quotes = _tokenize_shell_segment_checked(sub)
         if not tokens:
+            if unbalanced_quotes:
+                unrecognized.append("unbalanced_shell_quotes")
             continue
 
         rem_tokens, wrappers_seen, wrapper_findings, bare_env_dump, had_inline_env = _unwrap_shell_prefix(tokens)
@@ -3241,6 +3300,8 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         args = rem_tokens[1:]
         args_lower = [a.lower() for a in args]
 
+        if unbalanced_quotes:
+            unrecognized.append("unbalanced_shell_quotes")
         if wrappers_seen or had_inline_env:
             is_safe_analytical_xargs = bool(
                 wrappers_seen == ["xargs"]
@@ -3272,6 +3333,11 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         elif exe == "compgen" and any("e" in a.lstrip("-") for a in args_lower if a.startswith("-")):
             sensitive_env_access = True
 
+        is_git_output_write = exe == "git" and any(
+            a in {"-o", "--output"} or a.startswith("--output=")
+            for a in args_lower
+        )
+
         # Check PowerShell env: drive access and filesystem protected paths across all args
         for a, a_low in zip(args, args_lower):
             if a_low in {"env:", "env:\\", "env:/"}:
@@ -3290,7 +3356,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     findings.append("shell_proc_environ_access")
                     break
                 if is_protected_path(cand, policy=policy):
-                    if exe in _SHELL_MUTATING_COMMANDS or _is_inplace_mutating_text_tool(exe, args):
+                    if exe in _SHELL_MUTATING_COMMANDS or _is_inplace_mutating_text_tool(exe, args) or is_git_output_write:
                         findings.append("shell_protected_path_mutation")
                     elif exe in _SHELL_SECRET_EGRESS_COMMANDS:
                         findings.append(f"shell_protected_path_egress:{exe}")
@@ -3496,6 +3562,13 @@ def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] 
         sanitized["timestamp"] = time.time()
     if isinstance(sanitized.get("label"), str):
         sanitized["label"] = redact_secrets(sanitized["label"])
+    if isinstance(sanitized.get("payload_preview"), str):
+        sanitized["payload_preview"] = redact_secrets(sanitized["payload_preview"])[:200]
+    if isinstance(sanitized.get("escalation_contract"), dict):
+        contract_copy = dict(sanitized["escalation_contract"])
+        if isinstance(contract_copy.get("risk_assessment"), str):
+            contract_copy["risk_assessment"] = redact_secrets(contract_copy["risk_assessment"])
+        sanitized["escalation_contract"] = contract_copy
     _DECISION_RING_BUFFER.append(sanitized)
     target = journal_path or DEFAULT_JOURNAL_PATH
     try:
@@ -3545,6 +3618,7 @@ _VERIFIED_SHELL_TOOLS: Set[str] = {
 _VERIFIED_EDIT_WRITE_TOOLS: Set[str] = {
     "write_file", "repo_write", "edit_file", "str_replace_editor", "apply_patch", "format_code",
 }
+_HARNESS_WEB_TOOLS: Set[str] = {"webfetch", "websearch"}
 
 
 def decide(
@@ -3571,11 +3645,11 @@ def decide(
     if isinstance(input_data, dict):
         tool_name = str(input_data.get("tool") or input_data.get("action") or input_data.get("tool_name") or "")
         target_path = input_data.get("path") or input_data.get("file_path")
-        diff_text = input_data.get("diff") or input_data.get("payload_diff")
-        if diff_text is None and "new_string" in input_data:
-            diff_text = str(input_data.get("new_string") or "")
-        elif diff_text is None and "content" in input_data:
-            diff_text = str(input_data.get("content") or "")
+        diff_text = None
+        for _dk in ("diff", "payload_diff", "new_string", "content"):
+            if _dk in input_data and input_data[_dk] is not None:
+                diff_text = str(input_data[_dk])
+                break
         cmd_str = input_data.get("cmd") or input_data.get("command") or (target_path if tool_name in ("run_command", "execute_shell") else None)
         query_text = str(input_data.get("query") or input_data.get("task_prompt") or "")
         original_source = input_data.get("file_content") or ctx.get("file_content")
@@ -3589,11 +3663,11 @@ def decide(
     else:
         tool_name = str(ctx.get("tool") or "")
         target_path = ctx.get("path")
-        diff_text = ctx.get("diff")
-        if diff_text is None and "new_string" in ctx:
-            diff_text = str(ctx.get("new_string") or "")
-        elif diff_text is None and "content" in ctx:
-            diff_text = str(ctx.get("content") or "")
+        diff_text = None
+        for _dk in ("diff", "new_string", "content"):
+            if _dk in ctx and ctx[_dk] is not None:
+                diff_text = str(ctx[_dk])
+                break
         cmd_str = ctx.get("cmd")
         query_text = str(input_data or "")
         original_source = ctx.get("file_content")
@@ -3692,16 +3766,16 @@ def decide(
             "deterministic_structural_rule" if layer in (0, 1) else "unmeasured"
         )
 
-        # Context preview snippet for human review in escalations / audits
+        # Context preview snippet for human review in escalations / audits (redact BEFORE truncating)
         payload_preview: Optional[str] = None
         if cmd_str:
-            payload_preview = redact_secrets(str(cmd_str)[:200])
+            payload_preview = redact_secrets(str(cmd_str))[:200]
         elif target_path:
-            payload_preview = redact_secrets(str(target_path)[:200])
+            payload_preview = redact_secrets(str(target_path))[:200]
         elif diff_text:
-            payload_preview = redact_secrets(str(diff_text)[:200])
+            payload_preview = redact_secrets(str(diff_text))[:200]
         elif query_text:
-            payload_preview = redact_secrets(str(query_text)[:200])
+            payload_preview = redact_secrets(str(query_text))[:200]
 
         out: Dict[str, Any] = {
             "decision": decision,
@@ -3734,7 +3808,12 @@ def decide(
             if reason_code == "layer1_unrecognized_shell_command_escalate" and label in _SAFE_ANALYTICAL_TOOLS:
                 risk_lvl = "LOW"
                 risk_assess = f"Analytical/inspection tool '{label}' outside active profile allowlist; no destructive side-effects."
-            elif reason_code in ("layer1_shell_redirection_escalate", "layer1_sensitive_env_access_escalate", "layer1_protected_path_shell_read"):
+            elif reason_code in (
+                "layer1_shell_redirection_escalate",
+                "layer1_sensitive_env_access_escalate",
+                "layer1_protected_path_shell_read",
+                "layer1_protected_path_shell_read_escalate",
+            ):
                 risk_lvl = "HIGH"
                 risk_assess = f"Potentially sensitive shell behavior: {label}"
             elif reason_code == "layer1_diff_scale_exceeded":
@@ -3749,7 +3828,7 @@ def decide(
             elif reason_code == "layer1_ast_suppressed_escalate":
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Inline-suppressed AST finding ({label}) requires human review in strict profile."
-            elif reason_code.startswith("strict_ast_"):
+            elif reason_code.startswith(("strict_ast_", "layer1_strict_ast_")):
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Strict AST policy unapproved element: {label}"
             else:
@@ -3807,16 +3886,17 @@ def decide(
                 and _is_agent_control_plane_path(str(l0.get("protected_path") or ""))
             ):
                 return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
-        if l0["decision"] == "escalate":
-            return _finish("escalate", "requires_confirmation", ["escalate", "deny"], l0["reason_code"], 0)
 
-        # Optional cross-turn SessionSecurityState taint guard
+        # Cross-turn SessionSecurityState taint guard runs BEFORE l0 escalate so
+        # corrupted state/lethal trifecta fail closed and protected reads record taint.
         sess_obj = ctx.get("session_state")
         sess_path = ctx.get("session_state_path")
         if sess_obj is not None or sess_path:
             from .mcp_security import SessionSecurityState
 
             sess = sess_obj if isinstance(sess_obj, SessionSecurityState) else SessionSecurityState(Path(str(sess_path)))
+            if sess.corrupted:
+                return _finish("deny", "session_state_corrupted", ["deny"], "layer0_session_state_corrupted", 0)
             is_egress_or_mutation = (
                 clean_tool
                 in {
@@ -3829,6 +3909,9 @@ def decide(
                     "apply_patch",
                     "delete_file",
                     "web_fetch",
+                    "webfetch",
+                    "web_search",
+                    "websearch",
                     "http_request",
                     "git_push",
                     "git_commit",
@@ -3843,6 +3926,9 @@ def decide(
             if taint_res["decision"] == "escalate":
                 return _finish("escalate", taint_res["label"], ["escalate", "deny"], taint_res["reason_code"], 0)
             pending_taint_record = (sess, clean_tool, str(target_path or ""), is_protected_path(target_path, cfg))
+
+        if l0["decision"] == "escalate":
+            return _finish("escalate", "requires_confirmation", ["escalate", "deny"], l0["reason_code"], 0)
 
         # --- Layer 1: Structural AST, Secret Egress & Allowlist-First Shell Parsers ---
         if any(isinstance(val, str) and "\x00" in val for val in (target_path, cmd_str, diff_text, query_text)):
@@ -3966,6 +4052,7 @@ def decide(
                 (clean_tool in _VERIFIED_SHELL_TOOLS and bool(cmd_str))
                 or (clean_tool in _VERIFIED_EDIT_WRITE_TOOLS and diff_text is not None)
                 or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
+                or (clean_tool in _HARNESS_WEB_TOOLS and not cfg.require_approval_for_external)
             )
             if is_verified:
                 ok_code = "layer1_hunk_only_checked" if hunk_only_checked else "layer1_structural_verified"

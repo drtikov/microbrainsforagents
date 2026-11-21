@@ -14,9 +14,11 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
+from ..core.runtime_paths import get_state_dir
+
 logger = logging.getLogger(__name__)
 
-STORE_DIR = Path("memory/store")
+STORE_DIR = get_state_dir() / "wsp_store"
 SAE_DICTIONARY_FILE = STORE_DIR / "wsp_sae_dictionary.npz"
 CONCEPT_REGISTRY_FILE = STORE_DIR / "wsp_concept_registry.json"
 

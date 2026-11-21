@@ -334,7 +334,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 353 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 376 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 

@@ -200,6 +200,13 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+_EDIT_RECONSTRUCT_EXTS = {
+    ".py", ".json", ".sh", ".bash", ".zsh", ".ksh",
+    ".js", ".ts", ".jsx", ".tsx", ".yaml", ".yml", ".toml",
+}
+_EDIT_RECONSTRUCT_NAMES = {"makefile", "dockerfile", "gnumakefile", "justfile"}
+
+
 def evaluate_hook_payload(
     payload: Dict[str, Any],
     strict_ast: bool = False,
@@ -226,9 +233,17 @@ def evaluate_hook_payload(
         ctx["file_content"] = file_content
     elif norm.get("edit_ops") and norm.get("path"):
         target_p = str(norm["path"])
-        if target_p.lower().endswith(".py") and not is_protected_path(target_p, policy):
+        p_obj = Path(target_p)
+        if not p_obj.is_absolute() and payload.get("cwd"):
+            p_obj = Path(str(payload["cwd"])) / p_obj
+        ext_low = p_obj.suffix.lower()
+        name_low = p_obj.name.lower()
+        if (
+            (ext_low in _EDIT_RECONSTRUCT_EXTS or name_low in _EDIT_RECONSTRUCT_NAMES)
+            and not is_protected_path(target_p, policy)
+            and not is_protected_path(str(p_obj), policy)
+        ):
             try:
-                p_obj = Path(target_p)
                 if p_obj.is_file() and p_obj.stat().st_size <= 512 * 1024:
                     ctx["file_content"] = p_obj.read_text(encoding="utf-8", errors="ignore")
             except OSError:
@@ -249,7 +264,10 @@ def evaluate_hook_payload(
     # Advisory tool-routing recommendations must never become execution authorization
     if verdict.get("decision_kind") == "routing_recommendation" and dec == "allow":
         dec = "escalate"
-    reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
+    if dec == "escalate" and verdict.get("risk_level"):
+        reason = _redact_error_text(f"[{verdict['risk_level']}] {verdict['reason_code']}: {verdict['label']}")
+    else:
+        reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
     host_contract = {
         "claude": "claude_pretooluse_v1",
         "codex": "codex_pretooluse_no_ask_v1",
@@ -343,9 +361,15 @@ def evaluate_post_tool_use_payload(
     host: str = "claude",
     journal_path: Optional[str] = None,
     session_state_path: Optional[str] = None,
+    policy_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
     scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
+    resolved_policy_path = str(policy_path or os.getenv("AETHERIS_POLICY_PATH") or "").strip()
+    policy = None
+    if resolved_policy_path:
+        PolicyConfig, _decide, _ = _load_decision_engine()
+        policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
     if resolved_host not in {"claude", "codex", "generic"}:
         resolved_host = "claude"
@@ -364,7 +388,7 @@ def evaluate_post_tool_use_payload(
         or payload.get("path")
         or ""
     ).strip()
-    target_is_protected = bool(target_path_str and is_protected_path(target_path_str))
+    target_is_protected = bool(target_path_str and is_protected_path(target_path_str, policy))
 
     raw_output: Any = ""
     for key in ("tool_response", "tool_output", "output", "result"):
@@ -578,7 +602,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.add_argument(
             "--policy",
             default=str(os.getenv("AETHERIS_POLICY_PATH") or "").strip() or None,
-            help="Path to JSON/YAML PolicyConfig file (or set AETHERIS_POLICY_PATH)",
+            help="Path to JSON/TOML/YAML PolicyConfig file (or set AETHERIS_POLICY_PATH)",
         )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
@@ -693,6 +717,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 host=host,
                 journal_path=journal_path,
                 session_state_path=session_state_path,
+                policy_path=policy_arg,
             )
             if shadow_mode:
                 if post_res.get("journal_written") is False:

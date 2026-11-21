@@ -23,6 +23,10 @@ def clean_astra_env(tmp_path, monkeypatch):
     monkeypatch.setattr("aetheris_microbrains.evolution.wsp_substrate.ACTIVE_PATCHES_FILE", test_store / "wsp_active_patches.npz")
     monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.STORE_DIR", test_store)
     monkeypatch.setattr("aetheris_microbrains.evolution.wsp_engine.WSP_LEDGER_FILE", test_store / "wsp_ledger.jsonl")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_lenses.LENSES_DIR", test_store / "wsp_lenses")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.STORE_DIR", test_store)
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.SAE_DICTIONARY_FILE", test_store / "wsp_sae_dictionary.npz")
+    monkeypatch.setattr("aetheris_microbrains.evolution.wsp_sae.CONCEPT_REGISTRY_FILE", test_store / "wsp_concept_registry.json")
     return test_store
 
 

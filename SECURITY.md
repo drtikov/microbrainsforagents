@@ -109,7 +109,7 @@ profile: "dev"
 
 Every decision leaves an auditable, cryptographic trace:
 
-### What Is Logged (`memory/decision_journal.jsonl`):
+### What Is Logged (`$AETHERIS_STATE_DIR/decision_journal.jsonl`):
 * `decision`: `"allow"`, `"deny"`, or `"escalate"`
 * `layer`: Triggering layer (0 = Policy, 1 = AST/Shell, 2 = Conformal MoE, 3 = Supervisor)
 * `reason_code`: Machine-readable reason (e.g. `layer1_ast_sink:subprocess_shell_true`, `layer2_conformal_abstention_ood`)

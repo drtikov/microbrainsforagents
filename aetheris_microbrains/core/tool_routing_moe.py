@@ -1329,27 +1329,6 @@ class SessionToolSurface:
         self.cache_hits: int = 0
         self.cache_invalidations: int = 0
 
-    def _pin_initial_clusters(self) -> None:
-        """Groups tools by namespace prefix (e.g. git_*, mcp__server__*) and selects whole coherent clusters."""
-        clusters: Dict[str, List[str]] = {}
-        for t in self.full_catalog:
-            ns = _extract_tool_namespace(str(t))
-            clusters.setdefault(ns, []).append(str(t))
-
-        for ns in clusters:
-            clusters[ns].sort()
-
-        pinned: List[str] = []
-        for ns in sorted(clusters.keys()):
-            group = clusters[ns]
-            for tool_name in group:
-                if tool_name not in pinned:
-                    pinned.append(tool_name)
-            if len(pinned) >= self.top_k:
-                break
-
-        self.active_tools = pinned if pinned else list(self.full_catalog[: self.top_k])
-
     def select_for_turn(
         self,
         task_description: str,

@@ -109,7 +109,9 @@ class ValidationResponse(BaseModel):
 
 
 class PrefilterRequest(BaseModel):
-    candidates: List[Dict[str, Any]] = Field(..., description="List of candidate envelopes with 'code' field")
+    candidates: List[Dict[str, Any]] = Field(
+        ..., max_length=200, description="List of candidate envelopes with 'code' field"
+    )
     max_results: int = Field(10, ge=1, le=50)
     threshold: float = Field(0.5, ge=0.0, le=1.0)
 
@@ -351,7 +353,10 @@ async def _security_and_size_middleware(request: Request, call_next):
     cl_hdr = request.headers.get("content-length")
     if cl_hdr:
         try:
-            if int(cl_hdr) > max_body:
+            cl_int = int(cl_hdr)
+            if cl_int < 0:
+                return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            if cl_int > max_body:
                 return JSONResponse({"detail": "Payload too large"}, status_code=413)
         except ValueError:
             return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
@@ -658,7 +663,7 @@ async def telemetry_dashboard():
             domain_rows.append(
                 "<tr>"
                 f"<td>{html.escape(str(dom))}</td>"
-                f"<td>{int(st.get('events', 0))}</td>"
+                f"<td>{int(st.get('count', st.get('events', 0)))}</td>"
                 f"<td>{float(st.get('conformal_coverage', 0.0)):.3f}</td>"
                 f"<td>{float(st.get('mean_latency_ms', 0.0)):.3f} ms</td>"
                 "</tr>"
@@ -812,38 +817,41 @@ async def demo_dashboard():
 @app.post("/microbrain/intent", response_model=IntentResponse)
 async def classify_intent(req: IntentRequest):
     """Classify the intent of a text (task classification for DSH)."""
-    try:
-        brain = _load_brain("intent_classifier")
-        tokens = [t.lower() for t in req.text.split()[:16]]
-        if hasattr(brain, "forward"):
-            result = brain.forward(tokens)
-            if isinstance(result, dict):
-                raw_pred = (
-                    result.get("predicted_token")
-                    or result.get("prediction")
-                    or result.get("top_candidate")
-                )
-                if raw_pred:
-                    return IntentResponse(
-                        intent=str(raw_pred),
-                        confidence=float(result.get("confidence", 0.85)),
-                        alternatives=[],
-                        status="ok",
-                        source="microbrain",
+    def _sync_intent() -> IntentResponse:
+        try:
+            brain = _load_brain("intent_classifier")
+            tokens = [t.lower() for t in req.text.split()[:16]]
+            if hasattr(brain, "forward"):
+                result = brain.forward(tokens)
+                if isinstance(result, dict):
+                    raw_pred = (
+                        result.get("predicted_token")
+                        or result.get("prediction")
+                        or result.get("top_candidate")
                     )
-        intent = _simple_intent_classify(req.text)
-        return IntentResponse(intent=intent, confidence=0.0, alternatives=[], status="fallback", source="fallback_keyword")
-    except Exception as e:
-        log.warning(f"Intent classification failed: {e}")
-        intent = _simple_intent_classify(req.text)
-        return IntentResponse(
-            intent=intent,
-            confidence=0.0,
-            alternatives=[],
-            status="fallback_on_error",
-            source="fallback_keyword",
-            error=f"{type(e).__name__}: {e}",
-        )
+                    if raw_pred:
+                        return IntentResponse(
+                            intent=str(raw_pred),
+                            confidence=float(result.get("confidence", 0.85)),
+                            alternatives=[],
+                            status="ok",
+                            source="microbrain",
+                        )
+            intent = _simple_intent_classify(req.text)
+            return IntentResponse(intent=intent, confidence=0.0, alternatives=[], status="fallback", source="fallback_keyword")
+        except Exception as e:
+            log.warning(f"Intent classification failed: {e}")
+            intent = _simple_intent_classify(req.text)
+            return IntentResponse(
+                intent=intent,
+                confidence=0.0,
+                alternatives=[],
+                status="fallback_on_error",
+                source="fallback_keyword",
+                error=f"{type(e).__name__}: {e}",
+            )
+
+    return await asyncio.to_thread(_sync_intent)
 
 
 def _simple_intent_classify(text: str) -> str:
@@ -867,51 +875,52 @@ async def validate_code(req: ValidationRequest):
     """Validate Python code (syntax + AST type/handler inspection)."""
     import ast
 
-    issues = []
-    metrics = {"lines": len(req.code.splitlines()), "chars": len(req.code)}
-    parsed_tree = None
+    def _sync_validate() -> ValidationResponse:
+        issues = []
+        metrics = {"lines": len(req.code.splitlines()), "chars": len(req.code)}
+        parsed_tree = None
 
-    # Syntax validation
-    if req.check_syntax or req.check_types:
-        try:
-            parsed_tree = ast.parse(req.code)
-        except SyntaxError as e:
-            if req.check_syntax:
-                issues.append(ValidationIssue(
-                    severity="error",
-                    message=f"Syntax error: {e.msg}",
-                    line=e.lineno,
-                    column=e.offset,
-                    rule="syntax",
-                ))
-        except Exception as e:
-            if req.check_syntax:
-                issues.append(ValidationIssue(
-                    severity="error",
-                    message=f"Parse error: {type(e).__name__}: {e}",
-                    rule="syntax",
-                ))
+        if req.check_syntax or req.check_types:
+            try:
+                parsed_tree = ast.parse(req.code)
+            except SyntaxError as e:
+                if req.check_syntax:
+                    issues.append(ValidationIssue(
+                        severity="error",
+                        message=f"Syntax error: {e.msg}",
+                        line=e.lineno,
+                        column=e.offset,
+                        rule="syntax",
+                    ))
+            except Exception as e:
+                if req.check_syntax:
+                    issues.append(ValidationIssue(
+                        severity="error",
+                        message=f"Parse error: {type(e).__name__}: {e}",
+                        rule="syntax",
+                    ))
 
-    # Real AST type/handler inspection
-    if req.check_types and parsed_tree is not None:
-        for node in ast.walk(parsed_tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is None:
-                issues.append(ValidationIssue(
-                    severity="warning" if not req.strict_mode else "error",
-                    message=f"Function '{node.name}' missing return type annotation",
-                    line=getattr(node, "lineno", None),
-                    rule="type_hints",
-                ))
-            elif isinstance(node, ast.ExceptHandler) and node.type is None:
-                issues.append(ValidationIssue(
-                    severity="warning",
-                    message="Bare 'except:' clause - consider specifying exception type",
-                    line=getattr(node, "lineno", None),
-                    rule="bare_except",
-                ))
+        if req.check_types and parsed_tree is not None:
+            for node in ast.walk(parsed_tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is None:
+                    issues.append(ValidationIssue(
+                        severity="warning" if not req.strict_mode else "error",
+                        message=f"Function '{node.name}' missing return type annotation",
+                        line=getattr(node, "lineno", None),
+                        rule="type_hints",
+                    ))
+                elif isinstance(node, ast.ExceptHandler) and node.type is None:
+                    issues.append(ValidationIssue(
+                        severity="warning",
+                        message="Bare 'except:' clause - consider specifying exception type",
+                        line=getattr(node, "lineno", None),
+                        rule="bare_except",
+                    ))
 
-    success = not any(i.severity == "error" for i in issues)
-    return ValidationResponse(success=success, issues=issues, metrics=metrics)
+        success = not any(i.severity == "error" for i in issues)
+        return ValidationResponse(success=success, issues=issues, metrics=metrics)
+
+    return await asyncio.to_thread(_sync_validate)
 
 
 @app.post("/microbrain/prefilter", response_model=PrefilterResponse)
@@ -919,61 +928,64 @@ async def prefilter_candidates(req: PrefilterRequest):
     """Batch prefilter evolution candidates via Python AST security & structural heuristics."""
     from .layered_decision_engine import analyze_code_diff
 
-    results = []
-    try:
-        for i, cand in enumerate(req.candidates):
-            code = str(cand.get("code", "") or "")
-            cand_id = cand.get("id", f"cand_{i}")
-            diff_res = analyze_code_diff("candidate.py", code)
-
-            if not diff_res.get("syntax_valid", False) or not diff_res.get("security_clean", True):
-                score = 0.05
-                passed = False
-                findings = diff_res.get("findings") or ["prefilter_rejected"]
-                reason = ",".join(findings)
-            else:
-                score = 0.5
-                if "def " in code and "def test_" in code:
-                    score = 0.90
-                elif "def " in code:
-                    score = 0.75
-                elif "import " in code:
-                    score = 0.60
-                passed = score >= req.threshold
-                reason = "syntax_and_security_ok"
-
-            results.append(PrefilterResult(
-                candidate_id=cand_id,
-                score=score,
-                passed=passed,
-                reason=reason,
-            ))
-
-        results.sort(key=lambda r: (r.passed, r.score), reverse=True)
-        limited = results[: req.max_results]
-        filtered = sum(1 for r in limited if r.passed)
-        return PrefilterResponse(
-            results=limited,
-            filtered_count=filtered,
-            total_count=len(req.candidates),
-        )
-    except Exception as e:
-        log.warning(f"Prefilter failed: {e}")
+    def _sync_prefilter() -> PrefilterResponse:
         results = []
-        for i, cand in enumerate(req.candidates):
-            results.append(PrefilterResult(
-                candidate_id=cand.get("id", f"cand_{i}"),
-                score=0.0,
-                passed=False,
-                reason=f"prefilter_error_uncertain:{type(e).__name__}",
-            ))
-        return PrefilterResponse(
-            results=results,
-            filtered_count=0,
-            total_count=len(results),
-            status="error",
-            error=f"{type(e).__name__}: {e}",
-        )
+        try:
+            for i, cand in enumerate(req.candidates):
+                code = str(cand.get("code", "") or "")
+                cand_id = cand.get("id", f"cand_{i}")
+                diff_res = analyze_code_diff("candidate.py", code)
+
+                if not diff_res.get("syntax_valid", False) or not diff_res.get("security_clean", True):
+                    score = 0.05
+                    passed = False
+                    findings = diff_res.get("findings") or ["prefilter_rejected"]
+                    reason = ",".join(findings)
+                else:
+                    score = 0.5
+                    if "def " in code and "def test_" in code:
+                        score = 0.90
+                    elif "def " in code:
+                        score = 0.75
+                    elif "import " in code:
+                        score = 0.60
+                    passed = score >= req.threshold
+                    reason = "syntax_and_security_ok"
+
+                results.append(PrefilterResult(
+                    candidate_id=cand_id,
+                    score=score,
+                    passed=passed,
+                    reason=reason,
+                ))
+
+            results.sort(key=lambda r: (r.passed, r.score), reverse=True)
+            limited = results[: req.max_results]
+            filtered = sum(1 for r in limited if r.passed)
+            return PrefilterResponse(
+                results=limited,
+                filtered_count=filtered,
+                total_count=len(req.candidates),
+            )
+        except Exception as e:
+            log.warning(f"Prefilter failed: {e}")
+            results = []
+            for i, cand in enumerate(req.candidates):
+                results.append(PrefilterResult(
+                    candidate_id=cand.get("id", f"cand_{i}"),
+                    score=0.0,
+                    passed=False,
+                    reason=f"prefilter_error_uncertain:{type(e).__name__}",
+                ))
+            return PrefilterResponse(
+                results=results,
+                filtered_count=0,
+                total_count=len(results),
+                status="error",
+                error=f"{type(e).__name__}: {e}",
+            )
+
+    return await asyncio.to_thread(_sync_prefilter)
 
 
 @app.post("/microbrain/validate_code", response_model=ValidationResponse)
@@ -984,9 +996,22 @@ async def validate_code_endpoint(req: ValidationRequest):
 
 @app.get("/microbrain/brains")
 async def list_brains():
-    """List all available brains with metadata."""
+    """List available brains with metadata (without leaking host filesystem paths)."""
+    safe_available: Dict[str, Dict[str, Any]] = {}
+    for name, info in _available_brains.items():
+        if isinstance(info, dict):
+            entry: Dict[str, Any] = {
+                "type": info.get("type"),
+                "has_meta": "meta_file" in info,
+                "has_weights": "weight_file" in info,
+            }
+            if info.get("description") is not None:
+                entry["description"] = info.get("description")
+            safe_available[name] = {k: v for k, v in entry.items() if v is not None}
+        else:
+            safe_available[name] = {"type": str(info)}
     return {
-        "available": _available_brains,
+        "available": safe_available,
         "loaded": list(_brain_cache.keys()),
         "accelerator_ready": _accelerator is not None,
     }
@@ -998,7 +1023,7 @@ async def load_brain_endpoint(brain_name: str):
     if not re.fullmatch(r"[A-Za-z0-9_\-]{1,80}", brain_name):
         raise HTTPException(status_code=400, detail="Invalid brain name")
     try:
-        brain = _load_brain(brain_name)
+        await asyncio.to_thread(_load_brain, brain_name)
         return {"success": True, "brain": brain_name, "cached": brain_name in _brain_cache}
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Brain not found: {e}")
@@ -1010,14 +1035,15 @@ class GateRequest(BaseModel):
     """Per-step VLA gating request. Barriers/u-bounds are per-request so the
     endpoint stays stateless; risk_score is the caller's action risk estimate."""
 
-    scene: List[float] = Field(default_factory=list, description="Raw scene/observation vector (any dim)")
-    state: List[float] = Field(..., description="Robot state x (control-affine filter input)")
-    nominal_action: List[float] = Field(..., description="Action to gate")
+    scene: List[float] = Field(default_factory=list, max_length=2048, description="Raw scene/observation vector (any dim)")
+    state: List[float] = Field(..., max_length=512, description="Robot state x (control-affine filter input)")
+    nominal_action: List[float] = Field(..., max_length=512, description="Action to gate")
     risk_score: float = Field(1.0, ge=0.0, le=1.0)
-    u_min: Optional[List[float]] = None
-    u_max: Optional[List[float]] = None
+    u_min: Optional[List[float]] = Field(None, max_length=512)
+    u_max: Optional[List[float]] = Field(None, max_length=512)
     barriers: List[Dict[str, Any]] = Field(
         default_factory=list,
+        max_length=128,
         description='[{"type":"sphere","center":[..],"radius":r,"alpha":a}, {"type":"halfplane","a":[..],"b":c,"alpha":a}]',
     )
     dt: float = Field(0.05, gt=0.0)
@@ -1077,7 +1103,9 @@ async def gate_action(req: GateRequest):
     safety filter or conformal margin.
     """
     global _vla_skill_library, _vla_action_gate
-    try:
+
+    def _sync_gate() -> GateResponse:
+        global _vla_skill_library, _vla_action_gate
         from .vla_gating import ConformalActionGate, SkillLibrary, VLActionGate
 
         if _vla_skill_library is None:
@@ -1107,6 +1135,9 @@ async def gate_action(req: GateRequest):
             affordances=out.get("affordances", []),
             conformal=out.get("conformal", {}),
         )
+
+    try:
+        return await asyncio.to_thread(_sync_gate)
     except HTTPException:
         raise
     except Exception as e:

@@ -25,29 +25,19 @@ from aetheris_microbrains.hook import _normalize_hook_payload, evaluate_hook_pay
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALLER = _REPO_ROOT / ".claude" / "skills" / "microbrains" / "install_hook.py"
 
-_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
-_POST_MATCHER = "Bash|WebFetch|WebSearch"
-
-def _installer_patched() -> bool:
-    """True once the protected-file patch (--auto-allow opt-in) is applied."""
-    try:
-        return "--auto-allow" in _INSTALLER.read_text(encoding="utf-8")
-    except OSError:
-        return False
+_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*"
+_POST_MATCHER = "Bash|Read|WebFetch|WebSearch|mcp__.*"
 
 # ---------------------------------------------------------------------------
-# I1: harness-native informational tools classify as READ_ONLY (no false asks)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# I1: harness-native informational tools classify as READ_ONLY (no false asks)
+# I1: harness-native local vs external web tools
 # ---------------------------------------------------------------------------
 
 
 def test_harness_native_tools_classified_read_only():
-    for name in ("webfetch", "websearch", "task", "agent", "todowrite"):
+    for name in ("task", "agent", "todowrite"):
         assert TOOL_RISK_CLASSES.get(name) == "READ_ONLY"
+    for name in ("webfetch", "websearch"):
+        assert TOOL_RISK_CLASSES.get(name) == "EXTERNAL_ACTION"
 
 
 @pytest.mark.parametrize(
@@ -160,7 +150,6 @@ def test_installer_detects_aetheris_entries_recursively():
     assert not mod._is_aetheris_entry({"matcher": "*", "hooks": [{"command": "echo hi"}]})
 
 
-@pytest.mark.skipif(not _installer_patched(), reason="installer matcher/async patch pending (protected .claude/ file - needs operator run)")
 def test_installer_install_is_idempotent_with_narrow_matchers(tmp_path, monkeypatch):
     mod = _load_installer()
     settings = tmp_path / "settings.local.json"
@@ -174,9 +163,10 @@ def test_installer_install_is_idempotent_with_narrow_matchers(tmp_path, monkeypa
     post = [e for e in cfg["hooks"]["PostToolUse"] if mod._is_aetheris_entry(e)]
     assert len(pre) == 1 and len(post) == 1
     assert pre[0]["matcher"] == _PRE_MATCHER
+    assert pre[0]["hooks"][0].get("onFailure") == "block"
     assert post[0]["matcher"] == _POST_MATCHER
     post_hook = post[0]["hooks"][0]
-    assert post_hook.get("async") is True
+    assert "async" not in post_hook
     assert "--log-decisions" in post_hook["command"]
 
 
@@ -192,7 +182,6 @@ def test_installer_remove_strips_aetheris_only(tmp_path, monkeypatch):
     assert all(not mod._is_aetheris_entry(e) for e in cfg["hooks"].get("PostToolUse", []))
 
 
-@pytest.mark.skipif(not _installer_patched(), reason="installer --auto-allow patch pending (protected .claude/ file - needs operator run)")
 def test_installer_auto_allow_flag_appended(tmp_path, monkeypatch):
     mod = _load_installer()
     settings = tmp_path / "settings.local.json"
@@ -200,9 +189,11 @@ def test_installer_auto_allow_flag_appended(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "SETTINGS_SHARED_PATH", settings)
     assert mod.install(strict_ast=False, shadow=False, shared=False, auto_allow=True) == 0
     cfg = json.loads(settings.read_text(encoding="utf-8"))
-    cmd = cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert "--auto-allow" in cmd
-    assert "--shadow" not in cmd
+    pre_cmd = cfg["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    post_cmd = cfg["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert "--auto-allow" in pre_cmd
+    assert "--auto-allow" not in post_cmd
+    assert "--shadow" not in pre_cmd
 
 
 # ---------------------------------------------------------------------------

@@ -88,7 +88,7 @@ class TestLayerAblationStudy:
         for cmd in self.UNRECOGNIZED_SHELL_CASES:
             res = mb.decide({"tool": "execute_shell", "cmd": cmd})
             assert res["decision"] in ("escalate", "deny"), f"Unrecognized shell auto-allowed: {cmd} -> {res}"
-            if cmd != "git push --force origin main":
+            if cmd not in ("git push --force origin main", "find . -exec rm -rf {} +"):
                 assert res["decision"] == "escalate"
                 assert res["reason_code"] == "layer1_unrecognized_shell_command_escalate"
 
