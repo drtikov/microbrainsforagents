@@ -26,7 +26,7 @@ Standalone, portable suite of pure-NumPy analytical microbrains, a 4-layer struc
     - `skill_lifecycle_manager.py`: Autonomous domain incubation, validation, degraded status, and fleet hygiene.
   - **SOTA Neural Extensions**:
     - `weight_space_vsa.py`: 2048-D Vector Symbolic Architecture / Hyperdimensional Computing associative memory over fleet model weights (`find_nearest_domains` ranks by actual Count-Sketch projected weights; `allow_pickle=False`).
-    - `tool_routing_moe.py`: Bilingual (RU/EN) SHA-256 Top-2 Mixture of Experts (MoE) router constrained to active `available_tools` plus MCP-Zero Top-$K$ narrowing (`narrow_tool_surface`) and OOD abstention.
+    - `tool_routing_moe.py`: Bilingual (RU/EN) SHA-256 Top-2 Mixture of Experts (MoE) router constrained to active `available_tools` plus Top-K tool narrowing (`narrow_tool_surface`) and OOD abstention.
     - `critical_ensemble_abstention.py`: Multi-brain consensus voting integrated with Layer 0/1 AST, secret-leak (`secret_leak_pattern_found`), interface-hazard & path checks, selective conformal abstention, and honest `evaluate_with_cascade(..., llm_callback=None)`.
     - `cascade_ensemble.py`: Four-tier cascading decision pipeline executing `.infer_conformal()` across tier brains alongside Layer 0/1 structural AST/`shlex` checks (`ls`/`pwd` pass; unrecognized shell cmds & massive diffs escalate).
     - `continual_learning_pipeline.py`: Empirical diagonal Fisher EWC plasticity anchored to persisted `W_embed_anchor`, `_candidates/` staging, leak-free holdout verification using strict set coverage $P(Y \in C_\alpha(X))$, and `_rollback/` rollback.
@@ -122,7 +122,7 @@ print("Status:", outcome.status)
 print("Step Rollouts:", outcome.step_predictions)
 ```
 
-### 5. Allowlist Shell Gate, Dynamic `available_tools`, MCP-Zero & Shadow Mode
+### 5. Allowlist Shell Gate, Dynamic `available_tools`, Top-K Tool Narrowing & Shadow Mode
 
 ```python
 import aetheris_microbrains as mb
@@ -131,7 +131,7 @@ import aetheris_microbrains as mb
 print(mb.decide({"tool": "execute_shell", "cmd": "ls -la"})["decision"])                    # -> "allow"
 print(mb.decide({"tool": "execute_shell", "cmd": "custom_deploy_binary --prod"})["decision"]) # -> "escalate"
 
-# Dynamic tool surface restriction + MCP-Zero Top-K narrowing
+# Dynamic tool surface restriction + Top-K tool narrowing
 narrowed = mb.narrow_tool_surface("fix bug and write repository patch", top_k=4)
 print(narrowed["mode"], narrowed["candidate_tools"], narrowed["reduction_ratio"])
 

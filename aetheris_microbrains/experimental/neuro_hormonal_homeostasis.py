@@ -73,7 +73,7 @@ class NeuroHormonalHomeostasis:
         magnitude: float = 0.20
     ):
         """Modulates hormones based on cognitive feedback."""
-        mag = float(np.clip(magnitude, 0.0, 1.0)) if "np" in globals() else min(1.0, max(0.0, float(magnitude)))
+        mag = min(1.0, max(0.0, float(magnitude)))
 
         if event_type == "SUCCESS":
             self.hormonal["dopamine"] = min(1.0, self.hormonal["dopamine"] + mag * 0.4)

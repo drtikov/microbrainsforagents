@@ -60,4 +60,4 @@ where = ["."]
 include = ["aetheris_microbrains*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.json", "*.npz", "*.md"]
+"*" = ["*.json", "*.npz", "*.md", "py.typed"]

@@ -143,3 +143,14 @@ Aetheris Microbrains operates as an in-process, deterministic pre-flight evaluat
 > **Static Analysis vs. Runtime Sandboxing:**
 > Static analysis and AST/shlex token inspection analyze command syntax and glob patterns at parse-time. Shell glob expansions, variable indirections, and OS syscalls are ultimately executed by the underlying operating system. For production multi-tenant or untrusted agent environments, Aetheris Microbrains should always be combined with OS-level sandboxing (e.g. Docker, gVisor, Firecracker, Bubblewrap, or Linux seccomp/eBPF confinement).
 
+### What Is Explicitly Out of Scope
+Static pre-flight inspection catches structural and syntactic patterns at parse time, not full runtime dataflow:
+* **Runtime-assembled strings across variables or imports:** Dynamic variable indirection (e.g., `X=.env; cat $X` or constructing tokens across separate variables/functions) cannot always be resolved statically; unknown commands safely **escalate** to the user.
+* **Indirect external build scripts:** Commands inside external `Makefile` targets or `package.json` lifecycle scripts invoked indirectly (`make`, `npm run`) escalate in `strict` mode rather than evaluating full build graphs.
+* **Symlink & TOCTOU races:** Static path inspection checks path strings before execution and cannot enforce kernel-level filesystem invariants against symlink swaps or concurrent modifications at execution time.
+* **In-band context disclosure:** If secrets are already inside an LLM's context window, pre-tool hooks cannot stop the model from printing them directly into chat replies.
+* **OS / syscall confinement:** Kernel-level sandboxing (containers, namespaces, `seccomp`, network egress proxies) remains the responsibility of the host runtime.
+
+### Reporting a Vulnerability
+Please report security issues or filter bypasses privately via GitHub Security Advisories on `drtikov/microbrainsforagents`, or email [drtikov@gmail.com](mailto:drtikov@gmail.com) with reproduction details before public disclosure.
+

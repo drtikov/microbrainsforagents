@@ -331,3 +331,52 @@ def test_claude_skill_security_and_installer_regressions(tmp_path, monkeypatch):
     shared_data = json.loads(shared_file.read_text(encoding="utf-8"))
     assert shared_data["hooks"]["PreToolUse"][0]["hooks"][0]["command"].startswith("python -m aetheris_microbrains.hook")
 
+
+def test_reviewer_bypass_hardening():
+    """Regressions for split secrets, JS dynamic require, $IFS obfuscation, find -exec/-delete, and perl/node/ruby/php -e."""
+    strict = PolicyConfig(profile="strict")
+
+    # 1. Concatenated/split credentials in Python & JS -> deny; benign concatenation -> allow
+    split_secret_cases = [
+        ("src/b.py", "k = 'sk-proj-' + 'abcdefghijklmnop1234'\n"),
+        ("src/b2.py", "k = ''.join(['sk-proj-', 'abcdefghijklmnop1234'])\n"),
+        ("src/b3.py", "k = f'sk-proj-{\"abcdefghijklmnop1234\"}'\n"),
+        ("src/e_secret.js", "const k = 'sk-proj-' + 'abcdefghijklmnop1234';\n"),
+    ]
+    for path, code in split_secret_cases:
+        res = decide({"tool": "edit_file", "path": path, "diff": code}, policy=strict)
+        assert res["decision"] == "deny", f"Expected deny for {path}: {res}"
+        assert res["label"] == "obfuscated_secret_concatenation"
+
+    assert decide({"tool": "edit_file", "path": "src/ok.py", "diff": "s = 'hello ' + 'world'\n"}, policy=strict)["decision"] == "allow"
+
+    # 2. JS/TS dynamic require/import -> deny; static -> allow
+    for path, code in [("src/e.js", "require(userPath)\n"), ("src/e_dyn.ts", "const m = await import(modName);\n")]:
+        res = decide({"tool": "edit_file", "path": path, "diff": code}, policy=strict)
+        assert res["decision"] == "deny", f"Expected deny for {path}: {res}"
+        assert res["label"] == "js_dynamic_require"
+
+    assert decide({"tool": "edit_file", "path": "src/e_ok.js", "diff": "const fs = require('fs');\n"}, policy=strict)["decision"] == "allow"
+    assert decide({"tool": "edit_file", "path": "src/e_ok.ts", "diff": "const m = await import('./utils');\n"}, policy=strict)["decision"] == "allow"
+
+    # 3. $IFS shell obfuscation -> deny
+    res_ifs = decide({"tool": "execute_shell", "cmd": "rm${IFS}-rf${IFS}/"}, policy=strict)
+    assert res_ifs["decision"] == "deny"
+    assert res_ifs["label"] == "shell_ifs_obfuscation"
+
+    # 4. find -exec / -delete -> deny on destructive target; escalate on benign
+    assert decide({"tool": "execute_shell", "cmd": "find / -exec rm -rf {} +"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "execute_shell", "cmd": "find / -delete"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "execute_shell", "cmd": "find . -name '*.py' -exec grep TODO {} +"}, policy=strict)["decision"] == "escalate"
+
+    # 5. Inline interpreters (perl/node/ruby/php -e/-r) -> deny on sinks; escalate on benign
+    for cmd in [
+        "perl -e 'system(\"rm -rf /\")'",
+        "node -e \"require('child_process').execSync('rm -rf /')\"",
+        "ruby -e '`rm -rf /`'",
+        "php -r 'shell_exec(\"id\");'",
+    ]:
+        res = decide({"tool": "execute_shell", "cmd": cmd}, policy=strict)
+        assert res["decision"] == "deny", f"Expected deny for {cmd}: {res}"
+    assert decide({"tool": "execute_shell", "cmd": "node -e 'console.log(1+1)'"}, policy=strict)["decision"] == "escalate"
+

