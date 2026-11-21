@@ -78,3 +78,6 @@ desktop.ini
 continual_learning_audit.json
 _candidates/
 _rollback/
+
+# Claude Code local machine settings
+.claude/settings.local.json

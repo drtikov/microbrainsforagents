@@ -259,3 +259,75 @@ def test_round6_shell_indirection_and_content_inspection():
     assert res_xargs["decision"] == "deny"
     assert res_xargs["reason_code"] == "layer1_shell_parser_veto"
 
+
+def test_claude_skill_security_and_installer_regressions(tmp_path, monkeypatch):
+    """Regressions for quote-aware shell splitting, pip/audit CLI scoping, break-glass paths, and hook installer."""
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    strict = PolicyConfig(profile="strict")
+    dev = PolicyConfig(profile="dev")
+
+    # 1. Inline python -c with semicolons inside quotes: catch malicious sinks, allow-escalate benign, fail-closed syntax
+    rce_py = decide({"tool": "run_command", "cmd": 'python -c "import os; os.system(\'rm -rf /\')"'}, policy=strict)
+    assert rce_py["decision"] == "deny"
+    assert rce_py["reason_code"] == "layer1_shell_parser_veto"
+
+    benign_py = decide({"tool": "run_command", "cmd": 'python -c "import sys; print(sys.version)"'}, policy=strict)
+    assert benign_py["decision"] == "escalate"
+
+    bad_syntax_py = decide({"tool": "run_command", "cmd": 'python -c "def f(:"'}, policy=strict)
+    assert bad_syntax_py["decision"] == "deny"
+    assert bad_syntax_py["reason_code"] == "layer1_shell_parser_veto"
+
+    # 2. pip / aetheris_microbrains CLI / arbitrary script scoping across profiles
+    assert decide({"tool": "run_command", "cmd": "python -m pip show aetheris-microbrains"}, policy=strict)["decision"] == "allow"
+    assert decide({"tool": "run_command", "cmd": "python -m pip list"}, policy=strict)["decision"] == "allow"
+    assert decide({"tool": "run_command", "cmd": "python -m pip install requests"}, policy=strict)["decision"] == "escalate"
+    assert decide({"tool": "run_command", "cmd": "python -m pip install requests"}, policy=dev)["decision"] == "allow"
+
+    assert decide({"tool": "run_command", "cmd": "python -m aetheris_microbrains.audit --last"}, policy=strict)["decision"] == "allow"
+    assert decide({"tool": "run_command", "cmd": "python -m aetheris_microbrains.core.microbrain_server"}, policy=strict)["decision"] == "escalate"
+    assert decide({"tool": "run_command", "cmd": "python scripts/arbitrary.py"}, policy=strict)["decision"] == "escalate"
+
+    # 3. Break-glass AETHERIS_ALLOW_POLICY_EDIT=1 applies only to clean control-plane paths
+    monkeypatch.setenv("AETHERIS_ALLOW_POLICY_EDIT", "1")
+    assert decide({"tool": "write_file", "path": ".claude/settings.json", "content": "{}"}, policy=strict)["decision"] == "allow"
+    assert decide({"tool": "write_file", "path": ".claude/../../.ssh/config", "content": "Host *\n"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "write_file", "path": ".claude/.env", "content": "KEY=1\n"}, policy=strict)["decision"] == "deny"
+    assert decide({"tool": "write_file", "path": ".env", "content": "KEY=1\n"}, policy=strict)["decision"] == "deny"
+
+    # 4. install_hook.py idempotency, space quoting, --shared portability, and --remove preservation
+    installer_path = Path(__file__).resolve().parents[2] / ".claude" / "skills" / "microbrains" / "install_hook.py"
+    spec = importlib.util.spec_from_file_location("_test_install_hook", installer_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    settings_file = tmp_path / "settings.local.json"
+    settings_file.write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo other"}]}]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "_PY", "C:/Program Files/Python310/python.exe")
+    assert mod.install(strict_ast=False, shadow=False, shared=False, settings_path=settings_file) == 0
+    assert mod.install(strict_ast=True, shadow=False, shared=False, settings_path=settings_file) == 0
+
+    installed = json.loads(settings_file.read_text(encoding="utf-8"))
+    pre_entries = installed["hooks"]["PreToolUse"]
+    aetheris_pre = [e for e in pre_entries if mod._is_aetheris_entry(e)]
+    assert len(aetheris_pre) == 1
+    assert aetheris_pre[0]["hooks"][0]["command"].startswith("'C:/Program Files/Python310/python.exe' -m aetheris_microbrains.hook")
+    assert "--strict-ast" in aetheris_pre[0]["hooks"][0]["command"]
+
+    assert mod.remove(shared=False, settings_path=settings_file) == 0
+    after_remove = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert len(after_remove["hooks"]["PreToolUse"]) == 1
+    assert after_remove["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "echo other"
+
+    shared_file = tmp_path / "settings.json"
+    assert mod.install(strict_ast=False, shadow=False, shared=True, settings_path=shared_file) == 0
+    shared_data = json.loads(shared_file.read_text(encoding="utf-8"))
+    assert shared_data["hooks"]["PreToolUse"][0]["hooks"][0]["command"].startswith("python -m aetheris_microbrains.hook")
+

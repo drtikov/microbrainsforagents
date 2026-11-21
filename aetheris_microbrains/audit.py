@@ -132,6 +132,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--journal-path", type=str, default="", help="Path to decision_journal.jsonl")
 
     args = parser.parse_args(argv)
+    # Windows consoles default to cp1252 and crash on box-drawing/bullet characters
+    # in formatted entries; force UTF-8 with replacement instead of a hard failure.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
     p = args.journal_path or None
     entries = get_journal_entries(journal_path=p, limit=max(100, args.tail))
 

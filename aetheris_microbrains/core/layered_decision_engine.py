@@ -1865,8 +1865,15 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                 return False
             if mod_target in {"pytest", "unittest", "py_compile"}:
                 return True
-            if is_dev and mod_target == "pip":
+            if mod_target == "aetheris_microbrains.audit":
+                # Local package audit CLI (audit --last/--tail/--summary): read-only self-inspection.
                 return True
+            if mod_target == "pip" or mod_target.startswith("pip."):
+                if is_dev and mod_target == "pip":
+                    return True
+                # Read-only pip introspection is safe in any profile; anything else stays dev-only.
+                sub = args_lower[2] if len(args_lower) > 2 else ""
+                return sub in {"show", "list", "--version"}
             return False
         if is_dev and len(args_lower) >= 1:
             # Clustered or standalone short flags: -c, -Bc, -uc, -c<code>, etc.
@@ -2156,6 +2163,66 @@ def _unwrap_shell_prefix(tokens: List[str]) -> Tuple[List[str], List[str], List[
     return tokens[idx:], wrappers_seen, wrapper_findings, bare_env_dump, had_inline_env
 
 
+def _split_shell_subcommands(cmd: str) -> List[str]:
+    """Split shell command on separators (&&, ||, |&, ;, |, newline) outside quotes."""
+    parts: List[str] = []
+    buf: List[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    n = len(cmd)
+
+    while i < n:
+        ch = cmd[i]
+        if in_single:
+            buf.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+        elif in_double:
+            if ch == "\\" and i + 1 < n and cmd[i + 1] in ('"', "\\", "$", "`", "\n"):
+                buf.append(ch)
+                buf.append(cmd[i + 1])
+                i += 2
+            else:
+                buf.append(ch)
+                if ch == '"':
+                    in_double = False
+                i += 1
+        else:
+            if ch == "\\" and i + 1 < n:
+                buf.append(ch)
+                buf.append(cmd[i + 1])
+                i += 2
+            elif ch == "'":
+                in_single = True
+                buf.append(ch)
+                i += 1
+            elif ch == '"':
+                in_double = True
+                buf.append(ch)
+                i += 1
+            elif cmd.startswith(("&&", "||", "|&", "\r\n"), i):
+                parts.append("".join(buf))
+                buf = []
+                i += 2
+            elif ch in (";", "|", "\n"):
+                parts.append("".join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+
+    if in_single or in_double:
+        # Unbalanced quotes: fail closed by falling back to raw separator splitting.
+        return re.split(r"(?:&&|\|\||\|&|;|\||\r?\n)", cmd)
+
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
 def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig] = None) -> Dict[str, Any]:
     """Layer 1 structural POSIX/Windows shell parser using shlex tokenization.
 
@@ -2349,7 +2416,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         "sensitive_env_vars": [],
                     }
 
-    subcommands = re.split(r"(?:&&|\|\||;|\||\r?\n)", cmd)
+    subcommands = _split_shell_subcommands(cmd)
     parsed_cmds: List[str] = []
     unrecognized: List[str] = []
     protected_path_reads: List[str] = []
@@ -2609,6 +2676,31 @@ def get_recent_decision_journal(limit: int = 50) -> List[Dict[str, Any]]:
     return list(_DECISION_RING_BUFFER)[-limit:]
 
 
+_AGENT_CONTROL_PLANE_SEGMENTS: Tuple[str, ...] = (".claude", ".codex", ".cursor", ".mcp.json", ".vscode")
+_AGENT_CREDENTIAL_SEGMENTS: Tuple[str, ...] = (
+    ".env", ".ssh", ".aws", ".git", "credentials", "id_rsa", "id_ed25519", "id_ecdsa",
+    "secrets", "integrity", "bible.md", "axioms", ".pem", ".key",
+)
+
+
+def _is_agent_control_plane_path(path_str: str) -> bool:
+    """True for agent config-plane paths eligible for operator break-glass policy edits."""
+    raw = str(path_str or "")
+    if not raw or "\x00" in raw:
+        return False
+    raw_norm = raw.replace("\\", "/").strip().lower()
+    raw_segments = [seg for seg in raw_norm.split("/") if seg]
+    if ".." in raw_segments:
+        return False
+    norm = posixpath.normpath(raw_norm)
+    norm_segments = [seg for seg in norm.split("/") if seg]
+    if ".." in norm_segments:
+        return False
+    if any(cred in norm for cred in _AGENT_CREDENTIAL_SEGMENTS):
+        return False
+    return any(seg in _AGENT_CONTROL_PLANE_SEGMENTS for seg in norm_segments)
+
+
 def decide(
     input_data: Any,
     context: Optional[Dict[str, Any]] = None,
@@ -2836,7 +2928,14 @@ def decide(
 
         l0 = evaluate_layer0_policy(tool_name, target_path, cfg)
         if l0["decision"] == "deny":
-            return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
+            # Break-glass: operator-held env var unlocks policy-plane maintenance only
+            # (hook config, skill files). The agent cannot set env vars in the hook
+            # process; credential stores (.env, keys, secrets) are never eligible.
+            if not (
+                os.getenv("AETHERIS_ALLOW_POLICY_EDIT") == "1"
+                and _is_agent_control_plane_path(str(l0.get("protected_path") or ""))
+            ):
+                return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
         if l0["decision"] == "escalate":
             return _finish("escalate", "requires_confirmation", ["escalate", "deny"], l0["reason_code"], 0)
 

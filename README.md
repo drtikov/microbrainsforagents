@@ -46,6 +46,48 @@ Naively pruning tool schemas per turn destroys LLM prefix-prompt caching (result
 
 ---
 
+## 🧩 Built-in Claude Code Skill (`/microbrains`)
+
+This repository includes a ready-to-use **Claude Code skill** in `.claude/skills/microbrains/`. Think of it as a local safety belt and instant spellcheck that sits quietly on your computer and checks Claude's edits and shell commands in under a millisecond before anything runs.
+
+### One-Command Setup
+
+```bash
+pip install -e .
+python .claude/skills/microbrains/install_hook.py           # turn on enforce mode (allow / ask / deny)
+python .claude/skills/microbrains/install_hook.py --shadow  # observe-only mode first (logs, never blocks)
+python .claude/skills/microbrains/install_hook.py --shared  # optional: write portable config to .claude/settings.json
+python .claude/skills/microbrains/install_hook.py --remove  # uninstall hooks cleanly anytime
+```
+
+By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git).
+
+### What It Gives You
+
+- **Catches broken code before it wastes tokens & turns:** Flags syntax typos before saving the file so Claude fixes them right away instead of running failing tests and burning expensive retry turns on tracebacks.
+- **Protects your machine and secrets:** Blocks destructive commands (`rm -rf /`, `dd`, `curl | sh`), stops hardcoded API keys from being written into source code, guards `.env` / `.ssh/`, and scrubs leaked secrets from tool outputs.
+- **Pauses and asks instead of guessing:** Unfamiliar commands or sensitive reads ask for confirmation with a clear risk level (`LOW`, `MEDIUM`, or `HIGH`) and plain-language reason, failing closed on timeout.
+- **Instant "why was that blocked?" explanations:** Ask Claude `"why was my command blocked?"` or run `python -m aetheris_microbrains.audit --last` to inspect the local decision journal.
+- **MCP tool safety checks:** Lets Claude check third-party MCP tool schemas and tool outputs for hidden prompt-injection tricks.
+- **No noticeable slowdown:** Adds under 1 millisecond per check (~11 ms total across a 26-step session), with zero network or GPU overhead.
+
+### Measured Session Benefit (`python aetheris_microbrains/tests/test_skill_gain_ab.py`)
+
+In a reproducible 26-step coding session benchmark (14 normal steps + 12 hazards: 4 syntax errors and 8 security incidents):
+
+| Metric | Without Gate | With `/microbrains` Gate |
+| :--- | ---: | ---: |
+| Hazards caught | 0 / 12 | **12 / 12** |
+| Normal calls falsely blocked | — | **0 / 14** |
+| Runtime syntax failures | 4 | **0** |
+| Wasted recovery turns *(modeled)* | 8 | **0** |
+| Input tokens saved *(modeled)* | 0 | **~37k** |
+| Total gate time across session | 0.0 ms | **~11 ms** (~0.43 ms mean / ~0.77 ms p95) |
+
+> *Note:* Interception counts, false-positive counts, and gate latency are measured directly in the benchmark; token and turn savings are modeled estimates under documented Sonnet-class pricing constants in `test_skill_gain_ab.py`.
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -199,7 +241,7 @@ print(verdict)
 
 ### 1. Claude Code & Agent Harness PreToolUse Hook Integration
 
-Microbrains integrates directly into **Claude Code**, **Codex**, or any custom agent framework as a pre-tool execution hook.
+Microbrains integrates directly into **Claude Code**, **Codex**, or any custom agent framework as a pre-tool execution hook. The fastest setup is the bundled skill installer (`python .claude/skills/microbrains/install_hook.py`, see [Built-in Claude Code Skill](#-built-in-claude-code-skill-microbrains) above), or you can configure it manually below.
 
 Add to your `~/.claude/settings.json` or project `.claude/settings.json` hook configuration (note: `onFailure: "block"` requires Claude Code ≥ `2.1.295`):
 
@@ -288,7 +330,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 264 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 286 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 
