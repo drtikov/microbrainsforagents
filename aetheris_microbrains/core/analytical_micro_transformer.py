@@ -127,10 +127,28 @@ class AnalyticalMicroTransformer:
             return round(1.0 - (a ** (1.0 / float(n))), 4)
         if k >= n:
             return 1.0
+        log_n_fact = math.lgamma(n + 1)
         lo, hi = 0.0, 1.0
-        for _ in range(35):
+        for _ in range(45):
             mid = 0.5 * (lo + hi)
-            cum = sum(math.comb(n, j) * (mid ** j) * ((1.0 - mid) ** (n - j)) for j in range(k + 1))
+            if mid <= 0.0:
+                cum = 1.0
+            elif mid >= 1.0:
+                cum = 0.0
+            else:
+                log_p = math.log(mid)
+                log_q = math.log(1.0 - mid)
+                cum = 0.0
+                for j in range(k + 1):
+                    log_term = (
+                        log_n_fact
+                        - math.lgamma(j + 1)
+                        - math.lgamma(n - j + 1)
+                        + j * log_p
+                        + (n - j) * log_q
+                    )
+                    if log_term > -745.0:
+                        cum += math.exp(log_term)
             if cum > a:
                 lo = mid
             else:

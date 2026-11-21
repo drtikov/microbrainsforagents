@@ -1,0 +1,11 @@
+# Shell commands allowed in both strict and dev profiles
+ls -la
+echo "a;b"
+grep -rn "foo|bar" src/
+git status
+git branch --show-current
+git branch -a
+echo $PATH
+echo $AUTHOR
+python -m pip list
+python -m aetheris_microbrains.audit --last

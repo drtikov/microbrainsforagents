@@ -16,9 +16,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_JOURNAL_PATH = (
-    Path(__file__).resolve().parent / "memory" / "decision_journal.jsonl"
-)
+from .core.runtime_paths import get_default_journal_path
+
+_DEFAULT_JOURNAL_PATH = get_default_journal_path()
 
 
 def get_journal_entries(

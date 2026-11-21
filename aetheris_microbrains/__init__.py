@@ -14,9 +14,13 @@ load the stdlib decision engine without pulling in OpenCL or all ~30 modules.
 from __future__ import annotations
 
 import importlib
+from importlib import metadata as _importlib_metadata
 from typing import Any, Dict, Tuple
 
-__version__ = "0.7.6"
+try:
+    __version__ = _importlib_metadata.version("aetheris-microbrains")
+except _importlib_metadata.PackageNotFoundError:
+    __version__ = "0.7.6"
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # Hook

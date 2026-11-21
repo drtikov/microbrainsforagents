@@ -210,10 +210,12 @@ class ToolSchemaIndex:
         q_vec = q_vec / (np.linalg.norm(q_vec) + 1e-12)
         return [float(np.dot(q_vec, d_vec)) for d_vec in self.dense_vectors]
 
-    def query(self, query_str: str, top_k: Optional[int] = None) -> List[Tuple[str, float]]:
+    def _compute_component_scores(
+        self, query_str: str
+    ) -> Tuple[List[float], List[float], Optional[List[float]], List[float]]:
         N = len(self.tools)
         if N == 0:
-            return []
+            return [], [], None, []
         q_tokens = [w for w in re.findall(r"(?u)\b\w+\b", query_str.lower()) if len(w) > 1]
         bm25_scores = self._score_bm25(q_tokens)
         tri_scores = self._score_trigram(query_str)
@@ -236,6 +238,13 @@ class ToolSchemaIndex:
                 if dense_scores[doc_i] > 0:
                     rrf_scores[doc_i] += 1.0 / (self.k_rrf + rank_idx + 1)
 
+        return bm25_scores, tri_scores, dense_scores, rrf_scores
+
+    def query(self, query_str: str, top_k: Optional[int] = None) -> List[Tuple[str, float]]:
+        N = len(self.tools)
+        if N == 0:
+            return []
+        _, _, _, rrf_scores = self._compute_component_scores(query_str)
         ranked = sorted(
             ((self.tools[i], rrf_scores[i]) for i in range(N)),
             key=lambda x: (-x[1], x[0]),
@@ -245,13 +254,21 @@ class ToolSchemaIndex:
         return ranked
 
     def score_tools(self, query_str: str) -> Dict[str, float]:
-        ranked = self.query(query_str)
-        if not ranked:
+        N = len(self.tools)
+        if N == 0:
             return {}
-        max_s = max(s for _, s in ranked)
+        bm25_scores, tri_scores, dense_scores, rrf_scores = self._compute_component_scores(query_str)
+        max_s = max(rrf_scores) if rrf_scores else 0.0
         if max_s <= 0:
-            return {name: 0.0 for name, _ in ranked}
-        return {name: round(s / max_s, 4) for name, s in ranked}
+            return {name: 0.0 for name in self.tools}
+        out: Dict[str, float] = {}
+        for i, name in enumerate(self.tools):
+            bm25_sig = min(1.0, bm25_scores[i] / 1.5) if bm25_scores[i] > 0 else 0.0
+            tri_sig = max(0.0, min(1.0, float(tri_scores[i])))
+            dense_sig = max(0.0, min(1.0, float(dense_scores[i]))) if dense_scores is not None else 0.0
+            abs_strength = max(bm25_sig, tri_sig, dense_sig)
+            out[name] = round((rrf_scores[i] / max_s) * abs_strength, 4)
+        return out
 
 
 class ToolRoutingMoE:
@@ -389,6 +406,7 @@ class ToolRoutingMoE:
         self.calibration_sample_id: Optional[str] = None
         self.error_metric: str = "unmeasured"
         self.last_topk_eval_report: Optional[Dict[str, Any]] = None
+        self._schema_index_cache: Dict[str, ToolSchemaIndex] = {}
 
         # Synthetic per-expert self-consistency probes (n = 22 per expert, derived from keywords/stems)
         self.per_expert_quantiles: Dict[str, float] = {}
@@ -931,6 +949,21 @@ class ToolRoutingMoE:
             scores[name] = float(np.dot(q_emb, d_emb) / (q_norm * d_norm))
         return scores
 
+    def _get_schema_index(self, tool_schemas: Sequence[Dict[str, Any]], embed_fn: Optional[Any] = None) -> ToolSchemaIndex:
+        if embed_fn is not None:
+            return ToolSchemaIndex(tool_schemas, embed_fn=embed_fn)
+        import hashlib as _hashlib
+        import json as _json
+        key = _hashlib.sha256(_json.dumps(list(tool_schemas), sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
+        cached = self._schema_index_cache.get(key)
+        if cached is not None:
+            return cached
+        idx = ToolSchemaIndex(tool_schemas, embed_fn=None)
+        if len(self._schema_index_cache) >= 16:
+            self._schema_index_cache.pop(next(iter(self._schema_index_cache)))
+        self._schema_index_cache[key] = idx
+        return idx
+
     def narrow_tool_surface(
         self,
         task_description: str,
@@ -959,7 +992,7 @@ class ToolRoutingMoE:
 
         schema_scores: Dict[str, float] = {}
         if tool_schemas:
-            s_idx = ToolSchemaIndex(tool_schemas, embed_fn=embed_fn)
+            s_idx = self._get_schema_index(tool_schemas, embed_fn=embed_fn)
             schema_scores = s_idx.score_tools(task_description)
 
         decision = self.route(task_description, context_tags=context_tags, available_tools=all_catalog if available_tools is not None else None)
@@ -1094,7 +1127,7 @@ class ToolRoutingMoE:
         )
         schema_scores: Dict[str, float] = {}
         if tool_schemas:
-            s_idx = ToolSchemaIndex(tool_schemas, embed_fn=embed_fn)
+            s_idx = self._get_schema_index(tool_schemas, embed_fn=embed_fn)
             schema_scores = s_idx.score_tools(task_description)
 
         combined = sorted(
@@ -1255,6 +1288,17 @@ class ToolRoutingMoE:
         return report
 
 
+def _extract_tool_namespace(tool_name: str) -> str:
+    """Extract logical namespace (`mcp__<server>` for MCP tools, else prefix before `_`/`.`/`-`/`:`)."""
+    s = str(tool_name or "")
+    if s.startswith("mcp__"):
+        parts = s.split("__")
+        if len(parts) >= 3 and parts[1]:
+            return f"mcp__{parts[1]}"
+    parts = re.split(r"[_:.-]", s)
+    return parts[0] if len(parts) > 1 and parts[0] else s
+
+
 class SessionToolSurface:
     """Prompt-cache-friendly sticky tool surface manager for multi-turn agent sessions.
 
@@ -1286,11 +1330,10 @@ class SessionToolSurface:
         self.cache_invalidations: int = 0
 
     def _pin_initial_clusters(self) -> None:
-        """Groups tools by namespace prefix (e.g. git_*, docker_*) and selects whole coherent clusters."""
+        """Groups tools by namespace prefix (e.g. git_*, mcp__server__*) and selects whole coherent clusters."""
         clusters: Dict[str, List[str]] = {}
         for t in self.full_catalog:
-            parts = re.split(r"[_:.-]", str(t))
-            ns = parts[0] if len(parts) > 1 and parts[0] else str(t)
+            ns = _extract_tool_namespace(str(t))
             clusters.setdefault(ns, []).append(str(t))
 
         for ns in clusters:
@@ -1338,12 +1381,9 @@ class SessionToolSurface:
         if self.cluster_pinning and new_cands:
             expanded_cands: List[str] = []
             for t in new_cands:
-                parts = re.split(r"[_:.-]", str(t))
-                ns = parts[0] if len(parts) > 1 and parts[0] else str(t)
+                ns = _extract_tool_namespace(str(t))
                 for cat_tool in self.full_catalog:
-                    cat_parts = re.split(r"[_:.-]", str(cat_tool))
-                    cat_ns = cat_parts[0] if len(cat_parts) > 1 and cat_parts[0] else str(cat_tool)
-                    if cat_ns == ns and cat_tool not in expanded_cands:
+                    if _extract_tool_namespace(str(cat_tool)) == ns and cat_tool not in expanded_cands:
                         expanded_cands.append(cat_tool)
             if prev is not None:
                 # Append-only growth keeps the previously cached prefix byte-identical

@@ -29,6 +29,11 @@ try:
 except ImportError:
     _fcntl = None
 
+try:
+    import msvcrt as _msvcrt
+except ImportError:
+    _msvcrt = None
+
 _UNICODE_TAG_RE = re.compile(r"[\U000E0000-\U000E007F]")
 _BIDI_OVERRIDE_RE = re.compile(r"[\u202A-\u202E\u2066-\u2069]")
 _ZERO_WIDTH_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
@@ -317,26 +322,48 @@ class SessionSecurityState:
         self.untrusted_external_ingested: bool = False
         self.sensitive_local_read: bool = False
         self.prompt_injection_seen: bool = False
+        self.corrupted: bool = False
         self.taint_events: List[str] = []
         if self.state_path is not None:
             self._load()
 
     @contextmanager
     def _state_lock(self) -> Iterator[None]:
-        if _fcntl is None or self.state_path is None:
+        if self.state_path is None or (_fcntl is None and _msvcrt is None):
             yield
             return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.state_path.with_name(f".{self.state_path.name}.lock")
         fh = open(lock_path, "a+", encoding="utf-8")
         try:
-            _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
-            yield
+            if _fcntl is not None:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+            else:
+                fh.seek(0, os.SEEK_END)
+                if fh.tell() == 0:
+                    fh.write("0")
+                    fh.flush()
+                fh.seek(0)
+                _msvcrt.locking(fh.fileno(), _msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    fh.seek(0)
+                    _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
         finally:
-            try:
-                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
-            finally:
-                fh.close()
+            fh.close()
+
+    def _is_expired(self, data: Dict[str, Any]) -> bool:
+        updated_at = data.get("updated_at")
+        return bool(
+            self.ttl_sec > 0
+            and isinstance(updated_at, (int, float))
+            and (time.time() - float(updated_at)) > self.ttl_sec
+        )
 
     def _load(self) -> None:
         if self.state_path is None or not self.state_path.is_file():
@@ -346,33 +373,46 @@ class SessionSecurityState:
                 if not self.state_path.is_file():
                     return
                 data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                updated_at = data.get("updated_at")
-                if (
-                    self.ttl_sec > 0
-                    and isinstance(updated_at, (int, float))
-                    and (time.time() - float(updated_at)) > self.ttl_sec
-                ):
-                    return
-                self.untrusted_external_ingested = bool(data.get("untrusted_external_ingested", False))
-                self.sensitive_local_read = bool(data.get("sensitive_local_read", False))
-                self.prompt_injection_seen = bool(data.get("prompt_injection_seen", False))
-                raw_ev = data.get("taint_events", [])
-                self.taint_events = [str(x) for x in raw_ev[-20:]] if isinstance(raw_ev, list) else []
-        except Exception:
-            pass
+            if not isinstance(data, dict):
+                self.corrupted = True
+                return
+            if self._is_expired(data):
+                return
+            self.untrusted_external_ingested = bool(data.get("untrusted_external_ingested", False))
+            self.sensitive_local_read = bool(data.get("sensitive_local_read", False))
+            self.prompt_injection_seen = bool(data.get("prompt_injection_seen", False))
+            raw_ev = data.get("taint_events", [])
+            self.taint_events = [str(x) for x in raw_ev[-20:]] if isinstance(raw_ev, list) else []
+        except (json.JSONDecodeError, ValueError, OSError):
+            self.corrupted = True
 
     def save(self) -> None:
         if self.state_path is None:
             return
-        payload = {
-            "untrusted_external_ingested": self.untrusted_external_ingested,
-            "sensitive_local_read": self.sensitive_local_read,
-            "prompt_injection_seen": self.prompt_injection_seen,
-            "taint_events": self.taint_events[-20:],
-            "updated_at": round(time.time(), 6),
-        }
         with self._state_lock():
+            if self.state_path.is_file():
+                try:
+                    disk = json.loads(self.state_path.read_text(encoding="utf-8"))
+                    if not isinstance(disk, dict):
+                        self.corrupted = True
+                        return
+                    if not self._is_expired(disk):
+                        self.untrusted_external_ingested |= bool(disk.get("untrusted_external_ingested", False))
+                        self.sensitive_local_read |= bool(disk.get("sensitive_local_read", False))
+                        self.prompt_injection_seen |= bool(disk.get("prompt_injection_seen", False))
+                        disk_events = [str(x) for x in disk.get("taint_events", []) if x] if isinstance(disk.get("taint_events"), list) else []
+                        merged = list(dict.fromkeys(disk_events + self.taint_events))
+                        self.taint_events = merged[-20:]
+                except (json.JSONDecodeError, ValueError, OSError):
+                    self.corrupted = True
+                    return
+            payload = {
+                "untrusted_external_ingested": self.untrusted_external_ingested,
+                "sensitive_local_read": self.sensitive_local_read,
+                "prompt_injection_seen": self.prompt_injection_seen,
+                "taint_events": self.taint_events[-20:],
+                "updated_at": round(time.time(), 6),
+            }
             _atomic_write_json(self.state_path, payload)
 
     def _append_event(self, tag: str) -> None:
@@ -405,11 +445,15 @@ class SessionSecurityState:
         tool_name: str,
         secrets_found: bool = False,
         injection_detected: bool = False,
+        is_protected_path: bool = False,
     ) -> None:
         clean_tool = str(tool_name or "").strip().lower()
         if self._is_external_tool(clean_tool):
             self.untrusted_external_ingested = True
             self._append_event(f"post_external:{clean_tool}")
+        if is_protected_path:
+            self.sensitive_local_read = True
+            self._append_event(f"post_protected_read:{clean_tool}")
         if secrets_found:
             self.sensitive_local_read = True
             self._append_event(f"post_secret:{clean_tool}")
@@ -422,6 +466,12 @@ class SessionSecurityState:
     def evaluate_taint_gate(self, tool_name: str, is_egress_or_mutation: bool) -> Dict[str, Any]:
         if not is_egress_or_mutation:
             return {"decision": "pass"}
+        if self.corrupted:
+            return {
+                "decision": "deny",
+                "reason_code": "layer0_session_state_corrupted",
+                "label": "session_state_corrupted",
+            }
         if (self.untrusted_external_ingested or self.prompt_injection_seen) and self.sensitive_local_read:
             return {
                 "decision": "deny",

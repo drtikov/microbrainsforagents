@@ -196,21 +196,57 @@ class StateCBFSafetyFilter:
         t0 = time.perf_counter()
         x = np.asarray(x, dtype=np.float64).flatten()
         u = np.asarray(u_nominal, dtype=np.float64).flatten()
+        u_nom_list = u_nominal if isinstance(u_nominal, list) else u.tolist()
         if u.shape[0] != self.dynamics.control_dim:
             return {
                 "status": "dim_mismatch",
                 "verified_safe": False,
                 "u_filtered": u.tolist(),
-                "u_nominal": u.tolist(),
+                "u_nominal": u_nom_list,
             }
         self.calls += 1
 
-        A, b, _alphas = self._halfspaces(x)
-        u = self._clip_box(u)
+        if not (np.all(np.isfinite(x)) and np.all(np.isfinite(u))):
+            self.unsafe_calls += 1
+            return {
+                "status": "invalid_nonfinite_input",
+                "verified_safe": False,
+                "u_filtered": u.tolist(),
+                "u_nominal": u_nom_list,
+                "min_barrier_slack": -1.0,
+                "conformal_margin": self.conformal_margin,
+                "n_barriers": len(self.barriers),
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 4),
+            }
 
-        # --- Dykstra's algorithm over the halfspaces + box -------------------
-        # Exact projection onto the intersection of convex sets (each affine
-        # halfspace and the box); converges when the intersection is nonempty.
+        if self.u_min is not None and self.u_max is not None and np.any(self.u_min > self.u_max):
+            self.unsafe_calls += 1
+            return {
+                "status": "infeasible_box",
+                "verified_safe": False,
+                "u_filtered": u.tolist(),
+                "u_nominal": u_nom_list,
+                "min_barrier_slack": -1.0,
+                "conformal_margin": self.conformal_margin,
+                "n_barriers": len(self.barriers),
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 4),
+            }
+
+        A, b, _alphas = self._halfspaces(x)
+        if (A.size and not np.all(np.isfinite(A))) or (b.size and not np.all(np.isfinite(b))):
+            self.unsafe_calls += 1
+            return {
+                "status": "invalid_nonfinite_input",
+                "verified_safe": False,
+                "u_filtered": u.tolist(),
+                "u_nominal": u_nom_list,
+                "min_barrier_slack": -1.0,
+                "conformal_margin": self.conformal_margin,
+                "n_barriers": A.shape[0] if A.ndim == 2 else len(self.barriers),
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 4),
+            }
+
+        # --- Dykstra's algorithm over halfspaces + box ------------------------
         m = A.shape[0]
         sets: List[Tuple[str, Any]] = [("halfspace", (A[i], b[i])) for i in range(m)]
         if self.u_min is not None or self.u_max is not None:
@@ -219,28 +255,28 @@ class StateCBFSafetyFilter:
         n_sets = len(sets)
         if n_sets == 0:
             result = u.copy()
-            feasible = True
         else:
-            s_list = [u.copy() for _ in range(n_sets)]  # incremental corrections
+            s_list = [np.zeros_like(u) for _ in range(n_sets)]
             w = u.copy()
-            feasible = False
-            for it in range(self.max_iters):
+            for _it in range(self.max_iters):
                 converged = True
                 for j, (kind, payload) in enumerate(sets):
                     y = w + s_list[j]
                     if kind == "halfspace":
                         a_row, bj = payload
-                        # constraint is a.u >= b; violation amount is b - a.w
-                        viol = bj - float(a_row @ w)
-                        if viol > 0:
-                            # proj onto {v : a.v >= b}: w + ((b - a.w)/||a||^2) a
-                            proj = w + (viol / max(float(a_row @ a_row), 1e-12)) * a_row
+                        a_norm2 = float(a_row @ a_row)
+                        viol = bj - float(a_row @ y)
+                        if viol > 0.0:
+                            if a_norm2 <= 1e-18:
+                                proj = y.copy()
+                            else:
+                                proj = y + (viol / a_norm2) * a_row
                             converged = False
                         else:
-                            proj = w.copy()
+                            proj = y.copy()
                     else:
-                        proj = self._clip_box(w)
-                        if not np.allclose(proj, w, atol=self.tol):
+                        proj = self._clip_box(y)
+                        if not np.allclose(proj, y, atol=self.tol):
                             converged = False
                     s_new = y - proj
                     if not np.allclose(s_new, s_list[j], atol=self.tol):
@@ -248,20 +284,15 @@ class StateCBFSafetyFilter:
                     s_list[j] = s_new
                     w = proj
                 if converged:
-                    feasible = True
                     break
             result = w
-            if not feasible:
-                # verify explicitly; Dykstra may still be within tolerance
-                slack = A @ result - b
-                box_ok = (
-                    (self.u_min is None or np.all(result >= self.u_min - self.tol))
-                    and (self.u_max is None or np.all(result <= self.u_max + self.tol))
-                )
-                feasible = bool(np.all(slack >= -1e-7) and box_ok)
 
-        residual = float(np.max(A @ result - b)) if A.size else 0.0
-        verified = bool(feasible and residual >= -1e-6)
+        residual = float(np.min(A @ result - b)) if A.size else 0.0
+        box_ok = (
+            (self.u_min is None or bool(np.all(result >= self.u_min - 1e-6)))
+            and (self.u_max is None or bool(np.all(result <= self.u_max + 1e-6)))
+        )
+        verified = bool(np.all(np.isfinite(result)) and box_ok and (not A.size or residual >= -1e-6))
         if not verified:
             self.unsafe_calls += 1
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -269,7 +300,7 @@ class StateCBFSafetyFilter:
             "status": "safe" if verified else "unsafe_no_solution",
             "verified_safe": verified,
             "u_filtered": result.tolist(),
-            "u_nominal": u_nominal if isinstance(u_nominal, list) else np.asarray(u_nominal).flatten().tolist(),
+            "u_nominal": u_nom_list,
             "min_barrier_slack": round(residual, 9),
             "conformal_margin": self.conformal_margin,
             "n_barriers": m,

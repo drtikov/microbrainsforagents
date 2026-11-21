@@ -2,8 +2,8 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy-success.svg)](https://github.com/)
-[![Latency](https://img.shields.io/badge/Pre--flight-<2ms-brightgreen.svg)](https://github.com/)
+[![Zero-GPU](https://img.shields.io/badge/Hardware-Pure_NumPy-success.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
+[![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
 **Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Codex**, **SWE-agent**, **OpenHands**).
@@ -137,9 +137,9 @@ Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check wh
   - Microbrains solves this with **`SessionToolSurface(cluster_pinning=True)`**, keeping tool namespaces sticky across multi-turn sessions to preserve **56.8% cache-adjusted net savings** without cache churn.
 - **Outbound Secret Egress & Post-Tool Scrubbing:** Inspects tool arguments across all tools (shell commands, `WebFetch`, MCP payloads) to block raw credential exfiltration (`layer1_secret_egress_veto`), and provides `mb.scrub_tool_output()` / `python -m aetheris_microbrains.hook --event post-tool-use` to sanitize returned credentials before context persistence.
 - **Human-Friendly Audit CLI & Policy Governance:**
-  - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`) to `memory/decision_journal.jsonl`.
+  - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`) to your OS user state directory (`AETHERIS_STATE_DIR` / `decision_journal.jsonl`, automatically rotated at 10 MiB with `0o600` permissions).
   - Humans can inspect why an action stopped using `python -m aetheris_microbrains.audit --last` or `--summary`.
-  - Security policies can be loaded from external files via `PolicyConfig.from_file("security_rules.yaml")` without modifying Python code (see [SECURITY.md](SECURITY.md)).
+  - Security policies can be loaded from JSON, TOML (`.toml` via stdlib `tomllib`), or YAML via `PolicyConfig.from_file("security_rules.toml")` without modifying Python code (see [SECURITY.md](SECURITY.md)).
 
 ---
 
@@ -161,13 +161,14 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
-  * Every decision writes a forensic entry to `memory/decision_journal.jsonl` containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, and a redacted `payload_preview`.
+  * Every decision writes a forensic entry outside the package tree (`AETHERIS_STATE_DIR` or the OS user state directory, with `AETHERIS_JOURNAL_PATH` override and automatic 10 MiB `.1` rotation) containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, any `suppressed_findings`, and a redacted `payload_preview`.
   * Inspect reasons instantly in terminal: run `python -m aetheris_microbrains.audit --last` to see why an agent was stopped, or `--summary` for aggregate health metrics.
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
 * **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
-  * Load team policies dynamically via `PolicyConfig.from_file("my_policy.yaml")` or JSON.
+  * Load team policies dynamically via `PolicyConfig.from_file("my_policy.toml")` (or JSON/YAML).
   * **`strict` (default):** Zero-trust execution—escalates unknown commands or mutations to human confirmation.
-  * **`dev` profile:** Cuts human escalation fatigue by automatically allowing routine safe commands (`git add/commit`, `pip/npm install`, `python script.py`, `mkdir`, single-file `rm`) while **strictly denying** destructive operations (`rm -rf`, `git clean -fdx`), raw credential reads (`.ssh`, `.claude`, `.env`), and network exfiltration sinks (`curl -d @.env`, `cat .env | curl`).
+  * **`dev` profile (convenience profile, not a security boundary):** Cuts human escalation fatigue by allowing routine local dev commands (`git add/commit`, safe PyPI `pip`/`npm` installs without URLs or `-e`, `python script.py`, `mkdir`, single-file `rm`) while still escalating potentially destructive operations (`subprocess.run(shell=False)`, relative `shutil.rmtree`, `git branch -D`, `git checkout -- .`, `git stash drop`, `npm -g`, `pip install git+...`) and **strictly denying** destructive operations (`rm -rf /`, `rm -rf .git`, `rm -rf /var/...`, `git clean -fdx`, `<(...)` process substitutions), raw credential reads (`.ssh`, `.claude`, `.env`), and network exfiltration sinks (`curl -d @.env`, `cat .env | curl`).
+  * **Auditable Inline Suppression (`# aetheris: allow <rule> -- <reason>`):** Medium-severity findings (`subprocess_call:*`, `destructive_fs_call_relative:shutil.rmtree`, `dangerous_os_call:os.remove`/`unlink`, `dynamic_import:importlib.import_module`) and documentation/test secret fixtures (`secret_leak_pattern_found`) can be annotated with `# aetheris: allow <rule> -- <reason>`. Every suppression is logged to `decision_journal.jsonl` (allowed in `dev`, escalated as `layer1_ast_suppressed_escalate` in `strict`). Critical execution/exfiltration rules (`eval`, `exec`, `subprocess_shell_true`, `ast_secret_exfil_pattern`) cannot be suppressed.
   * See [SECURITY.md](SECURITY.md) for full threat model, profile details, and governance rules.
 
 ---
@@ -271,7 +272,7 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 
 **Key Hook Modes & CLI Flags:**
 * **Prefilter Mode (Default):** On safe operations, the hook exits `0` silently. It does **not** bypass Claude Code's native user confirmation dialogs—it only intercepts dangerous or broken calls before the prompt is shown.
-* **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to `memory/decision_journal.jsonl` without blocking live execution. Empty stdin, malformed JSON, non-object payloads, and engine/import errors still return `0` with empty `stdout` **and** append a redacted stdlib-only `event_type: "hook_error"` entry to the journal so hook failures are never indistinguishable from unchecked calls.
+* **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to the decision journal (`AETHERIS_JOURNAL_PATH` / OS user state dir) without blocking live execution. Empty stdin, malformed JSON, non-object payloads, and engine/import errors still return `0` with empty `stdout` **and** append a redacted stdlib-only `event_type: "hook_error"` entry to the journal so hook failures are never indistinguishable from unchecked calls.
 * **`--log-decisions` / `--journal-path` (`AETHERIS_LOG_DECISIONS=1`, `AETHERIS_JOURNAL_PATH`):** Persist hook telemetry (including shadow `hook_error` events) to a custom `decision_journal.jsonl` path across independent hook processes for pilot audits and drift detection.
 * **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
@@ -333,7 +334,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 293 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 353 Passed, 2 Skipped)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 

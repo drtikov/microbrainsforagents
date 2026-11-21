@@ -21,56 +21,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-_DEFAULT_HOOK_JOURNAL_PATH = Path(__file__).resolve().parent / "memory" / "decision_journal.jsonl"
+from .core.runtime_paths import append_jsonl_bounded, get_default_journal_path
+from .core.secrets import _REDACT_PATTERNS as _HOOK_REDACT_PATTERNS, redact_secrets as _redact_error_text
 
-_HOOK_REDACT_PATTERNS = (
-    (
-        re.compile(
-            r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
-            r"[\s\S]*?"
-            r"-----END\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
-        ),
-        "[REDACTED_PRIVATE_KEY]",
-    ),
-    (re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"), "[REDACTED_PRIVATE_KEY]"),
-    (re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
-    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_ANTHROPIC_KEY]"),
-    (re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_API_KEY]"),
-    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    (re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_GITLAB_TOKEN]"),
-    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "[REDACTED_GOOGLE_API_KEY]"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
-    (re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[REDACTED_HF_TOKEN]"),
-    (re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "[REDACTED_NPM_TOKEN]"),
-    (re.compile(r"\bpypi-[A-Za-z0-9_\-]{24,}\b"), "[REDACTED_PYPI_TOKEN]"),
-    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "[REDACTED_STRIPE_KEY]"),
-    (re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{30,}\b"), "[REDACTED_TELEGRAM_TOKEN]"),
-    (re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_SENDGRID_KEY]"),
-    (re.compile(r"\bdapi[a-f0-9]{32}\b"), "[REDACTED_DATABRICKS_TOKEN]"),
-    (
-        re.compile(
-            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://"
-            r"[^/\s:@\"']+:(?!pass(?:word)?@|changeme@|example@|your_)[^/\s@\"']{4,}@[^\s\"']+"
-        ),
-        "[REDACTED_DB_URI]",
-    ),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED_JWT]"),
-    (re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
-)
-
-
-def _redact_error_text(text: str) -> str:
-    out = str(text or "")
-    for pat, repl in _HOOK_REDACT_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
+_DEFAULT_HOOK_JOURNAL_PATH = get_default_journal_path()
 
 
 def _resolve_journal_path(journal_path: Optional[str] = None) -> Path:
-    """Resolve explicit CLI/argument journal path, env override, or default package journal."""
+    """Resolve explicit CLI/argument journal path, env override, or default state journal."""
     explicit = str(journal_path or "").strip()
     if explicit:
         return Path(explicit)
@@ -106,12 +64,7 @@ def _append_shadow_error_journal(
     }
     target = _resolve_journal_path(journal_path)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        is_new = not target.exists()
-        with open(target, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        if is_new and os.name != "nt":
-            os.chmod(target, 0o600)
+        append_jsonl_bounded(target, json.dumps(entry, ensure_ascii=False))
         return {"written": True, "path": str(target), "error": None}
     except Exception as j_exc:
         err_msg = _redact_error_text(f"{type(j_exc).__name__}:{j_exc}")
@@ -159,9 +112,13 @@ def _resolve_hook_policy(
 
 
 def _load_post_tool_helpers():
-    from .core.layered_decision_engine import record_decision_journal, scrub_tool_output
+    from .core.layered_decision_engine import is_protected_path, record_decision_journal, scrub_tool_output
     from .core.mcp_security import SessionSecurityState, detect_prompt_injection
-    return scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState
+    return scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path
+
+
+_SHELL_CANONICAL_TOOLS = {"execute_shell", "run_command", "run_tests", "pytest_runner", "git_commit"}
+_EDIT_WRITE_CANONICAL_TOOLS = {"write_file", "repo_write", "edit_file", "str_replace_editor", "apply_patch", "format_code"}
 
 
 def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -192,45 +149,49 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         tool_name = tool_raw
 
+    clean_name = tool_name.strip().lower()
     normalized: Dict[str, Any] = {"tool": tool_name}
-    if "command" in tool_input or "cmd" in tool_input:
-        normalized["cmd"] = tool_input.get("command") or tool_input.get("cmd")
     if "file_path" in tool_input or "path" in tool_input:
         normalized["path"] = tool_input.get("file_path") or tool_input.get("path")
 
-    # Extract structured Edit / MultiEdit operations so Layer 1 can reconstruct patched full-file ASTs
-    edit_ops: list[Dict[str, Any]] = []
-    if tool_lower == "multiedit" and isinstance(tool_input.get("edits"), list):
-        for item in tool_input["edits"]:
-            if isinstance(item, dict) and "new_string" in item:
+    # Only map shell command arguments to `cmd` when the tool itself is a known shell/exec tool
+    if clean_name in _SHELL_CANONICAL_TOOLS and ("command" in tool_input or "cmd" in tool_input):
+        normalized["cmd"] = tool_input.get("command") or tool_input.get("cmd")
+
+    # Only extract diff/edit_ops for registered code/file modification tools
+    if clean_name in _EDIT_WRITE_CANONICAL_TOOLS:
+        edit_ops: list[Dict[str, Any]] = []
+        if tool_lower == "multiedit" and isinstance(tool_input.get("edits"), list):
+            for item in tool_input["edits"]:
+                if isinstance(item, dict) and "new_string" in item:
+                    edit_ops.append({
+                        "old_string": str(item.get("old_string") or ""),
+                        "new_string": str(item.get("new_string") or ""),
+                        "replace_all": bool(item.get("replace_all", False)),
+                    })
+        elif "old_string" in tool_input and "new_string" in tool_input:
+            old_s = str(tool_input.get("old_string") or "")
+            if old_s:
                 edit_ops.append({
-                    "old_string": str(item.get("old_string") or ""),
-                    "new_string": str(item.get("new_string") or ""),
-                    "replace_all": bool(item.get("replace_all", False)),
+                    "old_string": old_s,
+                    "new_string": str(tool_input.get("new_string") or ""),
+                    "replace_all": bool(tool_input.get("replace_all", False)),
                 })
-    elif "old_string" in tool_input and "new_string" in tool_input:
-        old_s = str(tool_input.get("old_string") or "")
-        if old_s:
-            edit_ops.append({
-                "old_string": old_s,
-                "new_string": str(tool_input.get("new_string") or ""),
-                "replace_all": bool(tool_input.get("replace_all", False)),
-            })
-    if edit_ops:
-        normalized["edit_ops"] = edit_ops
+        if edit_ops:
+            normalized["edit_ops"] = edit_ops
 
-    # Build diff text from edit/multiedit/write/apply_patch payloads
-    diff = tool_input.get("diff") or tool_input.get("payload_diff") or tool_input.get("patch")
-    if diff is None and edit_ops and tool_lower == "multiedit":
-        diff = "\n".join(op["new_string"] for op in edit_ops)
-    elif diff is None and "new_string" in tool_input:
-        diff = str(tool_input.get("new_string") or "")
-    elif diff is None and "content" in tool_input and tool_name in {"write_file", "edit_file"}:
-        diff = str(tool_input.get("content") or "")
-    if diff is not None:
-        normalized["diff"] = diff
+        diff = tool_input.get("diff") or tool_input.get("payload_diff") or tool_input.get("patch")
+        if diff is None and edit_ops and tool_lower == "multiedit":
+            diff = "\n".join(op["new_string"] for op in edit_ops)
+        elif diff is None and "new_string" in tool_input:
+            diff = str(tool_input.get("new_string") or "")
+        elif diff is None and "content" in tool_input and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}:
+            diff = str(tool_input.get("content") or "")
+        if diff is not None:
+            normalized["diff"] = diff
 
-    if "query" in tool_input:
+    # Routing `query` must never authorize an executable/MCP tool call
+    if not clean_name and "query" in tool_input:
         normalized["query"] = tool_input["query"]
     if isinstance(tool_input, dict):
         normalized["tool_input"] = tool_input
@@ -283,6 +244,9 @@ def evaluate_hook_payload(
         ctx["session_state_path"] = explicit_sess
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
+    # Advisory tool-routing recommendations must never become execution authorization
+    if verdict.get("decision_kind") == "routing_recommendation" and dec == "allow":
+        dec = "escalate"
     reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
     host_contract = {
         "claude": "claude_pretooluse_v1",
@@ -379,7 +343,7 @@ def evaluate_post_tool_use_payload(
     session_state_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
-    scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState = _load_post_tool_helpers()
+    scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
     resolved_host = str(host or "claude").strip().lower()
     if resolved_host not in {"claude", "codex", "generic"}:
         resolved_host = "claude"
@@ -390,6 +354,15 @@ def evaluate_post_tool_use_payload(
         or payload.get("name")
         or ""
     ).strip()
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    target_path_str = str(
+        tool_input.get("file_path")
+        or tool_input.get("path")
+        or payload.get("file_path")
+        or payload.get("path")
+        or ""
+    ).strip()
+    target_is_protected = bool(target_path_str and is_protected_path(target_path_str))
 
     raw_output: Any = ""
     for key in ("tool_response", "tool_output", "output", "result"):
@@ -447,14 +420,17 @@ def evaluate_post_tool_use_payload(
             tool_name=tool_raw,
             secrets_found=secrets_found,
             injection_detected=injection_detected,
+            is_protected_path=target_is_protected,
         )
 
+    caps = payload.get("hook_capabilities") if isinstance(payload.get("hook_capabilities"), dict) else {}
+    supports_replace = bool(caps.get("supports_updated_tool_output"))
     host_specific: Optional[Dict[str, Any]] = None
     if shadow_mode:
         host_action = "shadow_observe"
+        scrubbing_mode = "shadow_observe"
     elif resolved_host == "claude":
         if any_alert:
-            host_action = "warn_additional_context"
             warnings: list[str] = []
             if secrets_found:
                 warnings.append(
@@ -470,12 +446,22 @@ def evaluate_post_tool_use_payload(
                 "hookEventName": "PostToolUse",
                 "additionalContext": "SECURITY WARNING (Aetheris Microbrains): " + " ".join(warnings),
             }
+            if supports_replace:
+                host_specific["updatedToolOutput"] = redacted_output
+                host_action = "replace_tool_output"
+                scrubbing_mode = "replace_tool_output"
+            else:
+                host_action = "warn_additional_context"
+                scrubbing_mode = "detect_and_warn"
         else:
             host_action = "clean_passthrough"
+            scrubbing_mode = "detect_and_warn"
     elif resolved_host == "codex":
         host_action = "warn_observed" if any_alert else "clean_passthrough"
+        scrubbing_mode = "detect_and_warn"
     else:
         host_action = "scrubbed" if secrets_found else ("warn_injection" if injection_detected else "clean")
+        scrubbing_mode = "redacted_output_returned"
 
     out: Dict[str, Any] = {
         "event": "post-tool-use",
@@ -487,6 +473,7 @@ def evaluate_post_tool_use_payload(
         "injection_severity": injection_severity,
         "injection_findings": injection_findings,
         "redacted_output": redacted_output,
+        "scrubbing_mode": scrubbing_mode,
         "host": resolved_host,
         "host_action": host_action,
         "authorizes_execution": False,

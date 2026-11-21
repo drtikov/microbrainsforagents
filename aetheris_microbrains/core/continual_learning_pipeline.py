@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .analytical_micro_transformer import AnalyticalMicroTransformer, STORE_DIR
+from .runtime_paths import get_default_audit_log_path
 
 log = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ class ContinualLearningPipeline:
         self.store_dir = Path(store_dir) if store_dir else STORE_DIR
         self.candidates_dir = self.store_dir / "_candidates"
         self.rollback_dir = self.store_dir / "_rollback"
-        default_audit = Path(__file__).resolve().parents[1] / "memory" / "continual_learning_audit.json"
-        self.audit_log_path = audit_log_path or default_audit
+        default_audit = get_default_audit_log_path()
+        self.audit_log_path = Path(audit_log_path) if audit_log_path else default_audit
         self.ewc_lambda = ewc_lambda
 
     def compute_fisher_information(
@@ -182,6 +183,20 @@ class ContinualLearningPipeline:
         cov, _ = self._measure_holdout_stats(brain, holdout_data)
         return cov
 
+    def _mean_prediction_set_size(
+        self,
+        brain: AnalyticalMicroTransformer,
+        eval_data: List[Tuple[List[str], str]],
+    ) -> float:
+        """Measure average conformal prediction-set cardinality (guards degenerate all-label promotion)."""
+        if not eval_data:
+            return 0.0
+        total_len = 0
+        for inp, _target in eval_data:
+            res = brain.infer_conformal(inp, alpha=brain.conformal_alpha or 0.05)
+            total_len += len(res.get("prediction_set", []))
+        return total_len / float(len(eval_data))
+
     def _backup_for_rollback(self, model_name: str) -> None:
         self.rollback_dir.mkdir(parents=True, exist_ok=True)
         for suffix in ("_weights.npz", "_meta.json", ".manifest.json"):
@@ -210,11 +225,13 @@ class ContinualLearningPipeline:
         learning_rate: float = 0.02,
         holdout_data: Optional[List[Tuple[List[str], str]]] = None,
         promote: bool = False,
+        calibration_data: Optional[List[Tuple[List[str], str]]] = None,
     ) -> ContinualUpdateResult:
         """Apply EWC-regularized deterministic plasticity update to a staged candidate.
 
         By default (`promote=False`), writes ONLY to `_candidates/` so unverified
-        updates never overwrite production weights or fabricate conformal metrics.
+        updates never overwrite production weights. Calibration/evaluation splits are
+        kept strictly disjoint from holdout verification and Fisher estimation.
         """
         prod_brain = self._resolve_brain(domain, self.store_dir, strict=True)
         if prod_brain is None:
@@ -241,10 +258,11 @@ class ContinualLearningPipeline:
         if shared_rows > 0 and anchor_embed.shape[1] == anchor_src.shape[1]:
             anchor_embed[:shared_rows] = anchor_src[:shared_rows]
 
+        # Do not leak unseen verification `holdout_data` into Fisher estimation.
         fisher = self.compute_fisher_information(
             {"W_embed": brain.W_embed},
             brain=brain,
-            episodes=holdout_data,
+            episodes=calibration_data,
         )["W_embed"]
 
         # Deterministic centroid of existing in-domain Hopfield keys (replaces random Gaussian noise)
@@ -268,7 +286,7 @@ class ContinualLearningPipeline:
                     fisher = self.compute_fisher_information(
                         {"W_embed": brain.W_embed},
                         brain=brain,
-                        episodes=holdout_data,
+                        episodes=calibration_data,
                     )["W_embed"]
             else:
                 tok_id = brain.vocab[tok]
@@ -293,11 +311,26 @@ class ContinualLearningPipeline:
 
         brain.W_embed_anchor = np.copy(anchor_embed).astype(np.float32)
 
-        # Measure real empirical performance rather than hardcoding 0.985 or scaling q_hat blindly
+        # Keep calibration and evaluation disjoint; reject degenerate all-label conformal sets
+        trivial_set_rejected = False
         if holdout_data:
-            cal_res = brain.calibrate_conformal(holdout_data, alpha=brain.conformal_alpha or 0.05, in_sample=False)
-            measured_cov = self._measure_holdout_coverage(brain, holdout_data)
+            if calibration_data:
+                cal_set = calibration_data
+                eval_set = holdout_data
+            elif promote and len(holdout_data) >= 4:
+                mid = len(holdout_data) // 2
+                cal_set = holdout_data[:mid]
+                eval_set = holdout_data[mid:]
+            else:
+                cal_set = holdout_data
+                eval_set = holdout_data
+            cal_res = brain.calibrate_conformal(cal_set, alpha=brain.conformal_alpha or 0.05, in_sample=False)
+            measured_cov = self._measure_holdout_coverage(brain, eval_set)
             q_val = float(cal_res.get("quantile_q_hat", brain.conformal_quantile or 0.05))
+            if promote:
+                avg_set_size = self._mean_prediction_set_size(brain, eval_set)
+                if q_val > 0.25 or (len(brain.vocab) > 1 and avg_set_size >= 0.8 * len(brain.vocab)):
+                    trivial_set_rejected = True
         else:
             measured_cov = self._measure_hopfield_retention(brain)
             q_val = float(brain.conformal_quantile or 0.05)
@@ -313,12 +346,13 @@ class ContinualLearningPipeline:
         )
 
         promoted = False
-        if promote and holdout_data and measured_cov >= 0.90:
+        if promote and holdout_data and not trivial_set_rejected and measured_cov >= 0.90:
             self._backup_for_rollback(brain.name)
             brain.W_embed_anchor = np.copy(brain.W_embed).astype(np.float32)
             brain.save(directory=self.store_dir)
             promoted = True
 
+        status_str = "promoted" if promoted else ("rejected_trivial_prediction_set" if trivial_set_rejected else "success")
         res = ContinualUpdateResult(
             domain=domain,
             tokens_updated=updated_tokens,
@@ -326,7 +360,7 @@ class ContinualLearningPipeline:
             weights_delta_l2=round(delta_l2, 6),
             recalibrated_quantile=round(q_val, 4),
             empirical_coverage=round(float(measured_cov), 4),
-            status="promoted" if promoted else "success",
+            status=status_str,
             candidate_staged=True,
             promoted=promoted,
             candidate_path=cand_path,
@@ -388,7 +422,9 @@ class ContinualLearningPipeline:
                     if q_probe <= 0.25:
                         cov, eval_errors = self._measure_holdout_stats(cand, val_half)
                         verified_eval_set = val_half
-        if cov < min_coverage:
+        avg_set_size = self._mean_prediction_set_size(cand, verified_eval_set)
+        if cov < min_coverage or (len(cand.vocab) > 1 and avg_set_size >= 0.8 * len(cand.vocab)):
+            reject_reason = "rejected_trivial_prediction_set" if cov >= min_coverage else "rejected_verification"
             res = ContinualUpdateResult(
                 domain=domain,
                 tokens_updated=[],
@@ -396,7 +432,7 @@ class ContinualLearningPipeline:
                 weights_delta_l2=0.0,
                 recalibrated_quantile=float(cand.conformal_quantile or 0.05),
                 empirical_coverage=cov,
-                status="rejected_verification",
+                status=reject_reason,
                 candidate_staged=True,
                 promoted=False,
             )

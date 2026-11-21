@@ -315,29 +315,8 @@ def _validate_bind_host(host: str) -> Optional[str]:
     )
 
 
-@app.middleware("http")
 async def _security_and_size_middleware(request: Request, call_next):
-    try:
-        max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
-    except (ValueError, TypeError):
-        max_body = 1048576
-
-    cl_hdr = request.headers.get("content-length")
-    if cl_hdr:
-        try:
-            if int(cl_hdr) > max_body:
-                return JSONResponse({"detail": "Payload too large"}, status_code=413)
-        except ValueError:
-            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
-    body_bytes = await request.body()
-    if len(body_bytes) > max_body:
-        return JSONResponse({"detail": "Payload too large"}, status_code=413)
-
-    # Auth (fail-closed, 2026-11-20): previously auth ran only when
-    # AETHERIS_SERVER_TOKEN was set, and even then only on /microbrain/* paths -
-    # tokenless deployments silently served every endpoint (intent, validate,
-    # prefilter, gate, load) to any client, and /metrics, /dashboard stayed
-    # unauthenticated even with a token configured.
+    """Auth + body-budget middleware helper (preserved for direct unit tests)."""
     req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
     if req_token:
         if request.url.path != "/health":
@@ -350,8 +329,6 @@ async def _security_and_size_middleware(request: Request, call_next):
             ):
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     else:
-        # No token configured: only loopback clients may proceed unless
-        # AETHERIS_ALLOW_UNAUTHENTICATED=1 is explicitly set.
         allow_unauth = os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1"
         client_host = getattr(getattr(request, "client", None), "host", None)
         if not allow_unauth and not _is_loopback_address(client_host, allow_testclient=True):
@@ -366,7 +343,160 @@ async def _security_and_size_middleware(request: Request, call_next):
                 status_code=403,
             )
 
+    try:
+        max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
+    except (ValueError, TypeError):
+        max_body = 1048576
+
+    cl_hdr = request.headers.get("content-length")
+    if cl_hdr:
+        try:
+            if int(cl_hdr) > max_body:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
+        except ValueError:
+            return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+
+    if hasattr(request, "stream"):
+        chunks: List[bytes] = []
+        total_bytes = 0
+        async for chunk in request.stream():
+            total_bytes += len(chunk)
+            if total_bytes > max_body:
+                return JSONResponse({"detail": "Payload too large"}, status_code=413)
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
+    else:
+        body = await request.body()
+        if len(body) > max_body:
+            return JSONResponse({"detail": "Payload too large"}, status_code=413)
+
     return await call_next(request)
+
+
+class _SecurityAndSizeASGIMiddleware:
+    """Pure ASGI auth and streaming body-size middleware (no BaseHTTPMiddleware buffering)."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        raw_headers = scope.get("headers") or ()
+        headers: Dict[str, str] = {}
+        cl_values: List[str] = []
+        for k_bytes, v_bytes in raw_headers:
+            k = k_bytes.decode("latin-1").lower()
+            v = v_bytes.decode("latin-1")
+            if k == "content-length":
+                cl_values.append(v.strip())
+            if k in headers:
+                headers[k] = f"{headers[k]}, {v}"
+            else:
+                headers[k] = v
+
+        if len(cl_values) > 1 and len(set(cl_values)) > 1:
+            resp = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            await resp(scope, receive, send)
+            return
+
+        # Auth runs BEFORE reading/buffering any request body bytes.
+        req_token = str(os.getenv("AETHERIS_SERVER_TOKEN") or "").strip()
+        if req_token:
+            if scope.get("path", "") != "/health":
+                auth_hdr = headers.get("authorization", "")
+                if not auth_hdr.lower().startswith("bearer "):
+                    resp = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+                    await resp(scope, receive, send)
+                    return
+                supplied = auth_hdr[7:].strip()
+                if not hmac.compare_digest(
+                    supplied.encode("utf-8"), req_token.encode("utf-8")
+                ):
+                    resp = JSONResponse({"detail": "Unauthorized"}, status_code=401)
+                    await resp(scope, receive, send)
+                    return
+        else:
+            allow_unauth = os.getenv("AETHERIS_ALLOW_UNAUTHENTICATED") == "1"
+            client = scope.get("client")
+            client_host = client[0] if client else None
+            if not allow_unauth and not _is_loopback_address(client_host, allow_testclient=True):
+                log.warning(
+                    "Rejected unauthenticated non-loopback request from %s; set AETHERIS_SERVER_TOKEN to enable remote access",
+                    client_host,
+                )
+                resp = JSONResponse(
+                    {
+                        "detail": "Forbidden: no AETHERIS_SERVER_TOKEN configured; only loopback clients are permitted."
+                    },
+                    status_code=403,
+                )
+                await resp(scope, receive, send)
+                return
+
+        try:
+            max_body = int(os.getenv("AETHERIS_SERVER_MAX_BODY_BYTES", "1048576"))
+        except (ValueError, TypeError):
+            max_body = 1048576
+
+        cl_hdr = headers.get("content-length")
+        if cl_hdr:
+            try:
+                cl_int = int(cl_hdr.strip())
+                if cl_int < 0:
+                    resp = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                    await resp(scope, receive, send)
+                    return
+                if cl_int > max_body:
+                    resp = JSONResponse({"detail": "Payload too large"}, status_code=413)
+                    await resp(scope, receive, send)
+                    return
+            except ValueError:
+                resp = JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+                await resp(scope, receive, send)
+                return
+
+        method = str(scope.get("method", "GET")).upper()
+        if method not in {"POST", "PUT", "PATCH", "DELETE"} and "content-length" not in headers and "transfer-encoding" not in headers:
+            await self.app(scope, receive, send)
+            return
+
+        chunks: List[bytes] = []
+        total_bytes = 0
+        more_body = True
+        while more_body:
+            message = await receive()
+            msg_type = message.get("type")
+            if msg_type == "http.disconnect":
+                return
+            if msg_type != "http.request":
+                continue
+            body_chunk = message.get("body", b"")
+            if body_chunk:
+                total_bytes += len(body_chunk)
+                if total_bytes > max_body:
+                    resp = JSONResponse({"detail": "Payload too large"}, status_code=413)
+                    await resp(scope, receive, send)
+                    return
+                chunks.append(body_chunk)
+            more_body = bool(message.get("more_body", False))
+
+        full_body = b"".join(chunks)
+        body_sent = False
+
+        async def _replay_receive() -> Dict[str, Any]:
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": full_body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, _replay_receive, send)
+
+
+app.add_middleware(_SecurityAndSizeASGIMiddleware)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -441,9 +571,13 @@ async def prometheus_metrics():
         "# TYPE microbrain_telemetry_events_total counter",
         f"microbrain_telemetry_events_total {report.total_events}",
         "",
-        "# HELP microbrain_conformal_coverage Empirical conformal pass rate across the live log",
+        "# HELP microbrain_conformal_coverage Empirical verified conformal coverage (passed_conformal and verified_accurate) across the live log",
         "# TYPE microbrain_conformal_coverage gauge",
         f"microbrain_conformal_coverage {report.conformal_empirical_coverage}",
+        "",
+        "# HELP microbrain_conformal_pass_rate Share of events passing the conformal gate across the live log",
+        "# TYPE microbrain_conformal_pass_rate gauge",
+        f"microbrain_conformal_pass_rate {report.conformal_pass_rate}",
         "",
         "# HELP microbrain_sliding_window_coverage Conformal+accuracy coverage over the recent window",
         "# TYPE microbrain_sliding_window_coverage gauge",
@@ -466,6 +600,7 @@ async def prometheus_metrics():
         safe_domain = str(domain).replace('"', "")
         lines += [
             f'microbrain_conformal_coverage{{domain="{safe_domain}"}} {stats.get("conformal_coverage", 0.0)}',
+            f'microbrain_conformal_pass_rate{{domain="{safe_domain}"}} {stats.get("conformal_pass_rate", 0.0)}',
             f'microbrain_inference_latency_ms{{domain="{safe_domain}",stat="mean"}} {stats.get("mean_latency_ms", 0.0)}',
         ]
 
@@ -683,7 +818,11 @@ async def classify_intent(req: IntentRequest):
         if hasattr(brain, "forward"):
             result = brain.forward(tokens)
             if isinstance(result, dict):
-                raw_pred = result.get("prediction") or result.get("top_candidate")
+                raw_pred = (
+                    result.get("predicted_token")
+                    or result.get("prediction")
+                    or result.get("top_candidate")
+                )
                 if raw_pred:
                     return IntentResponse(
                         intent=str(raw_pred),
@@ -810,11 +949,13 @@ async def prefilter_candidates(req: PrefilterRequest):
                 reason=reason,
             ))
 
-        filtered = sum(1 for r in results if r.passed)
+        results.sort(key=lambda r: (r.passed, r.score), reverse=True)
+        limited = results[: req.max_results]
+        filtered = sum(1 for r in limited if r.passed)
         return PrefilterResponse(
-            results=results,
+            results=limited,
             filtered_count=filtered,
-            total_count=len(results),
+            total_count=len(req.candidates),
         )
     except Exception as e:
         log.warning(f"Prefilter failed: {e}")

@@ -20,15 +20,16 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 keywords = [
     "ai-agents",
-    "micro-transformer",
-    "mixture-of-experts",
-    "edge-ai",
+    "mcp",
+    "claude-code",
+    "llm-security",
     "conformal-prediction",
-    "vector-symbolic-architecture",
-    "opencl",
+    "numpy",
+    "tool-routing",
 ]
 requires-python = ">=3.10"
 dependencies = [
@@ -49,6 +50,7 @@ server = [
 ]
 dev = [
     "pytest>=8.0.0",
+    "hypothesis>=6.0.0",
 ]
 
 [project.urls]
@@ -58,6 +60,7 @@ Repository = "https://github.com/drtikov/microbrainsforagents.git"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aetheris_microbrains*"]
+exclude = ["aetheris_microbrains.tests*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.npz", "*.md", "py.typed"]

@@ -40,11 +40,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from .runtime_paths import append_jsonl_bounded, get_default_journal_path
+from .secrets import (
+    _REDACT_PATTERNS,
+    _SECRET_PATTERNS,
+    _SECRET_TOKEN_REGEXES,
+    redact_secrets,
+    scrub_tool_output,
+)
+
 log = logging.getLogger(__name__)
 
 RULES_VERSION = "2.1.0-layered-structural"
 DEFAULT_MODEL_VERSION = "analytical-wsp-v2.1"
-DEFAULT_JOURNAL_PATH = Path(__file__).resolve().parents[1] / "memory" / "decision_journal.jsonl"
+DEFAULT_JOURNAL_PATH = get_default_journal_path()
 _DECISION_RING_BUFFER: Deque[Dict[str, Any]] = deque(maxlen=500)
 
 # Tool risk taxonomy (Layer 0)
@@ -114,6 +123,7 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     "/etc/passwd",
     "/etc/shadow",
     "/etc/sudoers",
+    "/etc/environment",
     ".claude/",
     ".claude",
     ".cursor/",
@@ -183,30 +193,64 @@ class PolicyConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PolicyConfig:
-        """Construct PolicyConfig from a dictionary (e.g., parsed JSON/YAML)."""
+        """Construct PolicyConfig from a dictionary with strict schema and range validation."""
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected dict for PolicyConfig, got {type(data).__name__}")
         valid_fields = cls.__dataclass_fields__
+        unknown = sorted(str(k) for k in data.keys() if k not in valid_fields)
+        if unknown:
+            raise ValueError(f"Unknown PolicyConfig field(s): {', '.join(unknown)}")
         kwargs: Dict[str, Any] = {}
         for k, v in data.items():
-            if k in valid_fields:
-                if k in ("protected_patterns", "allowed_ast_imports") and isinstance(v, (list, tuple, set)):
-                    kwargs[k] = tuple(str(x) for x in v)
-                else:
-                    kwargs[k] = v
-        return cls(**kwargs)
+            if k in ("protected_patterns", "allowed_ast_imports"):
+                if not isinstance(v, (list, tuple, set)):
+                    raise ValueError(f"PolicyConfig field {k!r} must be a list/tuple, got {type(v).__name__}")
+                kwargs[k] = tuple(str(x) for x in v)
+            else:
+                kwargs[k] = v
+        cfg = cls(**kwargs)
+        if cfg.profile not in {"strict", "dev"}:
+            raise ValueError(f"Invalid PolicyConfig.profile: {cfg.profile!r} (expected 'strict' or 'dev')")
+        if cfg.default_on_escalation_timeout not in {"deny", "escalate"}:
+            raise ValueError(
+                f"Invalid PolicyConfig.default_on_escalation_timeout: {cfg.default_on_escalation_timeout!r}"
+            )
+        if isinstance(cfg.max_diff_lines, bool) or not isinstance(cfg.max_diff_lines, int) or cfg.max_diff_lines <= 0:
+            raise ValueError(f"PolicyConfig.max_diff_lines must be a positive int, got {cfg.max_diff_lines!r}")
+        if (
+            isinstance(cfg.escalation_timeout_sec, bool)
+            or not isinstance(cfg.escalation_timeout_sec, int)
+            or cfg.escalation_timeout_sec <= 0
+        ):
+            raise ValueError(
+                f"PolicyConfig.escalation_timeout_sec must be a positive int, got {cfg.escalation_timeout_sec!r}"
+            )
+        return cfg
 
     @classmethod
     def from_file(cls, path: str | Path) -> PolicyConfig:
-        """Load PolicyConfig from a JSON file (or YAML if PyYAML/ruamel is installed)."""
+        """Load PolicyConfig from JSON, TOML, or YAML (PyYAML recommended)."""
         p = Path(path).expanduser().resolve()
         if not p.is_file():
             raise FileNotFoundError(f"Policy file not found: {p}")
         raw = p.read_text(encoding="utf-8")
-        if p.suffix.lower() in (".yaml", ".yml"):
+        suffix = p.suffix.lower()
+        if suffix == ".toml":
+            try:
+                import tomllib  # Python 3.11+
+            except ImportError:
+                try:
+                    import tomli as tomllib  # type: ignore[no-redef]
+                except ImportError as exc:
+                    raise ImportError(
+                        "Reading .toml policy files requires Python 3.11+ (stdlib tomllib) or `pip install tomli`."
+                    ) from exc
+            loaded = tomllib.loads(raw)
+        elif suffix in (".yaml", ".yml"):
             try:
                 import yaml
                 loaded = yaml.safe_load(raw)
             except ImportError:
-                # Lightweight pure-Python fallback for key: value / list YAML without PyYAML dependency
                 loaded = cls._parse_simple_yaml(raw)
         else:
             loaded = json.loads(raw)
@@ -215,36 +259,94 @@ class PolicyConfig:
         return cls.from_dict(loaded)
 
     @staticmethod
-    def _parse_simple_yaml(raw: str) -> Dict[str, Any]:
-        """Simple YAML parser fallback for string/bool/int/list fields when pyyaml is absent."""
+    def _strip_yaml_comment(line: str) -> str:
+        """Strip `#` comments outside single/double quotes when preceded by whitespace or at column 0."""
+        in_single = False
+        in_double = False
+        escaped = False
+        for idx, ch in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if in_double:
+                if ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_double = False
+                continue
+            if in_single:
+                if ch == "'":
+                    in_single = False
+                continue
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == "#" and (idx == 0 or line[idx - 1] in (" ", "\t")):
+                return line[:idx]
+        return line
+
+    @staticmethod
+    def _unquote_yaml_scalar(val: str) -> str:
+        """Strip one matching pair of single or double quotes without corrupting inner characters."""
+        s = val.strip()
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+            inner = s[1:-1]
+            if s[0] == "'":
+                return inner.replace("''", "'")
+            return inner
+        return s
+
+    @classmethod
+    def _parse_simple_yaml(cls, raw: str) -> Dict[str, Any]:
+        """Minimal quote-aware YAML parser fallback for flat scalar/list configs when PyYAML is absent."""
         res: Dict[str, Any] = {}
         curr_list_key: Optional[str] = None
         for line in raw.splitlines():
-            line_str = line.split("#", 1)[0].rstrip()
+            line_str = cls._strip_yaml_comment(line).rstrip()
             if not line_str.strip():
                 continue
             indent = len(line_str) - len(line_str.lstrip())
             stripped = line_str.strip()
-            if stripped.startswith("- ") and curr_list_key and indent > 0:
-                val = stripped[2:].strip().strip("\"'")
-                res[curr_list_key].append(val)
+            if stripped.startswith("- "):
+                if not curr_list_key or indent <= 0:
+                    raise ValueError(
+                        "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+                    )
+                item_raw = stripped[2:].strip()
+                if item_raw.startswith(("&", "*", "|", ">", "{", "[")):
+                    raise ValueError(
+                        "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+                    )
+                res[curr_list_key].append(cls._unquote_yaml_scalar(item_raw))
                 continue
             if ":" in stripped:
                 curr_list_key = None
-                k, v = stripped.split(":", 1)
-                k = k.strip()
-                v = v.strip().strip("\"'")
-                if not v:
+                k_raw, v_raw = stripped.split(":", 1)
+                k = cls._unquote_yaml_scalar(k_raw)
+                v_stripped = v_raw.strip()
+                if not v_stripped:
                     curr_list_key = k
                     res[k] = []
-                elif v.lower() == "true":
+                    continue
+                if v_stripped.startswith(("&", "*", "|", ">", "{", "[")):
+                    raise ValueError(
+                        "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+                    )
+                v = cls._unquote_yaml_scalar(v_stripped)
+                is_unquoted = v_stripped == v
+                if is_unquoted and v.lower() == "true":
                     res[k] = True
-                elif v.lower() == "false":
+                elif is_unquoted and v.lower() == "false":
                     res[k] = False
-                elif v.isdigit():
+                elif is_unquoted and v.isdigit():
                     res[k] = int(v)
                 else:
                     res[k] = v
+                continue
+            raise ValueError(
+                "Unsupported YAML syntax in fallback parser; install PyYAML or use JSON/TOML policy files."
+            )
         return res
 
 
@@ -340,6 +442,14 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
         clean_pat = pat.strip("/").lower()
         if not clean_pat:
             continue
+        if any(ch in clean_pat for ch in "*?["):
+            if (
+                fnmatch.fnmatch(clean_target, clean_pat)
+                or fnmatch.fnmatch(norm_path, clean_pat)
+                or ("/" not in clean_pat and fnmatch.fnmatch(basename, clean_pat))
+            ):
+                return True
+            continue
         if "/" in clean_pat:
             pat_segs = [seg for seg in clean_pat.split("/") if seg]
             plen = len(pat_segs)
@@ -410,10 +520,10 @@ def evaluate_layer0_policy(
     }
 
 
-def _parse_python_with_context(code_text: str) -> Optional[ast.AST]:
-    """Parse Python code or hunk fragment by wrapping in valid block contexts if needed."""
+def _parse_python_with_context_and_source(code_text: str) -> Tuple[Optional[ast.AST], str]:
+    """Parse Python code or hunk fragment and return ``(ast_tree, exact_parsed_source)``."""
     if not code_text.strip():
-        return ast.parse("")
+        return ast.parse(""), ""
 
     candidates = [code_text]
 
@@ -443,10 +553,36 @@ def _parse_python_with_context(code_text: str) -> Optional[ast.AST]:
 
     for cand in candidates:
         try:
-            return ast.parse(cand)
+            return ast.parse(cand), cand
         except SyntaxError:
             continue
-    return None
+    return None, ""
+
+
+def _parse_python_with_context(code_text: str) -> Optional[ast.AST]:
+    """Parse Python code or hunk fragment by wrapping in valid block contexts if needed."""
+    tree, _src = _parse_python_with_context_and_source(code_text)
+    return tree
+
+
+def _is_benign_relative_path_literal(path_str: Optional[str]) -> bool:
+    """Return True if literal target is a simple relative path without traversal/wildcards/protected assets."""
+    if not path_str or not isinstance(path_str, str):
+        return False
+    raw = path_str.strip()
+    if not raw or raw == ".":
+        return False
+    if raw.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:", raw):
+        return False
+    if any(ch in raw for ch in ("*", "?", "[", "$", "\x00")):
+        return False
+    norm = raw.replace("\\", "/")
+    segs = [seg for seg in norm.split("/") if seg]
+    if not segs or ".." in segs:
+        return False
+    if any(seg.lower() == ".git" for seg in segs):
+        return False
+    return not is_protected_path(raw)
 
 
 def _const_str(node: ast.AST) -> Optional[str]:
@@ -475,6 +611,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.findings: List[str] = []
         self.structural_findings: List[Dict[str, Any]] = []
+        self.finding_lines: Dict[str, List[int]] = {}
         self.scope_stack: List[str] = []
         self.dangerous_aliases: Set[str] = set()
         self.module_aliases: Dict[str, str] = {}
@@ -484,11 +621,15 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
     def _record_finding(self, rule: str, node: ast.AST, target_symbol: str = "") -> None:
         self.findings.append(rule)
+        lineno = getattr(node, "lineno", 0)
+        end_lineno = getattr(node, "end_lineno", None) or lineno
+        self.finding_lines.setdefault(rule, []).append(lineno)
         scope = "::".join(self.scope_stack) if self.scope_stack else "module"
         self.structural_findings.append({
             "rule": rule,
             "scope": scope,
-            "lineno": getattr(node, "lineno", 0),
+            "lineno": lineno,
+            "end_lineno": end_lineno,
             "col_offset": getattr(node, "col_offset", 0),
             "node_type": type(node).__name__,
             "symbol": target_symbol,
@@ -608,8 +749,11 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             is_dangerous_rhs = True
         elif isinstance(value, ast.Attribute) and value.attr in {"system", "popen", "rmtree", "loads", "run", "call", "import_module"}:
             is_dangerous_rhs = True
-        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in {"getattr", "__import__"}:
-            is_dangerous_rhs = True
+        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            if value.func.id == "__import__":
+                is_dangerous_rhs = True
+            elif value.func.id == "getattr":
+                is_dangerous_rhs = self._is_dangerous_getattr_call(value)
         elif isinstance(value, ast.Subscript):
             sub_key = self._check_subscript_lookup(value)
             if sub_key is not None:
@@ -722,7 +866,13 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         elif isinstance(func, ast.Call):
             if isinstance(func.func, ast.Name) and func.func.id == "getattr":
                 self._check_getattr(func)
-                self._record_finding("obfuscated_dynamic_invocation:getattr", node, "getattr")
+                is_self_or_cls = (
+                    bool(func.args)
+                    and isinstance(func.args[0], ast.Name)
+                    and func.args[0].id in {"self", "cls"}
+                )
+                if self._is_dangerous_getattr_call(func) or not is_self_or_cls:
+                    self._record_finding("obfuscated_dynamic_invocation:getattr", node, "getattr")
             if self._uses_decoded_payload(node.args):
                 self._record_finding("obfuscated_encoded_payload", node)
 
@@ -786,7 +936,18 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 if self._uses_decoded_payload(node.args):
                     self._record_finding("obfuscated_encoded_payload", node, sym)
             elif resolved_mod == "importlib" and attr == "import_module":
-                self._record_finding("dynamic_import:importlib.import_module", node, "importlib.import_module")
+                mod_arg = (self._fold_str(node.args[0]) or _const_str(node.args[0])) if node.args else None
+                top_mod = mod_arg.split(".")[0].lower() if mod_arg else ""
+                _CRITICAL_DYN_IMPORT_MODS = {
+                    "os", "subprocess", "pty", "ctypes", "shutil", "pickle", "cpickle",
+                    "marshal", "shelve", "socket", "builtins", "sys", "posix", "nt",
+                }
+                dyn_rule = (
+                    "dynamic_import_critical:importlib.import_module"
+                    if top_mod in _CRITICAL_DYN_IMPORT_MODS
+                    else "dynamic_import:importlib.import_module"
+                )
+                self._record_finding(dyn_rule, node, "importlib.import_module")
             elif resolved_mod == "pty" and attr in {"spawn", "fork"}:
                 self._record_finding(f"dangerous_pty_call:pty.{attr}", node, f"pty.{attr}")
             elif resolved_mod == "ctypes" and attr in {"CDLL", "PyDLL", "OleDLL", "WinDLL", "LibraryLoader"}:
@@ -805,7 +966,13 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                         self._record_finding("obfuscated_encoded_payload", node, f"subprocess.{attr}")
             elif resolved_mod == "shutil" or (isinstance(func.value, ast.Name) and func.value.id == "shutil"):
                 if attr == "rmtree":
-                    self._record_finding("destructive_fs_call:shutil.rmtree", node, "shutil.rmtree")
+                    rm_target = (self._fold_str(node.args[0]) or _const_str(node.args[0])) if node.args else None
+                    rm_rule = (
+                        "destructive_fs_call_relative:shutil.rmtree"
+                        if _is_benign_relative_path_literal(rm_target)
+                        else "destructive_fs_call:shutil.rmtree"
+                    )
+                    self._record_finding(rm_rule, node, "shutil.rmtree")
             elif resolved_mod == "os" or (isinstance(func.value, ast.Name) and func.value.id == "os"):
                 if attr in {
                     "system", "popen", "remove", "unlink", "rmdir",
@@ -827,14 +994,28 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def _check_getattr(self, node: ast.Call) -> None:
+    def _resolve_getattr_target_and_attr(self, node: ast.Call) -> Tuple[str, Optional[str]]:
         target_obj = ""
         if node.args:
             if isinstance(node.args[0], ast.Name):
-                target_obj = node.args[0].id.lower()
+                raw_name = node.args[0].id.lower()
+                target_obj = self.module_aliases.get(raw_name, raw_name)
             elif isinstance(node.args[0], ast.Call) and isinstance(node.args[0].func, ast.Name):
-                target_obj = node.args[0].func.id.lower()
-        attr_str = _const_str(node.args[1]) if len(node.args) >= 2 else None
+                raw_name = node.args[0].func.id.lower()
+                target_obj = self.module_aliases.get(raw_name, raw_name)
+        attr_str = (self._fold_str(node.args[1]) or _const_str(node.args[1])) if len(node.args) >= 2 else None
+        return target_obj, attr_str
+
+    def _is_dangerous_getattr_call(self, node: ast.Call) -> bool:
+        target_obj, attr_str = self._resolve_getattr_target_and_attr(node)
+        if target_obj in self.DANGEROUS_MODULES or target_obj in self.SUBSCRIPT_SCOPE_NAMES:
+            return True
+        if attr_str in {"system", "popen", "eval", "exec", "__import__", "rmtree"}:
+            return True
+        return False
+
+    def _check_getattr(self, node: ast.Call) -> None:
+        target_obj, attr_str = self._resolve_getattr_target_and_attr(node)
         if target_obj in self.DANGEROUS_MODULES or target_obj in self.SUBSCRIPT_SCOPE_NAMES:
             self._record_finding(f"obfuscated_getattr:{target_obj}.{attr_str or '<dynamic>'}", node, target_obj)
         elif attr_str in {"system", "popen", "eval", "exec", "__import__", "rmtree"}:
@@ -917,56 +1098,6 @@ def _detect_interface_hazards(raw_lines: List[str], tree_new: ast.AST) -> List[s
     return list(dict.fromkeys(hazards))
 
 
-_SECRET_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
-    (
-        "private_key_pem",
-        re.compile(
-            r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
-            r"[\s\S]*?"
-            r"-----END\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"
-        ),
-        "[REDACTED_PRIVATE_KEY]",
-    ),
-    (
-        "private_key_pem",
-        re.compile(r"-----BEGIN\s+(?:RSA\s+|EC\s+|OPENSSH\s+|DSA\s+|PGP\s+)?PRIVATE\s+KEY-----"),
-        "[REDACTED_PRIVATE_KEY]",
-    ),
-    ("openai_project_key", re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{12,}\b"), "[REDACTED_OPENAI_KEY]"),
-    ("anthropic_api_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_ANTHROPIC_KEY]"),
-    ("api_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_API_KEY]"),
-    ("github_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "[REDACTED_GITHUB_TOKEN]"),
-    ("gitlab_token", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED_GITLAB_TOKEN]"),
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED_AWS_KEY]"),
-    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), "[REDACTED_GOOGLE_API_KEY]"),
-    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
-    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"), "[REDACTED_HF_TOKEN]"),
-    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), "[REDACTED_NPM_TOKEN]"),
-    ("pypi_token", re.compile(r"\bpypi-[A-Za-z0-9_\-]{24,}\b"), "[REDACTED_PYPI_TOKEN]"),
-    ("stripe_key", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "[REDACTED_STRIPE_KEY]"),
-    ("telegram_bot_token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{30,}\b"), "[REDACTED_TELEGRAM_TOKEN]"),
-    ("sendgrid_key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"), "[REDACTED_SENDGRID_KEY]"),
-    ("databricks_token", re.compile(r"\bdapi[a-f0-9]{32}\b"), "[REDACTED_DATABRICKS_TOKEN]"),
-    (
-        "db_connection_uri",
-        re.compile(
-            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://"
-            r"[^/\s:@\"']+:(?!pass(?:word)?@|changeme@|example@|your_)[^/\s@\"']{4,}@[^\s\"']+"
-        ),
-        "[REDACTED_DB_URI]",
-    ),
-    ("jwt_token", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), "[REDACTED_JWT]"),
-    ("bearer_token", re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]{16,}=*"), "Bearer [REDACTED]"),
-)
-
-_SECRET_TOKEN_REGEXES: Tuple[re.Pattern[str], ...] = tuple(pat for _stype, pat, _repl in _SECRET_PATTERNS)
-_REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = tuple(
-    (pat, repl) for _stype, pat, repl in _SECRET_PATTERNS
-) + (
-    (re.compile(r"sk-[A-Za-z0-9]{16,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"Bearer\s+(?!\[REDACTED\])[A-Za-z0-9\-._~+/]+=*"), "Bearer [REDACTED]"),
-)
 _SECRET_ASSIGN_RE = re.compile(
     r"""(?i)\b(?:api_key|secret_key|private_key|access_token|auth_token|client_secret|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{12,})["']"""
 )
@@ -991,32 +1122,93 @@ _INLINE_INTERPRETER_SINK_RE = re.compile(
     r"unlink|unlinkSync|rmSync|rmdirSync|rmdir|rmtree|rm_rf|remove_entry|shell_exec|passthru|proc_open|eval|qx)\b"
 )
 
+_DEV_ESCALATE_ONLY_AST_FINDINGS: Set[str] = {
+    "subprocess_call:run",
+    "subprocess_call:Popen",
+    "subprocess_call:call",
+    "subprocess_call:check_output",
+    "subprocess_call:check_call",
+    "destructive_fs_call_relative:shutil.rmtree",
+    "dangerous_os_call:os.remove",
+    "dangerous_os_call:os.unlink",
+    "dynamic_import:importlib.import_module",
+}
 
-def redact_secrets(text: str) -> str:
-    """Mask known credential/token patterns before logging or printing errors."""
-    out = str(text or "")
-    for pat, repl in _REDACT_PATTERNS:
-        out = pat.sub(repl, out)
-    return out
+_INLINE_SUPPRESS_RE = re.compile(
+    r"#\s*aetheris:\s*allow\s+([A-Za-z0-9_.:-]+)\s+--\s+(.{3,}?)\s*$"
+)
+_SUPPRESSIBLE_FINDING_PREFIXES: Tuple[str, ...] = (
+    "subprocess_call:",
+    "destructive_fs_call_relative:",
+    "dangerous_os_call:os.remove",
+    "dangerous_os_call:os.unlink",
+    "dynamic_import:importlib.import_module",
+    "secret_leak_pattern_found",
+)
 
 
-def scrub_tool_output(text: Any) -> Dict[str, Any]:
-    """Scrub raw credential/token patterns from tool outputs before LLM context ingestion."""
-    out = "" if text is None else str(text)
-    found_types: List[str] = []
-    total_hits = 0
-    for secret_type, pat, repl in _SECRET_PATTERNS:
-        out, n_subs = pat.subn(repl, out)
-        if n_subs > 0:
-            total_hits += n_subs
-            if secret_type not in found_types:
-                found_types.append(secret_type)
-    return {
-        "redacted_text": out,
-        "secrets_found": total_hits > 0,
-        "secret_count": total_hits,
-        "secret_types": sorted(found_types),
-    }
+def _is_finding_suppressible(finding: str) -> bool:
+    """Only medium-severity / documentation fixture findings accept inline suppression."""
+    return any(finding == p or finding.startswith(p) for p in _SUPPRESSIBLE_FINDING_PREFIXES)
+
+
+def _parse_inline_suppression(line: str) -> Optional[Tuple[str, str]]:
+    """Parse `# aetheris: allow <rule> -- <reason>` returning `(rule, reason)` or None."""
+    m = _INLINE_SUPPRESS_RE.search(str(line or ""))
+    if not m:
+        return None
+    rule_tok = m.group(1).strip()
+    reason = m.group(2).strip()
+    if len(reason) < 3:
+        return None
+    return rule_tok, reason
+
+
+def _suppression_matches(rule_token: str, finding: str) -> bool:
+    return (
+        finding == rule_token
+        or finding.startswith(rule_token + ":")
+        or (rule_token.endswith(":") and finding.startswith(rule_token))
+    )
+
+
+def _partition_suppressed_ast_findings(
+    visitor: _SecurityASTVisitor,
+    source_text: str,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Split visitor AST findings into active findings and auditable inline suppressions."""
+    lines = source_text.splitlines() if source_text else []
+    active: List[str] = []
+    suppressed: List[Dict[str, Any]] = []
+    handled_counts: Counter[str] = Counter()
+
+    for sf in visitor.structural_findings:
+        rule = str(sf.get("rule") or "")
+        if not rule:
+            continue
+        handled_counts[rule] += 1
+        lineno = int(sf.get("lineno") or 0)
+        end_lineno = int(sf.get("end_lineno") or lineno or 0)
+        supp_match: Optional[Tuple[int, str]] = None
+        if _is_finding_suppressible(rule) and lineno >= 1 and lines:
+            lo = max(1, lineno)
+            hi = min(len(lines), max(lineno, end_lineno))
+            for ln_no in range(lo, hi + 1):
+                parsed = _parse_inline_suppression(lines[ln_no - 1])
+                if parsed is not None and _suppression_matches(parsed[0], rule):
+                    supp_match = (ln_no, parsed[1])
+                    break
+        if supp_match is not None:
+            suppressed.append({"rule": rule, "line": supp_match[0], "reason": supp_match[1]})
+        else:
+            active.append(rule)
+
+    total_counts = Counter(visitor.findings)
+    for rule, cnt in (total_counts - handled_counts).items():
+        for _ in range(max(0, cnt)):
+            active.append(rule)
+
+    return active, suppressed
 
 
 def _collect_strings_for_egress_scan(
@@ -1067,20 +1259,33 @@ def _scan_outbound_secret_egress(
     return sorted(matched_types)
 
 
-def _detect_secret_leaks(lines: Sequence[str]) -> List[str]:
+def _detect_secret_leaks(
+    lines: Sequence[str],
+    suppressed_out: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Detect hardcoded API tokens, PEM private keys, and literal credential assignments."""
-    for ln in lines:
+    for idx, ln in enumerate(lines, start=1):
         stripped = ln.strip()
         if not stripped:
             continue
-        for pat in _SECRET_TOKEN_REGEXES:
-            if pat.search(stripped):
-                return ["secret_leak_pattern_found"]
-        match = _SECRET_ASSIGN_RE.search(stripped)
-        if match:
-            val_lower = match.group(1).lower()
-            if not any(marker in val_lower for marker in _SECRET_PLACEHOLDER_MARKERS):
-                return ["secret_leak_pattern_found"]
+        matched_secret = any(pat.search(stripped) for pat in _SECRET_TOKEN_REGEXES)
+        if not matched_secret:
+            match = _SECRET_ASSIGN_RE.search(stripped)
+            if match:
+                val_lower = match.group(1).lower()
+                if not any(marker in val_lower for marker in _SECRET_PLACEHOLDER_MARKERS):
+                    matched_secret = True
+        if matched_secret:
+            supp = _parse_inline_suppression(ln)
+            if supp is not None and _suppression_matches(supp[0], "secret_leak_pattern_found"):
+                if suppressed_out is not None:
+                    suppressed_out.append({
+                        "rule": "secret_leak_pattern_found",
+                        "line": idx,
+                        "reason": supp[1],
+                    })
+                continue
+            return ["secret_leak_pattern_found"]
     return []
 
 
@@ -1297,6 +1502,8 @@ def analyze_code_diff(
             "syntax_valid": True,
             "security_clean": True,
             "findings": [],
+            "finding_severities": {},
+            "suppressed_findings": [],
             "interface_hazards": [],
             "line_count": 0,
             "ast_nodes": [],
@@ -1353,7 +1560,8 @@ def analyze_code_diff(
         secret_scan_lines = [l[1:] for l in raw_lines if l.startswith("+") and not l.startswith("+++")]
     else:
         secret_scan_lines = dedented.splitlines()
-    secret_findings = _detect_secret_leaks(secret_scan_lines)
+    suppressed_findings: List[Dict[str, Any]] = []
+    secret_findings = _detect_secret_leaks(secret_scan_lines, suppressed_out=suppressed_findings)
 
     # Non-Python files: skip Python ast.parse and validate format appropriately
     if ext == ".json":
@@ -1361,13 +1569,19 @@ def analyze_code_diff(
             json.loads(dedented)
             json_ok = True
         except Exception:
-            json_ok = ('"' in dedented and ":" in dedented) or dedented.strip().startswith(("{", "["))
+            json_ok = bool(has_unified and (('"' in dedented and ":" in dedented) or dedented.strip().startswith(("{", "["))))
         findings = ([] if json_ok else ["malformed_json_hunk"]) + secret_findings
+        dedup_json_findings = list(dict.fromkeys(findings))
         return {
             "language": "json",
             "syntax_valid": json_ok,
             "security_clean": len(secret_findings) == 0,
-            "findings": list(dict.fromkeys(findings)),
+            "findings": dedup_json_findings,
+            "finding_severities": {
+                f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+                for f in dedup_json_findings
+            },
+            "suppressed_findings": list(suppressed_findings),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1411,6 +1625,11 @@ def analyze_code_diff(
             "syntax_valid": True,
             "security_clean": len(sh_diff_findings) == 0,
             "findings": sh_diff_findings,
+            "finding_severities": {
+                f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+                for f in sh_diff_findings
+            },
+            "suppressed_findings": list(suppressed_findings),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1464,6 +1683,11 @@ def analyze_code_diff(
             "syntax_valid": syntax_valid,
             "security_clean": len(non_py_findings) == 0,
             "findings": non_py_findings,
+            "finding_severities": {
+                f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+                for f in non_py_findings
+            },
+            "suppressed_findings": list(suppressed_findings),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1496,6 +1720,8 @@ def analyze_code_diff(
                     "syntax_valid": False,
                     "security_clean": False,
                     "findings": [edit_err],
+                    "finding_severities": {edit_err: "critical"},
+                    "suppressed_findings": list(suppressed_findings),
                     "interface_hazards": [],
                     "line_count": line_count,
                     "ast_nodes": [],
@@ -1513,11 +1739,17 @@ def analyze_code_diff(
         try:
             patched_tree = ast.parse(patched_source)
         except SyntaxError:
+            syn_findings = list(dict.fromkeys(list(secret_findings) + ["syntax_tree_malformed", "patched_file_syntax_error"]))
             return {
                 "language": "python",
                 "syntax_valid": False,
-                "security_clean": False,
-                "findings": ["syntax_tree_malformed", "patched_file_syntax_error"],
+                "security_clean": len(secret_findings) == 0,
+                "findings": syn_findings,
+                "finding_severities": {
+                    f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+                    for f in syn_findings
+                },
+                "suppressed_findings": list(suppressed_findings),
                 "interface_hazards": [],
                 "line_count": line_count,
                 "ast_nodes": [],
@@ -1527,23 +1759,28 @@ def analyze_code_diff(
                 "patched_file_ast_verified": True,
             }
 
-    tree = _parse_python_with_context(dedented)
+    tree, tree_source_text = _parse_python_with_context_and_source(dedented)
     if tree is None and has_unified and hunks:
         # Multi-hunk unified diff without full file: parse each @@ hunk independently
         parsed_bodies: List[ast.stmt] = []
+        combined_hunk_lines: List[str] = []
         all_hunks_ok = True
         for h_lines in hunks:
             h_text = textwrap.dedent("\n".join(h_lines)).strip("\n")
             if not h_text.strip():
                 continue
-            h_tree = _parse_python_with_context(h_text)
+            h_tree, h_src = _parse_python_with_context_and_source(h_text)
             if h_tree is None:
                 all_hunks_ok = False
                 break
             if isinstance(h_tree, ast.Module):
+                if combined_hunk_lines:
+                    ast.increment_lineno(h_tree, len(combined_hunk_lines))
                 parsed_bodies.extend(h_tree.body)
+                combined_hunk_lines.extend(h_src.splitlines())
         if all_hunks_ok and parsed_bodies:
             tree = ast.Module(body=parsed_bodies, type_ignores=[])
+            tree_source_text = "\n".join(combined_hunk_lines)
     if tree is None and has_unified:
         # Fallback 1: synthetic unified diffs where context lines omit the 1-space diff prefix
         unshifted = "\n".join(
@@ -1552,21 +1789,22 @@ def analyze_code_diff(
             if not (l.startswith(_GIT_META_PREFIXES) or l.startswith("-"))
         )
         if unshifted.strip():
-            tree = _parse_python_with_context(textwrap.dedent(unshifted).strip("\n"))
+            tree, tree_source_text = _parse_python_with_context_and_source(textwrap.dedent(unshifted).strip("\n"))
     if tree is None and has_unified:
         # Fallback 2: parse added '+' lines only when they are self-contained statements (not dangling block headers)
         added_only = "\n".join(l[1:] for l in raw_lines if l.startswith("+") and not l.startswith("+++"))
         added_dedented = textwrap.dedent(added_only).strip("\n")
         if added_dedented.strip() and not added_dedented.rstrip().endswith(":"):
-            tree = _parse_python_with_context(added_dedented)
+            tree, tree_source_text = _parse_python_with_context_and_source(added_dedented)
     if tree is None and patched_tree is not None:
         tree = patched_tree
+        tree_source_text = patched_source or ""
     elif tree is None and resolved_source:
         combined = resolved_source.rstrip("\n") + "\n" + textwrap.indent(dedented, "    ")
-        tree = _parse_python_with_context(combined)
+        tree, tree_source_text = _parse_python_with_context_and_source(combined)
         if tree is None:
             combined_top = resolved_source.rstrip("\n") + "\n" + dedented
-            tree = _parse_python_with_context(combined_top)
+            tree, tree_source_text = _parse_python_with_context_and_source(combined_top)
         if tree is not None:
             context_ast_parsed = True
 
@@ -1579,23 +1817,30 @@ def analyze_code_diff(
             s_ln = ln.strip()
             if not s_ln or s_ln.startswith("#"):
                 continue
-            lt = _parse_python_with_context(s_ln)
+            lt, lsrc = _parse_python_with_context_and_source(s_ln)
             if lt is not None:
                 lv = _SecurityASTVisitor()
                 lv.visit(lt)
-                line_findings.extend(lv.findings)
+                l_active, _ = _partition_suppressed_ast_findings(lv, lsrc)
+                line_findings.extend(l_active)
         line_findings = list(dict.fromkeys(line_findings))
         explicit_bad_syntax = any(
             re.match(r"^\s*(?:def|class)\s+[A-Za-z_]\w*\s*\([^)]*:\s*$", ln)
             for ln in added_lines_text
         )
         partial_needs_source = bool(has_unified and not resolved_source and not explicit_bad_syntax and not line_findings)
+        malformed_findings = list(dict.fromkeys(line_findings + ["syntax_tree_malformed"]))
         return {
             "language": "python",
             "syntax_valid": False,
             "partial_hunk_needs_source": partial_needs_source,
             "security_clean": len(line_findings) == 0,
-            "findings": list(dict.fromkeys(line_findings + ["syntax_tree_malformed"])),
+            "findings": malformed_findings,
+            "finding_severities": {
+                f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+                for f in malformed_findings
+            },
+            "suppressed_findings": list(suppressed_findings),
             "interface_hazards": [],
             "line_count": line_count,
             "ast_nodes": [],
@@ -1607,6 +1852,7 @@ def analyze_code_diff(
 
     hunk_findings: List[str] = []
     structural_findings: List[Dict[str, Any]] = []
+    tree_supp: List[Dict[str, Any]] = []
     if tree is not None and tree is not patched_tree:
         visitor = _SecurityASTVisitor()
         if seed_visitor is not None:
@@ -1614,10 +1860,11 @@ def analyze_code_diff(
             visitor.dangerous_aliases.update(seed_visitor.dangerous_aliases)
             visitor.decoded_vars.update(seed_visitor.decoded_vars)
         visitor.visit(tree)
-        hunk_findings.extend(visitor.findings)
+        tree_active, tree_supp = _partition_suppressed_ast_findings(visitor, tree_source_text)
+        hunk_findings.extend(tree_active)
         structural_findings.extend(visitor.structural_findings)
         if visitor.has_network_sink and (
-            visitor.has_env_secret_read or any("ast_protected_file_access" in f for f in visitor.findings)
+            visitor.has_env_secret_read or any("ast_protected_file_access" in f for f in tree_active)
         ):
             hunk_findings.append("ast_secret_exfil_pattern")
 
@@ -1629,15 +1876,33 @@ def analyze_code_diff(
             or any("ast_protected_file_access" in f for f in patched_visitor.findings)
         ):
             patched_visitor.findings.append("ast_secret_exfil_pattern")
-        baseline_counts = Counter(seed_visitor.findings) if seed_visitor is not None else Counter()
-        delta_counts = Counter(patched_visitor.findings) - baseline_counts
+        seed_active: List[str] = []
+        seed_supp: List[Dict[str, Any]] = []
+        if seed_visitor is not None and resolved_source is not None:
+            seed_active, seed_supp = _partition_suppressed_ast_findings(seed_visitor, resolved_source)
+        patched_active, patched_supp = _partition_suppressed_ast_findings(patched_visitor, patched_source or "")
+        baseline_counts = Counter(seed_active)
+        delta_counts = Counter(patched_active) - baseline_counts
         for finding, cnt in delta_counts.items():
             if cnt > 0:
                 hunk_findings.append(finding)
+        seed_supp_counts = Counter((s["rule"], s["reason"]) for s in seed_supp)
+        for s_item in patched_supp:
+            key = (s_item["rule"], s_item["reason"])
+            if seed_supp_counts[key] > 0:
+                seed_supp_counts[key] -= 1
+            else:
+                suppressed_findings.append(s_item)
         if not structural_findings:
             structural_findings.extend(patched_visitor.structural_findings)
+    elif tree_supp:
+        suppressed_findings.extend(tree_supp)
 
     all_findings = list(dict.fromkeys(hunk_findings + secret_findings))
+    finding_severities = {
+        f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
+        for f in all_findings
+    }
     interface_hazards = _detect_interface_hazards(raw_lines, analysis_tree) if has_unified else []
 
     if patched_source is not None and resolved_source:
@@ -1697,6 +1962,8 @@ def analyze_code_diff(
         "syntax_valid": True,
         "security_clean": len(all_findings) == 0,
         "findings": all_findings,
+        "finding_severities": finding_severities,
+        "suppressed_findings": suppressed_findings,
         "interface_hazards": clean_hazards,
         "line_count": line_count,
         "ast_nodes": ast_nodes,
@@ -1799,6 +2066,10 @@ def _split_command_pipeline_blocks(cmd: str) -> List[str]:
                 blocks.append("".join(curr).strip())
                 curr = []
                 i += 2
+            elif ch == "&" and not cmd.startswith("&>", i) and not (i > 0 and cmd[i - 1] in (">", "<", "|")):
+                blocks.append("".join(curr).strip())
+                curr = []
+                i += 1
             elif ch in (";", "\n", "\r"):
                 blocks.append("".join(curr).strip())
                 curr = []
@@ -1895,6 +2166,10 @@ SAFE_DEV_GIT_SUBCOMMANDS: Set[str] = {
 _SAFE_ANALYTICAL_TOOLS: Set[str] = {
     "grep", "rg", "wc", "sort", "uniq", "head", "tail", "cat", "column", "cut", "tr", "jq", "yq", "file",
 }
+_FILE_READING_SHELL_COMMANDS: Set[str] = {
+    "cat", "head", "tail", "less", "more", "bat", "wc", "sort", "uniq",
+    "cut", "jq", "yq", "file", "ls", "find", "grep", "egrep", "fgrep", "rg",
+}
 
 _SHELL_WRAPPER_COMMANDS: Set[str] = {
     "env", "command", "nohup", "nice", "timeout", "time", "sudo", "doas", "exec", "strace", "xargs",
@@ -1904,7 +2179,7 @@ _DANGEROUS_ENV_OVERRIDES: Set[str] = {
     "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
 }
 _SHELL_MUTATING_COMMANDS: Set[str] = {
-    "rm", "mv", "cp", "chmod", "chown", "sed", "awk", "perl", "tee",
+    "rm", "mv", "cp", "chmod", "chown", "tee",
     "truncate", "shred", "dd", "ln", "touch", "del", "erase", "rmdir", "rd",
 }
 _SHELL_SECRET_EGRESS_COMMANDS: Set[str] = {
@@ -1913,15 +2188,38 @@ _SHELL_SECRET_EGRESS_COMMANDS: Set[str] = {
     "invoke-webrequest", "invoke-restmethod", "write-output", "write-host",
 }
 _SENSITIVE_ENV_VAR_RE = re.compile(
-    r"(?i)(?:^|_)(?:"
+    r"(?i)(?:(?:^|_)(?:"
     r"SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY|API_KEY|PRIVATE_KEY|"
-    r"ACCESS_KEY|CLIENT_SECRET|AUTH_TOKEN|AUTH_HEADER|BEARER|JWT|SESSION_TOKEN|"
+    r"ACCESS_KEY|ACCESS_KEY_ID|CLIENT_SECRET|AUTH_TOKEN|AUTH_HEADER|BEARER|JWT|SESSION_TOKEN|"
     r"BOT_TOKEN|SIGNING_KEY|ENCRYPTION_KEY|MASTER_KEY|DATABASE_URL|DB_PASSWORD|"
-    r"DB_PASS|REDIS_URL|STRIPE_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|"
+    r"DB_PASS|REDIS_URL|REDIS_PASSWORD|PGPASSWORD|PGPASSFILE|MYSQL_PWD|STRIPE_KEY|"
+    r"OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|AWS_ACCESS_KEY_ID|"
     r"AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|GITLAB_TOKEN|"
-    r"HF_TOKEN|NPM_TOKEN|PYPI_TOKEN|API_SECRET|SECRET_KEY"
-    r")(?:$|_)"
+    r"HF_TOKEN|NPM_TOKEN|PYPI_TOKEN|VAULT_TOKEN|CI_JOB_TOKEN|API_SECRET|SECRET_KEY"
+    r")(?:$|_)|(?:PASSWORD|PASSWD)$)"
 )
+
+
+def _is_inplace_mutating_text_tool(exe: str, args: List[str]) -> bool:
+    """Return True only when sed/perl/awk are invoked with in-place write/execution flags."""
+    if exe == "sed":
+        return any(a == "-i" or a.startswith("-i") or a == "--in-place" or a.startswith("--in-place=") for a in args)
+    if exe == "perl":
+        return any(
+            a == "-i" or a.startswith("-i") or (a.startswith("-") and not a.startswith("--") and "i" in a[1:])
+            for a in args
+        )
+    if exe in {"awk", "gawk", "mawk", "nawk"}:
+        for idx, a in enumerate(args):
+            a_low = a.lower()
+            if a_low.startswith("-iinplace"):
+                return True
+            if a_low == "-i" and idx + 1 < len(args) and args[idx + 1].lower() == "inplace":
+                return True
+            if not a.startswith("-") and ("system(" in a or ">" in a):
+                return True
+        return False
+    return False
 _PROC_ENVIRON_RE = re.compile(r"(?:^|/)proc/(?:self|thread-self|\d+)/environ(?:$|/)", re.IGNORECASE)
 _ENV_ASSIGN_TOKEN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
@@ -1976,7 +2274,7 @@ def _has_unsafe_shell_metachar(cmd: str) -> Optional[str]:
 
 
 def _extract_shell_redirections(cmd: str) -> List[Dict[str, str]]:
-    """Extract unquoted output redirections (`>`, `>>`, `2>&1`, `>(...)`) from a shell string."""
+    """Extract unquoted redirections and process substitutions (`>`, `>>`, `2>&1`, `>(...)`, `<(...)`)."""
     redirs: List[Dict[str, str]] = []
     in_single = False
     in_double = False
@@ -2000,6 +2298,14 @@ def _extract_shell_redirections(cmd: str) -> List[Dict[str, str]]:
             continue
         if ch == '"' and not in_single:
             in_double = not in_double
+            i += 1
+            continue
+
+        if not in_single and not in_double and ch == "<":
+            if i + 1 < n and cmd[i + 1] == "(":
+                redirs.append({"kind": "process_substitution", "target": ""})
+                i += 2
+                continue
             i += 1
             continue
 
@@ -2116,13 +2422,54 @@ def _is_privileged_or_unsafe_redirect_target(target: str) -> bool:
     return False
 
 
+def _is_safe_dev_pkg_command(exe: str, args_lower: List[str]) -> bool:
+    """Reject untrusted VCS/URL/editable/global installs so they escalate even in dev profile."""
+    if exe == "pip":
+        for a in args_lower:
+            if a in {"-e", "--editable", "--index-url", "-i", "--extra-index-url", "--find-links", "-f", "--trusted-host"}:
+                return False
+            if a.startswith(("git+", "hg+", "svn+", "bzr+", "http://", "https://", "ssh://", "file://", "--index-url=", "--extra-index-url=", "--find-links=", "--trusted-host=")):
+                return False
+        return True
+    if exe in {"npm", "pnpm", "yarn"}:
+        if args_lower and args_lower[0] in {"exec", "dlx", "publish", "login", "adduser", "owner", "token"}:
+            return False
+        for a in args_lower:
+            if a in {"-g", "--global", "global", "--registry"}:
+                return False
+            if a.startswith(("git+", "http://", "https://", "github:", "file:", "--registry=")):
+                return False
+        return True
+    return True
+
+
 def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Strict Layer 1 allowlist check for a parsed command executable and its arguments."""
     cfg = policy or DEFAULT_POLICY
     is_dev = getattr(cfg, "profile", "strict") == "dev"
     args_lower = [a.lower() for a in args]
     if exe in SAFE_SHELL_COMMANDS:
-        if exe == "find" and any(a in {"-exec", "-execdir", "-ok", "-okdir", "-delete"} for a in args_lower):
+        if exe == "find" and any(
+            a in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
+            for a in args_lower
+        ):
+            return False
+        if exe == "rg" and any(
+            a in {"--pre", "--pre-glob"} or a.startswith(("--pre=", "--pre-glob="))
+            for a in args_lower
+        ):
+            return False
+        if exe == "sort" and any(
+            a in {"--compress-program", "-o", "--output", "--files0-from"}
+            or a.startswith(("--compress-program=", "--output=", "--files0-from="))
+            or (a.startswith("-o") and len(a) > 2)
+            for a in args_lower
+        ):
+            return False
+        if exe == "yq" and any(
+            a in {"-i", "--inplace"} or a.startswith("--inplace=")
+            for a in args_lower
+        ):
             return False
         if exe == "pytest" and "--capture=sys" in args_lower:
             return True
@@ -2132,21 +2479,61 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             # In dev profile, rm is only allowed for non-recursive single files
             has_rec = any(a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a)) for a in args)
             return not has_rec
+        if exe in {"pip", "npm", "pnpm", "yarn"}:
+            return _is_safe_dev_pkg_command(exe, args_lower)
         return True
     if exe == "git":
         if not args_lower:
             return True
         if any(a == "-c" or a.startswith("--exec") or a == "--ext-diff" for a in args_lower):
             return False
-        if args_lower[0] in SAFE_GIT_SUBCOMMANDS:
+        subcmd = args_lower[0]
+        if subcmd == "branch":
+            for raw_a in args[1:]:
+                low_a = raw_a.lower()
+                if low_a in {"-d", "--delete", "-f", "--force", "-m", "--move", "-c", "--copy", "--unset-upstream", "--edit-description"}:
+                    return False
+                if low_a.startswith("--set-upstream-to"):
+                    return False
+                if raw_a.startswith("-") and not raw_a.startswith("--") and any(ch in raw_a[1:] for ch in "dDfmMcC"):
+                    return False
+            if not is_dev:
+                list_flags = {"-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"}
+                has_non_flag = any(not a.startswith("-") for a in args[1:])
+                has_list_flag = any(a.lower() in list_flags or a.lower().startswith(("--contains=", "--merged=", "--points-at=")) for a in args[1:])
+                if has_non_flag and not has_list_flag:
+                    return False
             return True
-        if is_dev and args_lower[0] in SAFE_DEV_GIT_SUBCOMMANDS:
-            # git clean in dev profile must not allow destructive flags (-f, -d, -x, -X) which delete untracked/ignored files
-            if args_lower[0] == "clean":
+        if subcmd in SAFE_GIT_SUBCOMMANDS:
+            return True
+        if is_dev and subcmd in SAFE_DEV_GIT_SUBCOMMANDS:
+            if subcmd == "clean":
                 if any(a.startswith("-") and not a.startswith("--") and any(ch in a for ch in "fdxX") for a in args_lower[1:]):
                     return False
                 if any(a in {"--force", "-f", "-d", "-x", "-X"} for a in args_lower[1:]):
                     return False
+            elif subcmd == "checkout":
+                for low_a in args_lower[1:]:
+                    if low_a in {"--", ".", "./", "-f", "--force", "--ours", "--theirs"}:
+                        return False
+                    if low_a.startswith("-") and not low_a.startswith("--") and "f" in low_a[1:]:
+                        return False
+            elif subcmd == "switch":
+                for raw_a in args[1:]:
+                    low_a = raw_a.lower()
+                    if low_a in {"-f", "--force", "--discard-changes"} or raw_a == "-C":
+                        return False
+                    if raw_a.startswith("-") and not raw_a.startswith("--") and ("f" in raw_a[1:] or "C" in raw_a[1:]):
+                        return False
+            elif subcmd == "stash":
+                if len(args_lower) >= 2 and args_lower[1] in {"drop", "clear"}:
+                    return False
+            elif subcmd == "tag":
+                for low_a in args_lower[1:]:
+                    if low_a in {"-d", "--delete", "-f", "--force"}:
+                        return False
+                    if low_a.startswith("-") and not low_a.startswith("--") and ("d" in low_a[1:] or "f" in low_a[1:]):
+                        return False
             return True
         return False
     if exe in {"python", "python3"}:
@@ -2163,7 +2550,7 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                 return True
             if mod_target == "pip" or mod_target.startswith("pip."):
                 if is_dev and mod_target == "pip":
-                    return True
+                    return _is_safe_dev_pkg_command("pip", args_lower[2:])
                 # Read-only pip introspection is safe in any profile; anything else stays dev-only.
                 sub = args_lower[2] if len(args_lower) > 2 else ""
                 return sub in {"show", "list", "--version"}
@@ -2182,9 +2569,14 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
 
 
 def _extract_unquoted_env_vars(cmd: str) -> List[str]:
-    """Extract environment variable names expanded outside single quotes (`$VAR`, `${VAR}`, `$env:VAR`, `%VAR%`)."""
+    """Extract environment variable names expanded outside single quotes (`$VAR`, `${VAR}`, `$env:VAR`, `%VAR%`).
+
+    Properly tracks double quotes so apostrophes inside double quotes (e.g. `"it's $GITHUB_TOKEN"`)
+    do not falsely suppress variable extraction.
+    """
     found: List[str] = []
     in_single = False
+    in_double = False
     escaped = False
     i = 0
     n = len(cmd)
@@ -2194,12 +2586,22 @@ def _extract_unquoted_env_vars(cmd: str) -> List[str]:
             escaped = False
             i += 1
             continue
-        if ch == "\\" and not in_single:
-            escaped = True
+        if in_single:
+            if ch == "'":
+                in_single = False
             i += 1
             continue
-        if ch == "'":
-            in_single = not in_single
+        if ch == "\\" and not in_single:
+            if not in_double or (i + 1 < n and cmd[i + 1] in ('"', "\\", "$", "`", "\n")):
+                escaped = True
+                i += 1
+                continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            in_single = True
             i += 1
             continue
         if not in_single:
@@ -2239,8 +2641,16 @@ def _extract_unquoted_env_vars(cmd: str) -> List[str]:
     return found
 
 
-def _expand_bash_braces(text: str) -> List[str]:
-    """Expand bash-style brace expansions like `{a,b}`, `prefix{1,2}`, or `{.env,.npmrc}`."""
+def _expand_bash_braces(
+    text: str,
+    *,
+    max_results: int = 64,
+    _depth: int = 0,
+    _max_depth: int = 4,
+) -> List[str]:
+    """Expand bash-style brace expansions with bounded recursion and range size."""
+    if _depth >= _max_depth:
+        return [text]
     m = re.search(r"\{([^{}]+)\}", text)
     if not m:
         return [text]
@@ -2250,6 +2660,8 @@ def _expand_bash_braces(text: str) -> List[str]:
             parts = options[0].split("..")
             if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                 start, end = int(parts[0]), int(parts[1])
+                if abs(end - start) + 1 > max_results:
+                    return [text]
                 step = 1 if start <= end else -1
                 options = [str(i) for i in range(start, end + step, step)]
             else:
@@ -2260,7 +2672,15 @@ def _expand_bash_braces(text: str) -> List[str]:
     suffix = text[m.end():]
     results: List[str] = []
     for opt in options:
-        results.extend(_expand_bash_braces(prefix + opt + suffix))
+        for exp in _expand_bash_braces(
+            prefix + opt + suffix,
+            max_results=max_results,
+            _depth=_depth + 1,
+            _max_depth=_max_depth,
+        ):
+            results.append(exp)
+            if len(results) >= max_results:
+                return results
     return results
 
 
@@ -2456,6 +2876,44 @@ def _unwrap_shell_prefix(tokens: List[str]) -> Tuple[List[str], List[str], List[
     return tokens[idx:], wrappers_seen, wrapper_findings, bare_env_dump, had_inline_env
 
 
+_CRITICAL_RM_PREFIXES: Tuple[str, ...] = (
+    "/etc", "/var", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/root",
+    "/sys", "/proc", "/dev", "/opt", "/home", "/users",
+    "c:/windows", "c:/program files", "c:/users",
+)
+
+
+def _is_destructive_rm_target(arg: str, policy: Optional[PolicyConfig] = None) -> bool:
+    """Return True for root/system/home/repo-metadata/traversal targets that must hard-deny under `rm -rf`."""
+    norm = str(arg or "").replace("\\", "/").strip().lower()
+    if not norm:
+        return False
+    exact_danger = {
+        "/", "/*", "~", "~/", "$home", "*", "..", "c:", "c:/",
+        "/tmp", "/tmp/", "/tmp/*",
+        "/var/tmp", "/var/tmp/", "/var/tmp/*",
+        "/private/tmp", "/private/tmp/", "/private/tmp/*",
+        ".git", ".git/", "./.git", "./.git/",
+    }
+    if norm in exact_danger or norm.rstrip("/").endswith("/.git"):
+        return True
+    if norm.startswith("~/") or ".." in [seg for seg in norm.split("/") if seg]:
+        return True
+    # Concrete scratch subdirectories inside /tmp/ /var/tmp/ /private/tmp/ escalate instead of hard-denying
+    for tmp_pref in ("/tmp/", "/var/tmp/", "/private/tmp/"):
+        if norm.startswith(tmp_pref):
+            rest = norm[len(tmp_pref) :].strip("/")
+            if rest and not any(ch in rest for ch in ("*", "?", "[", "$")) and not is_protected_path(norm, policy=policy):
+                return False
+            return True
+    for pref in _CRITICAL_RM_PREFIXES:
+        if norm == pref or norm.startswith(pref + "/"):
+            return True
+    if norm.startswith("/") and len([seg for seg in norm.split("/") if seg]) <= 1:
+        return True
+    return is_protected_path(norm, policy=policy)
+
+
 def _split_shell_subcommands(cmd: str) -> List[str]:
     """Split shell command on separators (&&, ||, |&, ;, |, newline) outside quotes."""
     parts: List[str] = []
@@ -2499,6 +2957,10 @@ def _split_shell_subcommands(cmd: str) -> List[str]:
                 parts.append("".join(buf))
                 buf = []
                 i += 2
+            elif ch == "&" and not cmd.startswith("&>", i) and not (i > 0 and cmd[i - 1] in (">", "<", "|")):
+                parts.append("".join(buf))
+                buf = []
+                i += 1
             elif ch in (";", "|", "\n"):
                 parts.append("".join(buf))
                 buf = []
@@ -2551,19 +3013,37 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         }
     lower_cmd = cmd.lower()
 
-    # Check raw SQL destructive commands passed directly
+    # Check destructive SQL statements while avoiding false positives on quoted text inside echo/grep/rg
+    _SQL_TEXT_PRINT_CMDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg"}
     if re.search(r"\b(drop\s+database|truncate\s+table)\b", lower_cmd):
-        return {
-            "is_safe": False,
-            "allowlisted": False,
-            "unrecognized_commands": [],
-            "findings": ["destructive_sql_command"],
-            "commands": [cmd.split()[0].lower()],
-            "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
-            "protected_path_reads": [],
-            "sensitive_env_access": False,
-            "sensitive_env_vars": [],
-        }
+        is_destructive_sql = bool(re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", lower_cmd))
+        if not is_destructive_sql:
+            for seg in _split_shell_subcommands(cmd):
+                seg_low = seg.lower()
+                if not re.search(r"\b(drop\s+database|truncate\s+table)\b", seg_low):
+                    continue
+                if re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", seg_low):
+                    is_destructive_sql = True
+                    break
+                toks = _tokenize_shell_segment(seg)
+                prem, _, _, _, _ = _unwrap_shell_prefix(toks)
+                eff = prem or toks
+                seg_exe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com") if eff else ""
+                if seg_exe not in _SQL_TEXT_PRINT_CMDS:
+                    is_destructive_sql = True
+                    break
+        if is_destructive_sql:
+            return {
+                "is_safe": False,
+                "allowlisted": False,
+                "unrecognized_commands": [],
+                "findings": ["destructive_sql_command"],
+                "commands": [cmd.split()[0].lower()],
+                "risk_class": "IRREVERSIBLE_DESTRUCTIVE",
+                "protected_path_reads": [],
+                "sensitive_env_access": False,
+                "sensitive_env_vars": [],
+            }
 
     findings: List[str] = []
     meta_finding = _has_unsafe_shell_metachar(cmd)
@@ -2794,7 +3274,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     findings.append("shell_proc_environ_access")
                     break
                 if is_protected_path(cand, policy=policy):
-                    if exe in _SHELL_MUTATING_COMMANDS:
+                    if exe in _SHELL_MUTATING_COMMANDS or _is_inplace_mutating_text_tool(exe, args):
                         findings.append("shell_protected_path_mutation")
                     elif exe in _SHELL_SECRET_EGRESS_COMMANDS:
                         findings.append(f"shell_protected_path_egress:{exe}")
@@ -2802,7 +3282,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         protected_path_reads.append(cand)
                     break
 
-        # Detect unquoted shell variable expansions targeting secret/token names
+        # Detect unquoted shell variable expansions targeting secret/token names or file paths
         for var_name in _extract_unquoted_env_vars(sub):
             if _SENSITIVE_ENV_VAR_RE.search(var_name):
                 sensitive_env_vars.append(var_name)
@@ -2810,21 +3290,17 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     findings.append("shell_sensitive_env_exposure")
                 else:
                     sensitive_env_access = True
+            elif exe in _FILE_READING_SHELL_COMMANDS:
+                sensitive_env_access = True
 
         if exe == "rm":
             has_recursive = any(
                 a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a or "R" in a))
                 for a in args
             )
-            dangerous_targets = {"/", "/*", "~", "~/", "$home", "*", "..", "c:\\", "c:/"}
             targets_danger = any(
-                a in dangerous_targets
-                or a.startswith("~/")
-                or a.startswith("/dev/")
-                or a.startswith("/etc")
-                or (a.startswith("/") and len([seg for seg in a.split("/") if seg]) <= 2)
-                or ".." in a.replace("\\", "/").split("/")
-                for a in args_lower
+                _is_destructive_rm_target(a, policy=policy)
+                for a in args
                 if not a.startswith("-")
             )
             if has_recursive and targets_danger:
@@ -3007,12 +3483,7 @@ def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] 
     _DECISION_RING_BUFFER.append(sanitized)
     target = journal_path or DEFAULT_JOURNAL_PATH
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        is_new = not target.exists()
-        with open(target, "a", encoding="utf-8") as f:
-            f.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
-        if is_new and os.name != "nt":
-            os.chmod(target, 0o600)
+        append_jsonl_bounded(target, json.dumps(sanitized, ensure_ascii=False))
         return {"written": True, "path": str(target), "error": None}
     except Exception as exc:
         err_str = redact_secrets(f"{type(exc).__name__}:{exc}")
@@ -3052,14 +3523,11 @@ def _is_agent_control_plane_path(path_str: str) -> bool:
     return any(seg in _AGENT_CONTROL_PLANE_SEGMENTS for seg in norm_segments)
 
 
-_DEV_ESCALATE_ONLY_AST_FINDINGS: Set[str] = {
-    "subprocess_call:run",
-    "subprocess_call:Popen",
-    "subprocess_call:call",
-    "subprocess_call:check_output",
-    "subprocess_call:check_call",
-    "dangerous_os_call:os.remove",
-    "dangerous_os_call:os.unlink",
+_VERIFIED_SHELL_TOOLS: Set[str] = {
+    "run_command", "execute_shell", "run_tests", "pytest_runner", "git_commit",
+}
+_VERIFIED_EDIT_WRITE_TOOLS: Set[str] = {
+    "write_file", "repo_write", "edit_file", "str_replace_editor", "apply_patch", "format_code",
 }
 
 
@@ -3096,6 +3564,12 @@ def decide(
         query_text = str(input_data.get("query") or input_data.get("task_prompt") or "")
         original_source = input_data.get("file_content") or ctx.get("file_content")
         edit_ops = input_data.get("edit_ops")
+        if edit_ops is None and isinstance(input_data.get("old_string"), str) and input_data.get("old_string") and "new_string" in input_data:
+            edit_ops = [{
+                "old_string": input_data["old_string"],
+                "new_string": str(input_data.get("new_string") or ""),
+                "replace_all": bool(input_data.get("replace_all", False)),
+            }]
     else:
         tool_name = str(ctx.get("tool") or "")
         target_path = ctx.get("path")
@@ -3115,12 +3589,15 @@ def decide(
     should_log = bool(ctx.get("log_decisions", journal_path is not None))
 
     canonical_payload = json.dumps(
-        {"tool": tool_name, "path": target_path, "cmd": cmd_str, "diff": diff_text, "query": query_text},
+        input_data
+        if isinstance(input_data, dict)
+        else {"tool": tool_name, "path": target_path, "cmd": cmd_str, "diff": diff_text, "query": query_text},
         sort_keys=True,
         ensure_ascii=False,
         default=str,
     )
-    input_sha256 = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()[:16]
+    full_sha256 = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+    input_sha256 = full_sha256[:16]
 
     clean_tool = str(tool_name or "").strip().lower()
     inferred_risk = TOOL_RISK_CLASSES.get(
@@ -3129,6 +3606,7 @@ def decide(
     )
 
     diff_structural_context: List[Dict[str, Any]] = []
+    diff_suppressed_findings: List[Dict[str, Any]] = []
     pending_taint_record: Optional[Tuple[Any, str, str, bool]] = None
 
     def _tail_journal_recent(path: Path, limit: int = 12) -> List[Dict[str, Any]]:
@@ -3222,6 +3700,7 @@ def decide(
             "rules_version": RULES_VERSION,
             "latency_ms": latency_ms,
             "input_sha256": input_sha256,
+            "input_sha256_full": full_sha256,
             "shadow_mode": shadow_mode,
             "upper_error_bound": active_upper_bound,
             "upper_error_bound_95": upper_error_bound_95,
@@ -3251,6 +3730,9 @@ def decide(
             elif reason_code == "layer1_ast_dev_escalate":
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Process or filesystem call ({label}) in dev profile requires confirmation."
+            elif reason_code == "layer1_ast_suppressed_escalate":
+                risk_lvl = "MEDIUM"
+                risk_assess = f"Inline-suppressed AST finding ({label}) requires human review in strict profile."
             elif reason_code.startswith("strict_ast_"):
                 risk_lvl = "MEDIUM"
                 risk_assess = f"Strict AST policy unapproved element: {label}"
@@ -3272,6 +3754,8 @@ def decide(
             t_sess.record_pre_tool(t_tool, t_path, t_prot)
         if diff_structural_context:
             out["structural_context"] = diff_structural_context
+        if diff_suppressed_findings:
+            out["suppressed_findings"] = list(diff_suppressed_findings)
         if shadow_mode:
             out["shadow_decision"] = decision
             out["shadow_reason_code"] = reason_code
@@ -3410,6 +3894,8 @@ def decide(
             )
             diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source, edit_ops=edit_ops)
             diff_structural_context.extend(diff_res.get("structural_context", []))
+            if diff_res.get("suppressed_findings"):
+                diff_suppressed_findings.extend(diff_res["suppressed_findings"])
             if not diff_res["security_clean"]:
                 if (
                     str(cfg.profile or "strict").strip().lower() == "dev"
@@ -3448,11 +3934,23 @@ def decide(
                         "layer1_strict_ast_allowlist_escalate",
                         1,
                     )
+            if diff_suppressed_findings and str(cfg.profile or "strict").strip().lower() != "dev":
+                return _finish(
+                    "escalate",
+                    f"suppressed:{diff_suppressed_findings[0]['rule']}",
+                    ["allow", "deny"],
+                    "layer1_ast_suppressed_escalate",
+                    1,
+                )
 
-        # Only allow at Layer 1 when the payload was actually inspected (cmd/diff)
-        # or the tool is an explicit READ_ONLY tool; uninspected/external tools escalate.
-        if tool_name and not query_text:
-            is_verified = bool(cmd_str) or (diff_text is not None) or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
+        # Named executable/unknown tools NEVER fall through to Layer 2 routing advice.
+        # Allow at Layer 1 ONLY for verified shell/edit tools with inspected payloads or explicit READ_ONLY tools.
+        if tool_name:
+            is_verified = (
+                (clean_tool in _VERIFIED_SHELL_TOOLS and bool(cmd_str))
+                or (clean_tool in _VERIFIED_EDIT_WRITE_TOOLS and diff_text is not None)
+                or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
+            )
             if is_verified:
                 ok_code = "layer1_hunk_only_checked" if hunk_only_checked else "layer1_structural_verified"
                 return _finish("allow", tool_name, [tool_name], ok_code, 1)

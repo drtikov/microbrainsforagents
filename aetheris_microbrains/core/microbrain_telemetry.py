@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .runtime_paths import get_state_dir
+
 log = logging.getLogger(__name__)
 
 
@@ -65,6 +67,7 @@ class DashboardReport:
     escalation_rate: float = 0.0
     local_error_rate: float = 0.0
     drift_detected: bool = False
+    conformal_pass_rate: float = 1.0
 
 
 class MicrobrainTelemetry:
@@ -73,9 +76,9 @@ class MicrobrainTelemetry:
     MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB rotation limit
 
     def __init__(self, log_path: Optional[Path] = None, dashboard_path: Optional[Path] = None):
-        mem_dir = Path(__file__).resolve().parents[1] / "memory"
-        self.log_path = log_path or (mem_dir / "microbrain_telemetry.jsonl")
-        self.dashboard_path = dashboard_path or (mem_dir / "microbrain_telemetry_dashboard.json")
+        state_dir = get_state_dir()
+        self.log_path = log_path or (state_dir / "microbrain_telemetry.jsonl")
+        self.dashboard_path = dashboard_path or (state_dir / "microbrain_telemetry_dashboard.json")
 
     def _rotate_if_needed(self, path: Path) -> None:
         """Rotate log file if size exceeds MAX_LOG_BYTES (10MB)."""
@@ -228,7 +231,8 @@ class MicrobrainTelemetry:
         ece = self.compute_ece(confidences, accuracies)
 
         conformal_passes = sum(1 for e in events if e.passed_conformal)
-        cov = conformal_passes / len(events)
+        pass_rate = conformal_passes / len(events)
+        cov = sum(1 for e in events if e.passed_conformal and e.verified_accurate) / len(events)
 
         ood_events = sum(1 for e in events if e.ood_score > 0.40)
         ood_ratio = ood_events / len(events)
@@ -256,7 +260,8 @@ class MicrobrainTelemetry:
             breakdown[dom] = {
                 "count": len(evts),
                 "mean_latency_ms": round(float(np.mean([e.latency_ms for e in evts])), 2),
-                "conformal_coverage": round(sum(1 for e in evts if e.passed_conformal) / len(evts), 3),
+                "conformal_coverage": round(sum(1 for e in evts if e.passed_conformal and e.verified_accurate) / len(evts), 3),
+                "conformal_pass_rate": round(sum(1 for e in evts if e.passed_conformal) / len(evts), 3),
                 "ece": round(self.compute_ece([e.confidence for e in evts], [e.verified_accurate for e in evts]), 4),
             }
 
@@ -267,6 +272,7 @@ class MicrobrainTelemetry:
             mean_latency_cpu_ms=round(float(np.mean(cpu_latencies)), 2) if cpu_latencies else 0.0,
             expected_calibration_error=round(ece, 4),
             conformal_empirical_coverage=round(cov, 4),
+            conformal_pass_rate=round(pass_rate, 4),
             ood_shift_ratio=round(ood_ratio, 4),
             domain_breakdown=breakdown,
             status=status,

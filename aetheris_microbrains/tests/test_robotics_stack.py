@@ -72,9 +72,12 @@ class TestMetricsHonesty:
         )
         assert 'domain="probe_domain_a"' in text
         assert "microbrain_telemetry_events_total 2" in text
-        # per-domain coverage should be 1.0 (both events passed conformal), not 0.985
-        line = [l for l in text.splitlines() if 'domain="probe_domain_a"' in l and "coverage" in l][0]
-        assert line.strip().endswith("1.0")
+        # per-domain verified coverage is 0.5 (1/2 passed conformal AND verified accurate);
+        # per-domain conformal gate pass rate is 1.0 (both events passed conformal), never hardcoded 0.985
+        cov_line = [l for l in text.splitlines() if 'domain="probe_domain_a"' in l and "microbrain_conformal_coverage" in l][0]
+        assert cov_line.strip().endswith("0.5")
+        pass_line = [l for l in text.splitlines() if 'domain="probe_domain_a"' in l and "microbrain_conformal_pass_rate" in l][0]
+        assert pass_line.strip().endswith("1.0")
 
     def test_dashboard_page_carries_demo_banner(self, monkeypatch, tmp_path):
         pytest.importorskip("fastapi")
