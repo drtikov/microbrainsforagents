@@ -21,6 +21,7 @@ python .claude/skills/microbrains/install_hook.py              # enforce mode (a
 python .claude/skills/microbrains/install_hook.py --shadow      # observe-only, never blocks
 python .claude/skills/microbrains/install_hook.py --strict-ast  # also allowlist dynamic calls/imports
 python .claude/skills/microbrains/install_hook.py --shared      # write portable config to .claude/settings.json
+python .claude/skills/microbrains/install_hook.py --auto-allow   # emit allow on safe verdicts (skips host prompts)
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
 ```
 
@@ -75,11 +76,21 @@ inj = mb.detect_prompt_injection(<tool_output_text>)           # returns dict: i
 scrubbed = mb.scrub_tool_output(<tool_output_text>)            # returns dict: secrets_found, secret_types, redacted_text
 ```
 
+### Advanced flags (hook.py)
+
+- `--host claude|codex|generic` - host contract (codex omits unsupported `ask`)
+- `--profile strict|dev` - policy profile (or `AETHERIS_PROFILE`)
+- `--policy <file>` - JSON/YAML PolicyConfig override (or `AETHERIS_POLICY_PATH`)
+- `--journal-path <file>` / `AETHERIS_JOURNAL_PATH` - decision journal location
+- `--session-state <file>` - cross-turn SessionSecurityState JSON
+- `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts
+
 ## Response contract
 
 - `allow` -> proceed normally.
 - `ask` (escalate) -> surface `reason` to the user and wait. Fail-closed: silence never grants permission.
 - `deny` -> do NOT retry the same call. Read `reason_code`, fix the root cause
   (syntax, secret, protected path, destructive command), then re-submit the fixed version.
-- Journal lives at `aetheris_microbrains/memory/decision_journal.jsonl`
-  (override with `AETHERIS_JOURNAL_PATH`). Never commit it.
+- Journal lives in the per-user state dir (`%LOCALAPPDATA%/aetheris-microbrains/decision_journal.jsonl`
+  on Windows, `~/.local/state/...` on Linux; base dir override `AETHERIS_STATE_DIR`, file override
+  `AETHERIS_JOURNAL_PATH`). Rotates to `.1` at 10 MiB. Never commit it.

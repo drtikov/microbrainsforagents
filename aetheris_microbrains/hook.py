@@ -136,7 +136,7 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tool_lower = tool_raw.lower()
     if tool_lower in {"bash", "shell", "execute_shell", "run_command", "terminal"}:
         tool_name = "execute_shell"
-    elif tool_lower in {"edit", "str_replace_editor", "edit_file", "multiedit"}:
+    elif tool_lower in {"edit", "str_replace_editor", "edit_file", "multiedit", "notebookedit"}:
         tool_name = "edit_file"
     elif tool_lower in {"write", "write_file", "repo_write"}:
         tool_name = "write_file"
@@ -151,8 +151,8 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     clean_name = tool_name.strip().lower()
     normalized: Dict[str, Any] = {"tool": tool_name}
-    if "file_path" in tool_input or "path" in tool_input:
-        normalized["path"] = tool_input.get("file_path") or tool_input.get("path")
+    if "file_path" in tool_input or "path" in tool_input or "notebook_path" in tool_input:
+        normalized["path"] = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
 
     # Only map shell command arguments to `cmd` when the tool itself is a known shell/exec tool
     if clean_name in _SHELL_CANONICAL_TOOLS and ("command" in tool_input or "cmd" in tool_input):
@@ -187,6 +187,8 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             diff = str(tool_input.get("new_string") or "")
         elif diff is None and "content" in tool_input and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}:
             diff = str(tool_input.get("content") or "")
+        elif diff is None and tool_lower == "notebookedit" and "new_source" in tool_input:
+            diff = str(tool_input.get("new_source") or "")
         if diff is not None:
             normalized["diff"] = diff
 

@@ -89,6 +89,14 @@ TOOL_RISK_CLASSES: Dict[str, str] = {
     "git_push": "IRREVERSIBLE_DESTRUCTIVE",
     "delete_file": "IRREVERSIBLE_DESTRUCTIVE",
     "drop_db": "IRREVERSIBLE_DESTRUCTIVE",
+    # Harness-native informational tools: no state mutation and no payload the
+    # AST/shell layers could inspect. Task/Agent sub-tool calls are gated when
+    # they execute; web tool outputs are scrubbed by the post-tool-use hook.
+    "webfetch": "READ_ONLY",
+    "websearch": "READ_ONLY",
+    "task": "READ_ONLY",
+    "agent": "READ_ONLY",
+    "todowrite": "READ_ONLY",
 }
 
 DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
@@ -2564,6 +2572,14 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             has_server = any(a in {"http.server", "http_server", "pydoc"} for a in args_lower)
             if not has_c_flag and not has_server:
                 return True
+        return False
+    if exe in {"pip", "pip3"}:
+        sub = args_lower[0] if args_lower else ""
+        if sub in {"show", "list", "--version"}:
+            # Read-only package introspection is safe in any profile.
+            return True
+        if is_dev:
+            return _is_safe_dev_pkg_command("pip", args_lower)
         return False
     return False
 

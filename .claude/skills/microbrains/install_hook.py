@@ -6,7 +6,7 @@ or `.claude/settings.json` (`--shared`) without clobbering unrelated configurati
 `--remove` strips only the aetheris hook entries.
 
 Usage:
-    python install_hook.py [--strict-ast] [--shadow] [--shared] [--remove]
+    python install_hook.py [--strict-ast] [--shadow] [--shared] [--auto-allow] [--remove]
 """
 
 from __future__ import annotations
@@ -32,12 +32,15 @@ def _hook_cmd(shared: bool, event_args: list[str], extra: list[str]) -> list[str
     return [py_tok, "-m", "aetheris_microbrains.hook", *event_args, *extra]
 
 
-def _hook_entry(cmd: list[str], timeout: int = 10) -> dict:
-    return {
+def _hook_entry(cmd: list[str], timeout: int = 10, is_async: bool = False) -> dict:
+    entry = {
         "type": "command",
         "command": " ".join(cmd),
         "timeout": timeout,
     }
+    if is_async:
+        entry["async"] = True
+    return entry
 
 
 def _is_aetheris_entry(entry: dict) -> bool:
@@ -55,6 +58,7 @@ def install(
     shadow: bool,
     shared: bool = False,
     settings_path: Path | None = None,
+    auto_allow: bool = False,
 ) -> int:
     target = settings_path or (SETTINGS_SHARED_PATH if shared else SETTINGS_LOCAL_PATH)
     settings: dict = {}
@@ -70,12 +74,14 @@ def install(
         extra.append("--strict-ast")
     if shadow:
         extra.append("--shadow")
+    if auto_allow:
+        extra.append("--auto-allow")
 
     hooks = settings.setdefault("hooks", {})
     pre = [e for e in hooks.get("PreToolUse", []) if not _is_aetheris_entry(e)]
-    pre.append({"matcher": "*", "hooks": [_hook_entry(_hook_cmd(shared, [], extra))]})
+    pre.append({"matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [_hook_entry(_hook_cmd(shared, [], extra))]})
     post = [e for e in hooks.get("PostToolUse", []) if not _is_aetheris_entry(e)]
-    post.append({"matcher": "*", "hooks": [_hook_entry(_hook_cmd(shared, ["--event", "post-tool-use"], extra))]})
+    post.append({"matcher": "Bash|WebFetch|WebSearch", "hooks": [_hook_entry(_hook_cmd(shared, ["--event", "post-tool-use"], extra), is_async=True)]})
     hooks["PreToolUse"] = pre
     hooks["PostToolUse"] = post
 
@@ -118,10 +124,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
     ap.add_argument("--shadow", action="store_true", help="Observe-only: log decisions, never block")
+    ap.add_argument("--auto-allow", action="store_true", help="Emit permissionDecision='allow' on safe verdicts (skips Claude Code prompts for gate-approved calls)")
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--remove", action="store_true", help="Uninstall the Aetheris hooks")
     args = ap.parse_args()
-    return remove(shared=args.shared) if args.remove else install(args.strict_ast, args.shadow, shared=args.shared)
+    return remove(shared=args.shared) if args.remove else install(args.strict_ast, args.shadow, shared=args.shared, auto_allow=args.auto_allow)
 
 
 if __name__ == "__main__":
