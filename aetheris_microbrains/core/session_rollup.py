@@ -280,6 +280,7 @@ class BootstrapAssembler:
         policy_slice: str = "",
         security_summary: str = "",
         open_blockers: Sequence[str] = (),
+        directives: Sequence[Dict[str, Any]] = (),
         recent_entries: Sequence[Dict[str, Any]] = (),
         token_budget: int = 24_000,
         chars_per_token: float = _DEFAULT_CHARS_PER_TOKEN,
@@ -313,6 +314,19 @@ class BootstrapAssembler:
         if open_blockers:
             blocker_text = "\n".join(f"- {b}" for b in open_blockers if str(b).strip())
             _try_add("Open Blockers", blocker_text)
+        if directives:
+            dir_lines: List[str] = []
+            for d in directives:
+                if not isinstance(d, dict):
+                    continue
+                did = str(d.get("directive_id") or d.get("id") or "directive").strip()
+                guidance = str(d.get("guidance") or "").strip()
+                if not guidance:
+                    continue
+                scope = str(d.get("scope_glob") or "*").strip()
+                dir_lines.append(f"- [{did} | scope={scope}] {guidance}")
+            if dir_lines:
+                _try_add("Active Directives", "\n".join(dir_lines))
 
         included_chronicle: List[str] = []
         chronicle_header = "## Recent Chronicle\n"
@@ -355,6 +369,7 @@ def assemble_bootstrap_context(
     policy_slice: str = "",
     security_summary: str = "",
     open_blockers: Sequence[str] = (),
+    directives: Sequence[Dict[str, Any]] = (),
     recent_entries: Sequence[Dict[str, Any]] = (),
     token_budget: int = 24_000,
     chars_per_token: float = _DEFAULT_CHARS_PER_TOKEN,
@@ -363,6 +378,7 @@ def assemble_bootstrap_context(
         policy_slice=policy_slice,
         security_summary=security_summary,
         open_blockers=open_blockers,
+        directives=directives,
         recent_entries=recent_entries,
         token_budget=token_budget,
         chars_per_token=chars_per_token,

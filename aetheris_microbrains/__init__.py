@@ -44,6 +44,16 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "format_entry": (".audit", "format_entry"),
     "build_friction_digest": (".audit", "build_friction_digest"),
     "FrictionDigestBuilder": (".audit", "FrictionDigestBuilder"),
+    # Policy governance, rule vitality, & directive vault
+    "RuleVitalityRecord": (".core.policy_governance", "RuleVitalityRecord"),
+    "RuleVitalityLedger": (".core.policy_governance", "RuleVitalityLedger"),
+    "GovernanceLedger": (".core.policy_governance", "GovernanceLedger"),
+    "verify_policy_patch": (".core.policy_governance", "verify_policy_patch"),
+    "synthesize_policy_candidates": (".core.policy_governance", "synthesize_policy_candidates"),
+    "PendingRuleQueue": (".core.policy_governance", "PendingRuleQueue"),
+    "evaluate_policy_candidate": (".core.policy_governance", "evaluate_policy_candidate"),
+    "DirectiveCard": (".core.directive_vault", "DirectiveCard"),
+    "DirectiveVault": (".core.directive_vault", "DirectiveVault"),
     # Context hygiene, economics, envelopes, chronicle, & tier ladder
     "HygieneConfig": (".core.context_hygiene", "HygieneConfig"),
     "HygieneVerdict": (".core.context_hygiene", "HygieneVerdict"),

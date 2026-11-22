@@ -411,6 +411,8 @@ class SessionSecurityState:
         self.taint_events: List[str] = []
         self.taint_artifacts: List[Dict[str, Any]] = []
         self.turn_count: int = 0
+        self.escalation_timestamps: List[float] = []
+        self.escalation_fingerprints: Dict[str, int] = {}
         if self.state_path is not None:
             self._load()
 
@@ -451,6 +453,15 @@ class SessionSecurityState:
             self.taint_events = [str(x) for x in raw_ev[-20:]] if isinstance(raw_ev, list) else []
             raw_art = data.get("taint_artifacts", [])
             self.taint_artifacts = [dict(x) for x in raw_art[-50:] if isinstance(x, dict)] if isinstance(raw_art, list) else []
+            raw_ts = data.get("escalation_timestamps", [])
+            self.escalation_timestamps = [float(x) for x in raw_ts[-50:] if isinstance(x, (int, float))] if isinstance(raw_ts, list) else []
+            raw_fp = data.get("escalation_fingerprints", {})
+            if isinstance(raw_fp, dict):
+                self.escalation_fingerprints = {
+                    str(k): int(v)
+                    for k, v in list(raw_fp.items())[-50:]
+                    if isinstance(v, (int, float)) and int(v) > 0
+                }
         except (json.JSONDecodeError, ValueError, OSError):
             self.corrupted = True
 
@@ -481,6 +492,17 @@ class SessionSecurityState:
                                 seen_art.add(key)
                                 merged_art.append(a)
                         self.taint_artifacts = merged_art[-50:]
+                        disk_ts = [float(x) for x in disk.get("escalation_timestamps", []) if isinstance(x, (int, float))] if isinstance(disk.get("escalation_timestamps"), list) else []
+                        self.escalation_timestamps = sorted(set(disk_ts + self.escalation_timestamps))[-50:]
+                        disk_fp = disk.get("escalation_fingerprints", {}) if isinstance(disk.get("escalation_fingerprints"), dict) else {}
+                        merged_fp: Dict[str, int] = {
+                            str(k): max(int(v or 0), int(self.escalation_fingerprints.get(str(k), 0)))
+                            for k, v in disk_fp.items()
+                            if isinstance(v, (int, float)) and int(v) > 0
+                        }
+                        for k, v in self.escalation_fingerprints.items():
+                            merged_fp[str(k)] = max(merged_fp.get(str(k), 0), int(v))
+                        self.escalation_fingerprints = dict(list(merged_fp.items())[-50:])
                 except (json.JSONDecodeError, ValueError, OSError):
                     self.corrupted = True
                     return
@@ -491,6 +513,8 @@ class SessionSecurityState:
                 "turn_count": self.turn_count,
                 "taint_events": self.taint_events[-20:],
                 "taint_artifacts": self.taint_artifacts[-50:],
+                "escalation_timestamps": self.escalation_timestamps[-50:],
+                "escalation_fingerprints": dict(list(self.escalation_fingerprints.items())[-50:]),
                 "updated_at": round(time.time(), 6),
             }
             _atomic_write_json(self.state_path, payload)
@@ -556,6 +580,8 @@ class SessionSecurityState:
         self.taint_events = []
         self.taint_artifacts = []
         self.turn_count = 0
+        self.escalation_timestamps = []
+        self.escalation_fingerprints = {}
         if self.state_path is not None:
             with self._state_lock():
                 _atomic_write_json(
@@ -567,9 +593,70 @@ class SessionSecurityState:
                         "turn_count": 0,
                         "taint_events": [],
                         "taint_artifacts": [],
+                        "escalation_timestamps": [],
+                        "escalation_fingerprints": {},
                         "updated_at": round(time.time(), 6),
                     },
                 )
+
+    def oversight_status(
+        self,
+        now: Optional[float] = None,
+        window_sec: float = 60.0,
+        flood_threshold: int = 8,
+        repeat_threshold: int = 3,
+    ) -> Dict[str, Any]:
+        ts = time.time() if now is None else float(now)
+        cutoff = ts - max(1.0, float(window_sec))
+        recent = sum(1 for t in self.escalation_timestamps if t >= cutoff)
+        tainted = bool(self.untrusted_external_ingested or self.prompt_injection_seen)
+        thresh = max(1, int(flood_threshold))
+        flood_detected = (recent >= thresh and tainted) or (recent >= thresh * 2)
+        high_friction = {
+            k: v for k, v in self.escalation_fingerprints.items() if int(v) >= max(1, int(repeat_threshold))
+        }
+        return {
+            "recent_escalations": recent,
+            "window_sec": float(window_sec),
+            "flood_detected": flood_detected,
+            "tainted": tainted,
+            "high_friction_patterns": high_friction,
+        }
+
+    def evaluate_oversight_gate(
+        self,
+        decision: str,
+        reason_code: str,
+        fingerprint: str = "",
+        now: Optional[float] = None,
+        window_sec: float = 60.0,
+        flood_threshold: int = 8,
+    ) -> Dict[str, Any]:
+        if str(decision or "").strip().lower() != "escalate":
+            return {
+                "decision": "pass",
+                "oversight": self.oversight_status(
+                    now=now, window_sec=window_sec, flood_threshold=flood_threshold
+                ),
+            }
+        ts = round(time.time() if now is None else float(now), 6)
+        cutoff = ts - max(1.0, float(window_sec))
+        self.escalation_timestamps = [t for t in self.escalation_timestamps if t >= cutoff][-49:]
+        self.escalation_timestamps.append(ts)
+        fp = str(fingerprint or reason_code or "escalate").strip()[:120]
+        self.escalation_fingerprints[fp] = int(self.escalation_fingerprints.get(fp, 0)) + 1
+        if len(self.escalation_fingerprints) > 50:
+            self.escalation_fingerprints = dict(list(self.escalation_fingerprints.items())[-50:])
+        self.save()
+        status = self.oversight_status(now=ts, window_sec=window_sec, flood_threshold=flood_threshold)
+        if status["flood_detected"]:
+            return {
+                "decision": "deny",
+                "reason_code": "layer0_oversight_flood_veto",
+                "label": "escalation_flood_detected",
+                "oversight": status,
+            }
+        return {"decision": "pass", "oversight": status}
 
     def record_pre_tool(self, tool_name: str, target_path: str = "", is_protected: bool = False) -> None:
         clean_tool = str(tool_name or "").strip().lower()

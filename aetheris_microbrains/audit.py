@@ -104,6 +104,13 @@ def format_entry(entry: Dict[str, Any]) -> str:
     if entry.get("escalation_contract"):
         contract = entry["escalation_contract"]
         box.append(f"│ Escalation: Target={contract.get('recipient')} Timeout={contract.get('timeout_sec')}s")
+    if isinstance(entry.get("rule_provenance"), dict):
+        prov = entry["rule_provenance"]
+        by = prov.get("approved_by") or "operator"
+        rat = prov.get("rationale") or ""
+        vit = prov.get("vitality")
+        vit_str = f" vitality={vit}" if vit is not None else ""
+        box.append(f"│ Provenance: approved_by={by}{vit_str} | {rat}"[:96])
     box.append(f"{color_code}└─────────────────────────────────────────────────────────────{reset}")
     return "\n".join(box)
 
@@ -321,6 +328,18 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
         "what": "A recursive search targeted a filesystem or drive root directly.",
         "fix": "Scope the search command to a repository or target directory path.",
     },
+    "layer0_stale_rule_reconfirm": {
+        "what": "An approved custom allow rule became stale (expired half-life or recent failures) and downgraded safely to escalate.",
+        "fix": "Reconfirm the rule in `RuleVitalityLedger` or review the pending rule queue before continuing.",
+    },
+    "layer0_oversight_flood_veto": {
+        "what": "Repeated escalations exceeded the oversight capacity threshold in a tainted/high-rate session.",
+        "fix": "Inspect the session taint state, clear unrelated escalations, or approve a verified narrow rule.",
+    },
+    "layer0_custom_policy_rule": {
+        "what": "Matched an operator-approved custom policy rule.",
+        "fix": "Inspect attached provenance (`approved_by`, `rationale`) or modify `custom_rules` in your policy file.",
+    },
 }
 
 
@@ -345,6 +364,12 @@ def explain_entry(entry: Dict[str, Any]) -> str:
     sha = entry.get("input_sha256")
     if sha:
         lines.append(f"Correlate: input_sha256={sha}")
+    if isinstance(entry.get("rule_provenance"), dict):
+        prov = entry["rule_provenance"]
+        lines.append(
+            f"Provenance: approved_by={prov.get('approved_by') or 'operator'} | "
+            f"vitality={prov.get('vitality', 'n/a')} | {prov.get('rationale') or ''}"
+        )
     return "\n".join(lines)
 
 
@@ -583,6 +608,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--economics-path", type=str, default="", help="Path to economics_ledger.jsonl")
     parser.add_argument("--session-id", type=str, default="", help="Optional session_id filter for --savings/--statusline")
     parser.add_argument("--journal-path", type=str, default="", help="Path to decision_journal.jsonl")
+    parser.add_argument("--eval-policy", type=str, default="", help="Replay journal & constitutional probes against candidate PolicyConfig file")
+    parser.add_argument("--base-policy", type=str, default="", help="Optional base PolicyConfig file for --eval-policy comparison")
+    parser.add_argument("--propose-rules", action="store_true", help="Synthesize verified candidate allow rules from recurring journal escalations")
+    parser.add_argument("--min-occurrences", type=int, default=3, help="Minimum escalation repetitions for --propose-rules")
+    parser.add_argument("--stage", action="store_true", help="Stage verified candidates from --propose-rules into PendingRuleQueue")
+    parser.add_argument("--approve-rule", type=str, default="", help="Approve a staged pending rule by ID")
+    parser.add_argument("--approver", type=str, default="operator", help="Approver identity recorded for --approve-rule")
+    parser.add_argument("--policy-out", type=str, default="", help="Optional JSON policy file to write approved custom rule into")
 
     args = parser.parse_args(argv)
     # Windows consoles default to cp1252 and crash on box-drawing/bullet characters
@@ -592,6 +625,60 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+
+    if args.eval_policy:
+        from .core.layered_decision_engine import PolicyConfig
+        from .core.policy_governance import evaluate_policy_candidate
+
+        cand_pol = PolicyConfig.from_file(args.eval_policy)
+        base_pol = PolicyConfig.from_file(args.base_policy) if args.base_policy else None
+        j_entries = get_journal_entries(journal_path=args.journal_path or None, limit=None)
+        report = evaluate_policy_candidate(
+            cand_pol, base_policy=base_pol, journal_entries=j_entries, include_builtin_probes=True
+        )
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(f"promote_safe={report['promote_safe']} | probes={report['probes_checked']} | replayed={report['journal_replayed']} | newly_allowed={report['newly_allowed']} | upper_risk_bound_95={report['upper_risk_bound_95']}")
+            if report["safety_regressions"]:
+                print(f"Safety regressions: {report['safety_regressions']}")
+        return 0 if report["promote_safe"] else 2
+
+    if args.propose_rules:
+        from .core.layered_decision_engine import PolicyConfig
+        from .core.policy_governance import PendingRuleQueue, synthesize_policy_candidates
+
+        base_pol = PolicyConfig.from_file(args.base_policy) if args.base_policy else None
+        j_entries = get_journal_entries(journal_path=args.journal_path or None, limit=None)
+        cands = synthesize_policy_candidates(
+            j_entries, min_occurrences=max(1, args.min_occurrences), base_policy=base_pol
+        )
+        staged = PendingRuleQueue().stage(cands, verified_only=True) if args.stage else 0
+        out_obj = {"candidates": cands, "staged": staged}
+        if args.json:
+            print(json.dumps(out_obj, indent=2, ensure_ascii=False))
+        else:
+            print(f"Proposed {len(cands)} candidate rule(s); staged={staged}")
+            for c in cands:
+                print(f"  - {c['id']} (verified={c['verified']}, support={c['support_count']}): {c['reason']}")
+        return 0
+
+    if args.approve_rule:
+        from .core.layered_decision_engine import PolicyConfig
+        from .core.policy_governance import PendingRuleQueue
+
+        base_pol = PolicyConfig.from_file(args.base_policy) if args.base_policy else None
+        approved = PendingRuleQueue().approve(
+            args.approve_rule,
+            approver=args.approver,
+            base_policy=base_pol,
+            policy_out_path=args.policy_out or None,
+        )
+        if args.json:
+            print(json.dumps(approved, indent=2, ensure_ascii=False))
+        else:
+            print(f"Approved rule {approved['id']} (by {args.approver})")
+        return 0
 
     if args.savings or args.statusline:
         print_savings_report(

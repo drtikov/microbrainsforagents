@@ -324,6 +324,24 @@ def evaluate_hook_payload(
         ctx["session_state_path"] = explicit_sess
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
+    if dec == "escalate" and not shadow_mode and explicit_sess:
+        from .core.mcp_security import SessionSecurityState
+
+        sess_ov = SessionSecurityState(Path(explicit_sess))
+        if not sess_ov.corrupted:
+            fp = f"{norm.get('tool') or ''}:{verdict.get('reason_code') or ''}"
+            ov_res = sess_ov.evaluate_oversight_gate(
+                "escalate",
+                str(verdict.get("reason_code") or ""),
+                fingerprint=fp,
+            )
+            verdict["oversight"] = ov_res.get("oversight")
+            if ov_res.get("decision") == "deny":
+                dec = "deny"
+                verdict["decision"] = "deny"
+                verdict["reason_code"] = ov_res["reason_code"]
+                verdict["label"] = ov_res["label"]
+                verdict["layer"] = 0
     hygiene_blocked = False
     avoided_tokens = 0
     use_context_guard = bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")

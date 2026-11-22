@@ -284,7 +284,7 @@ class PolicyConfig:
                     action = str(item.get("action") or "").strip().lower()
                     if not rule_id:
                         raise ValueError(f"PolicyConfig.custom_rules[{idx}] missing non-empty 'id'")
-                    if action not in {"deny", "escalate"}:
+                    if action not in {"deny", "escalate", "allow"}:
                         raise ValueError(f"PolicyConfig.custom_rules[{idx}] invalid action {action!r}")
                     for rk in ("tool", "cmd_regex"):
                         rv = item.get(rk)
@@ -4494,7 +4494,10 @@ def _evaluate_custom_rules(
     target_path: Optional[str],
     cmd_str: Optional[str],
     action_filter: Optional[str] = None,
-) -> Optional[Tuple[str, str, str, int]]:
+    vitality_ledger: Any = None,
+    now: Optional[float] = None,
+    return_rule: bool = False,
+) -> Optional[Any]:
     """Evaluate AgentSpec-style declarative `PolicyConfig.custom_rules`."""
     rules = getattr(cfg, "custom_rules", ()) or ()
     if not rules:
@@ -4505,7 +4508,7 @@ def _evaluate_custom_rules(
         if not isinstance(r, dict):
             continue
         action = str(r.get("action") or "").strip().lower()
-        if action not in {"deny", "escalate"}:
+        if action not in {"deny", "escalate", "allow"}:
             continue
         if action_filter and action != action_filter:
             continue
@@ -4524,7 +4527,19 @@ def _evaluate_custom_rules(
                 continue
         rule_id = str(r.get("id") or "custom_rule").strip()
         label = str(r.get("reason") or f"custom_policy_rule:{rule_id}").strip()
-        return (action, label, f"layer0_custom_policy_rule:{rule_id}", 0)
+        if action == "allow" and vitality_ledger is not None:
+            try:
+                v_check = vitality_ledger.check_rule(rule_id, now=now)
+                if v_check.get("known") and v_check.get("stale"):
+                    res = ("escalate", f"stale_custom_rule_reconfirm:{rule_id}", f"layer0_stale_rule_reconfirm:{rule_id}", 0)
+                    return (res, r, v_check) if return_rule else res
+                res = (action, label, f"layer0_custom_policy_rule:{rule_id}", 0)
+                return (res, r, v_check) if return_rule else res
+            except Exception:
+                res = ("escalate", f"stale_custom_rule_reconfirm:{rule_id}", f"layer0_stale_rule_reconfirm:{rule_id}", 0)
+                return (res, r, None) if return_rule else res
+        res = (action, label, f"layer0_custom_policy_rule:{rule_id}", 0)
+        return (res, r, None) if return_rule else res
     return None
 
 
@@ -4644,6 +4659,37 @@ def decide(
         decision_kind: Optional[str] = None,
         error_metric: Optional[str] = None,
     ) -> Dict[str, Any]:
+        matched_rule_prov: Optional[Dict[str, Any]] = None
+        if decision == "escalate" and reason_code in {
+            "layer1_unrecognized_shell_command_escalate",
+            "layer1_uninspected_tool",
+            "layer0_external_requires_confirmation",
+            "layer3_default_escalation",
+        }:
+            custom_allow = _evaluate_custom_rules(
+                cfg,
+                clean_tool,
+                target_path,
+                cmd_str,
+                action_filter="allow",
+                vitality_ledger=ctx.get("vitality_ledger"),
+                now=ctx.get("now"),
+                return_rule=True,
+            )
+            if custom_allow is not None:
+                (c_act, c_lbl, c_code, c_layer), c_rule, c_vcheck = custom_allow
+                decision = c_act
+                label = c_lbl
+                reason_code = c_code
+                layer = c_layer
+                if decision == "allow":
+                    pred_set = [clean_tool or label]
+                prov = c_rule.get("provenance") if isinstance(c_rule.get("provenance"), dict) else None
+                if prov is not None or c_vcheck is not None:
+                    matched_rule_prov = dict(prov or {})
+                    if c_vcheck is not None and c_vcheck.get("known"):
+                        matched_rule_prov["vitality"] = c_vcheck.get("vitality")
+
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
         if len(recent) < 9 and (journal_path is not None or should_log):
@@ -4761,6 +4807,8 @@ def decide(
             out["structural_context"] = diff_structural_context
         if diff_suppressed_findings:
             out["suppressed_findings"] = list(diff_suppressed_findings)
+        if matched_rule_prov is not None:
+            out["rule_provenance"] = matched_rule_prov
         if shadow_mode:
             out["shadow_decision"] = decision
             out["shadow_reason_code"] = reason_code
