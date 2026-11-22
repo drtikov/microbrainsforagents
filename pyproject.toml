@@ -66,6 +66,7 @@ aetheris-hook = "aetheris_microbrains.hook:main"
 aetheris-doctor = "aetheris_microbrains.doctor:main"
 aetheris-audit = "aetheris_microbrains.audit:main"
 aetheris-daemon = "aetheris_microbrains.hook_daemon:main"
+aetheris-verify = "aetheris_microbrains.verify:main"
 
 [project.urls]
 Homepage = "https://github.com/drtikov/microbrainsforagents"
