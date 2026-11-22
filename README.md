@@ -68,7 +68,7 @@ python -m aetheris_microbrains.doctor --scan-mcp               # audit .mcp.json
 
 Installed console entrypoints: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`.
 
-By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection. To eliminate per-call hook startup overhead during heavy sessions, you can either run the warm TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or start the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765`) paired with `install_hook.py --http-daemon http://127.0.0.1:8765`.
+By default, `install_hook.py` writes hooks relative to the repository root next to the script into `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection; pass `--project-dir /path/to/project` when installing from a wheel or shared environment into another repository. For active coding sessions, running the warm daemon is the recommended default—cold per-call CLI spawns spend ~94 ms on Python interpreter startup versus <1 ms warm evaluation—either via the TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765` paired with `install_hook.py --http-daemon http://127.0.0.1:8765`).
 
 ### What It Gives You
 
@@ -184,7 +184,7 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 
 ## 🔬 Experimental & Research Extensions (Optional Modules)
 
-The repository also includes standalone research modules demonstrating pure-NumPy, zero-GPU control, quantized representations, and calibration primitives. These are **not required** for agent tooling or Claude Code hooks:
+The repository also includes standalone research modules (including the 18 neuro-inspired modules under `aetheris_microbrains/experimental/`) demonstrating pure-NumPy, zero-GPU control, quantized representations, and calibration primitives. Both `experimental/` and the optional modules below are strictly research-only, **never imported on the security decision path**, and **not required** for agent tooling or Claude Code hooks:
 
 | Module | What It Is | Purpose |
 | :--- | :--- | :--- |
@@ -251,6 +251,8 @@ verdict = mb.decide({
 print(verdict)
 # {'decision': 'deny', 'label': 'dangerous_method:os.system', 'layer': 1, ...}
 ```
+
+> **Contract note (`decide()` vs. Hook API):** `mb.decide(...)` expects the flat framework shape above (`tool`, `path`, `diff`, `cmd`). Agent-harness payloads with nested `tool_input` (e.g. Claude Code `{"tool_name": "Bash", "tool_input": {"command": "..."}}`) and the `strict`/`dev` profile tables in [SECURITY.md](SECURITY.md) are handled by `aetheris_microbrains.hook.evaluate_hook_payload(payload, profile=...)`; passing nested hook shapes straight to `decide()` will safely fail closed (`escalate`).
 
 ### 1. Claude Code & Agent Harness PreToolUse Hook Integration
 

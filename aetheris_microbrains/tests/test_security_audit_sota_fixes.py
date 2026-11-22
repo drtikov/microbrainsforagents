@@ -718,3 +718,68 @@ def test_audit_format_entry_uses_risk_bound_label():
     })
     assert "Risk Bound: Upper Error Bound 95% = 0.042" in rendered
     assert "Conformal:" not in rendered
+
+
+def test_daemon_evaluate_request_missing_payload_fails_closed():
+    """F1 regression: malformed daemon envelopes without a dict payload must fail closed (escalate)."""
+    from aetheris_microbrains.hook_daemon import evaluate_request
+
+    for bad_req in (
+        {"event": "pre"},
+        {"event": "pre", "payload": None},
+        {"event": "pre", "payload": ["bad"]},
+    ):
+        verdict, cached = evaluate_request(bad_req)
+        assert verdict["decision"] == "escalate"
+        assert verdict["permissionDecision"] == "ask"
+        assert verdict["reason_code"] == "malformed_daemon_request"
+        assert cached is False
+
+
+def test_daemon_tcp_missing_payload_returns_escalate_verdict(tmp_path):
+    """F1 regression: TCP daemon mode must return an escalate verdict rather than AttributeError."""
+    import socket
+    from aetheris_microbrains.hook_daemon import serve
+
+    state_path = tmp_path / "hook_daemon.json"
+    srv_thread = threading.Thread(
+        target=serve,
+        kwargs={"port": 0, "state_path": state_path, "max_requests": 1},
+        daemon=True,
+    )
+    srv_thread.start()
+
+    deadline = time.monotonic() + 5.0
+    st = None
+    while time.monotonic() < deadline:
+        if state_path.is_file():
+            try:
+                st = json.loads(state_path.read_text(encoding="utf-8"))
+                if isinstance(st, dict) and st.get("port") and st.get("auth"):
+                    break
+            except Exception:
+                pass
+        time.sleep(0.02)
+    assert st is not None, "Daemon failed to write state file in time"
+
+    req = {"auth": st["auth"], "id": 1, "event": "pre"}
+    with socket.create_connection(("127.0.0.1", int(st["port"])), timeout=5.0) as conn:
+        conn.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        resp = json.loads(conn.recv(65536).decode("utf-8"))
+
+    srv_thread.join(timeout=2.0)
+    assert resp.get("id") == 1
+    assert "error" not in resp
+    verdict = resp.get("verdict") or {}
+    assert verdict.get("decision") == "escalate"
+    assert verdict.get("reason_code") == "malformed_daemon_request"
+
+
+def test_is_protected_path_cache_respects_custom_policy():
+    """F5 regression: lru_cache on is_protected_path must distinguish PolicyConfig patterns."""
+    from aetheris_microbrains.core.layered_decision_engine import is_protected_path
+
+    custom_pol = PolicyConfig(extra_protected_patterns=("custom_secret.dat",))
+    assert is_protected_path("custom_secret.dat") is False
+    assert is_protected_path("custom_secret.dat", policy=custom_pol) is True
+    assert is_protected_path("custom_secret.dat") is False

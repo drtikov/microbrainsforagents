@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+from functools import lru_cache
 import hashlib
 import importlib
 import json
@@ -447,24 +448,12 @@ DEFAULT_POLICY = PolicyConfig()
 
 def _policy_protected_patterns(policy: Optional[PolicyConfig]) -> Tuple[str, ...]:
     cfg = policy or DEFAULT_POLICY
-    extra = tuple(getattr(cfg, "extra_protected_patterns", ()) or ())
-    return tuple(cfg.protected_patterns) + extra
+    extra = getattr(cfg, "extra_protected_patterns", ()) or ()
+    return tuple(str(p) for p in cfg.protected_patterns) + tuple(str(p) for p in extra)
 
 
-def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
-    """Return True if path points to a constitutional, credential, or security-critical asset.
-
-    Protects both custom constitutional patterns and standard SWE secrets/hooks/control-plane
-    files (`.env*`, `.git/hooks`, `.ssh/id_rsa`, `.aws/credentials`, `.claude/settings.json`,
-    `.mcp.json`) while avoiding false positives on generic code/math paths like
-    `src/math/axioms.py` or `src/env_loader.py`.
-    """
-    if not path_str:
-        return False
-    raw = str(path_str)
-    if "\x00" in raw:
-        return True
-    all_patterns = _policy_protected_patterns(policy)
+@lru_cache(maxsize=4096)
+def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
     normalized = raw.replace("\\", "/").strip().lower()
     raw_segments = [seg for seg in normalized.split("/") if seg]
     if ".env" in raw_segments:
@@ -558,6 +547,22 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
         if norm_path == clean_pat or normalized == clean_pat:
             return True
     return False
+
+
+def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
+    """Return True if path points to a constitutional, credential, or security-critical asset.
+
+    Protects both custom constitutional patterns and standard SWE secrets/hooks/control-plane
+    files (`.env*`, `.git/hooks`, `.ssh/id_rsa`, `.aws/credentials`, `.claude/settings.json`,
+    `.mcp.json`) while avoiding false positives on generic code/math paths like
+    `src/math/axioms.py` or `src/env_loader.py`.
+    """
+    if not path_str:
+        return False
+    raw = str(path_str)
+    if "\x00" in raw:
+        return True
+    return _is_protected_path_cached(raw, _policy_protected_patterns(policy))
 
 
 def evaluate_layer0_policy(
@@ -1604,15 +1609,41 @@ _TREE_SITTER_GRAMMARS: Dict[str, Tuple[str, str]] = {
 }
 
 
+_TREE_SITTER_LANG_CACHE: Dict[Tuple[str, str], Optional[Tuple[Any, Any]]] = {}
+
+
+def _get_tree_sitter_parser_factory(mod_name: str, fn_name: str) -> Optional[Tuple[Any, Any]]:
+    """Cache (Parser_cls, Language) per grammar to avoid per-call importlib overhead.
+
+    Returns ``(Parser, Language)`` so each call instantiates a lightweight thread-local
+    ``Parser(lang)`` safely under concurrent HTTP/TCP daemon requests.
+    """
+    key = (mod_name, fn_name)
+    if key in _TREE_SITTER_LANG_CACHE:
+        return _TREE_SITTER_LANG_CACHE[key]
+    try:
+        ts_mod = importlib.import_module("tree_sitter")
+        grammar_mod = importlib.import_module(mod_name)
+        parser_cls = getattr(ts_mod, "Parser")
+        lang_cls = getattr(ts_mod, "Language")
+        lang = lang_cls(getattr(grammar_mod, fn_name)())
+        entry: Optional[Tuple[Any, Any]] = (parser_cls, lang)
+    except Exception:
+        entry = None
+    _TREE_SITTER_LANG_CACHE[key] = entry
+    return entry
+
+
 def _scan_bash_ast_tree_sitter(cmd: str, policy: Optional[PolicyConfig] = None) -> Dict[str, Any]:
     """Optional SOTA AST shell pass via tree-sitter-bash when installed (no-op when absent)."""
     if not cmd or not cmd.strip():
         return {"available": False, "findings": [], "protected_reads": []}
+    factory = _get_tree_sitter_parser_factory("tree_sitter_bash", "language")
+    if factory is None:
+        return {"available": False, "findings": [], "protected_reads": []}
     try:
-        ts_mod = importlib.import_module("tree_sitter")
-        ts_bash = importlib.import_module("tree_sitter_bash")
-        lang = ts_mod.Language(ts_bash.language())
-        parser = ts_mod.Parser(lang)
+        parser_cls, lang = factory
+        parser = parser_cls(lang)
         raw = cmd.encode("utf-8", errors="ignore")
         tree = parser.parse(raw)
         if tree is None or not hasattr(tree, "root_node"):
@@ -1667,14 +1698,12 @@ def _parse_with_tree_sitter(ext: str, code: str) -> Tuple[bool, Optional[bool]]:
     if spec is None or not code.strip():
         return False, None
     mod_name, fn_name = spec
+    factory = _get_tree_sitter_parser_factory(mod_name, fn_name)
+    if factory is None:
+        return False, None
     try:
-        ts_mod = importlib.import_module("tree_sitter")
-        Language = getattr(ts_mod, "Language")
-        Parser = getattr(ts_mod, "Parser")
-        grammar_mod = importlib.import_module(mod_name)
-        lang_fn = getattr(grammar_mod, fn_name)
-        lang = Language(lang_fn())
-        parser = Parser(lang)
+        parser_cls, lang = factory
+        parser = parser_cls(lang)
         tree = parser.parse(code.encode("utf-8"))
         if tree is None or not hasattr(tree, "root_node"):
             return False, None

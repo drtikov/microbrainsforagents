@@ -219,6 +219,18 @@ def evaluate_request(
     non-shadow (shadow events are journal entries too), and a non-edit
     payload (on-disk file content may have changed).
     """
+    if not isinstance(request, dict) or not isinstance(request.get("payload"), dict):
+        return (
+            {
+                "decision": "escalate",
+                "permissionDecision": "ask",
+                "reason_code": "malformed_daemon_request",
+                "label": "Daemon request missing or malformed 'payload'; failing closed",
+                "layer": 0,
+                "exit_code": 0,
+            },
+            False,
+        )
     raw_payload = request.get("payload")
     event = str(request.get("event") or "pre").strip().lower()
     flags = request.get("flags") if isinstance(request.get("flags"), dict) else {}
@@ -407,27 +419,29 @@ def serve(
                 conn, _addr = srv.accept()
             except OSError:
                 continue
+            req_id: Any = None
             try:
                 conn.settimeout(_DEFAULT_RECV_TIMEOUT)
                 line = _read_line(conn)
                 req = json.loads(line)
+                req_id = req.get("id") if isinstance(req, dict) else None
                 resp: Dict[str, Any]
                 if not isinstance(req, dict) or not hmac.compare_digest(str(req.get("auth") or ""), auth_value):
                     served += 1
-                    resp = {"id": req.get("id") if isinstance(req, dict) else None, "error": "auth"}
+                    resp = {"id": req_id, "error": "auth"}
                 elif req.get("action") == "ping":
-                    resp = {"id": req.get("id"), "ok": True, "version": DAEMON_VERSION, "mode": "tcp"}
+                    resp = {"id": req_id, "ok": True, "version": DAEMON_VERSION, "mode": "tcp"}
                 else:
                     served += 1
                     req.pop("auth", None)
                     req["flags"] = _merge_flags(daemon_flags, req)
                     verdict, cached = evaluate_request(req, cache=cache)
-                    resp = {"id": req.get("id"), "verdict": verdict, "cached": cached}
+                    resp = {"id": req_id, "verdict": verdict, "cached": cached}
                 conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
             except Exception as exc:
                 served += 1
                 try:
-                    conn.sendall((json.dumps({"error": f"{type(exc).__name__}: {exc}"}) + "\n").encode("utf-8"))
+                    conn.sendall((json.dumps({"id": req_id, "error": f"{type(exc).__name__}: {exc}"}) + "\n").encode("utf-8"))
                 except Exception:
                     pass
             finally:
