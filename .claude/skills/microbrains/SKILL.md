@@ -111,6 +111,7 @@ When recurring benign commands escalate and create approval fatigue:
 - Inspect and approve verified rules: `python -m aetheris_microbrains.audit --approve-rule <rule_id> --approver <name>`.
 - Rules carry vitality decay: idle rules automatically degrade back to `ask` (`layer0_stale_rule_reconfirm`) until reconfirmed.
 - Replay test candidate policies before rollout: `python -m aetheris_microbrains.audit --eval-policy candidate.json`.
+- After any policy/governance change, re-verify in one command: `python -m aetheris_microbrains.verify [--policy candidate.json]` (chains installer self-test, doctor, optional eval-policy, and the shadow report; exit 0 pass / 1 wiring failure / 2 policy not promotion-safe).
 
 ### 6. Health check & MCP pinning (doctor)
 
