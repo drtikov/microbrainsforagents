@@ -21,10 +21,11 @@ from ..evolution.wsp_substrate import CPUMicroRouter
 from .wsp_hebbian import HebbianPlasticLayer
 from ..evolution.wsp_merger import WeightSpaceMerger
 from ..evolution.wsp_sae import ConceptSparseAutoencoder
+from ..core.runtime_paths import get_writable_store_dir
 
 logger = logging.getLogger(__name__)
 
-STORE_DIR = Path("memory/store")
+STORE_DIR = get_writable_store_dir()
 SLEEP_CONSOLIDATION_LEDGER = STORE_DIR / "wsp_sleep_ledger.jsonl"
 
 

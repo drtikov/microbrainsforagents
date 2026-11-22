@@ -29,6 +29,7 @@ Everything here is deterministic bounded-work NumPy: no external solver.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -38,15 +39,18 @@ import numpy as np
 log = logging.getLogger("aetheris.state_cbf")
 
 
-class BarrierConstraint:
+class BarrierConstraint(ABC):
     """Interface: h(x) >= 0 keeps the safe set; grad_h(x) is its Jacobian row."""
 
+    @abstractmethod
     def h(self, x: np.ndarray) -> float:
         raise NotImplementedError
 
+    @abstractmethod
     def grad_h(self, x: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
+    @abstractmethod
     def inflate(self, delta: float) -> "BarrierConstraint":
         """Return a barrier shifted by -delta (safe set shrinks)."""
         raise NotImplementedError

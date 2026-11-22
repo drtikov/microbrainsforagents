@@ -18,14 +18,20 @@ from typing import Any, Dict, List, Optional
 
 from .core.runtime_paths import get_default_journal_path
 
-_DEFAULT_JOURNAL_PATH = get_default_journal_path()
+_INITIAL_JOURNAL_PATH = get_default_journal_path()
+_DEFAULT_JOURNAL_PATH = _INITIAL_JOURNAL_PATH
 
 
 def get_journal_entries(
     journal_path: Optional[Path | str] = None, limit: Optional[int] = 50
 ) -> List[Dict[str, Any]]:
     """Read recent journal entries from decision_journal.jsonl (`limit=None` reads all)."""
-    raw_path = journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or _DEFAULT_JOURNAL_PATH
+    default_jp = (
+        Path(_DEFAULT_JOURNAL_PATH)
+        if _DEFAULT_JOURNAL_PATH != _INITIAL_JOURNAL_PATH
+        else get_default_journal_path()
+    )
+    raw_path = journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or default_jp
     p = Path(raw_path).expanduser().resolve()
     if not p.is_file():
         return []
@@ -147,16 +153,64 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
         "what": "Reading this path would expose protected or credential material.",
         "fix": "Confirm with the user, or read a non-protected path (e.g. a sample/redacted copy).",
     },
+    "layer0_unregistered_tool": {
+        "what": "The tool name is not in the configured active `available_tools` catalog.",
+        "fix": "Verify the tool name spelling or include it in `available_tools` passed to `decide()`.",
+    },
+    "layer0_external_requires_confirmation": {
+        "what": "Policy (`require_approval_for_external=True`) requires explicit human confirmation for external/network actions.",
+        "fix": "Confirm with the user, or add approved domains to `PolicyConfig.allowed_web_domains`.",
+    },
+    "layer0_irreversible_requires_confirmation": {
+        "what": "This operation is classified as IRREVERSIBLE_DESTRUCTIVE (`git_push`, `delete_file`, `drop_db`) and requires confirmation.",
+        "fix": "Review blast radius carefully and confirm explicitly with the operator.",
+    },
+    "layer0_policy_pass": {
+        "what": "Layer 0 policy checks passed.",
+        "fix": "No action needed.",
+    },
+    "layer0_custom_policy_rule": {
+        "what": "A declarative `PolicyConfig.custom_rules` rule matched and enforced a policy action.",
+        "fix": "Adjust the action/arguments to comply with the custom policy rule, or update `custom_rules` in your policy file.",
+    },
     "layer0_session_state_corrupted": {
         "what": "The cross-turn session security state file failed integrity checks.",
         "fix": "Delete the session state file (it regenerates); investigate what corrupted it before continuing sensitive work.",
+    },
+    "layer0_session_taint_lethal_trifecta": {
+        "what": "Session taint gate blocked an egress/mutation call after untrusted external content AND sensitive credentials were both accessed in this session.",
+        "fix": "Start a clean session (or inspect `provenance_summary()`) so untrusted inputs and sensitive secrets cannot mix.",
+    },
+    "layer0_session_prompt_injection_taint_escalate": {
+        "what": "Indirect prompt-injection markers were detected earlier in this session; subsequent mutations/egress require confirmation.",
+        "fix": "Review the originating untrusted tool output in the journal and confirm intentionally before continuing.",
+    },
+    "layer1_structural_verified": {
+        "what": "All Layer 1 structural (AST, shell, secret egress) checks passed.",
+        "fix": "No action needed.",
+    },
+    "layer1_hunk_only_checked": {
+        "what": "A partial diff hunk passed structural checks without full on-disk source reconstruction.",
+        "fix": "No action needed (or pass `file_content` / enable `require_full_source_for_allow` for stricter full-file verification).",
+    },
+    "layer1_null_byte_veto": {
+        "what": "A NUL byte (`\\x00`) was detected in path, command, or diff arguments (classic C-string truncation attack).",
+        "fix": "Remove null bytes and resubmit sanitized structured inputs.",
     },
     "layer1_ast_security_veto": {
         "what": "The proposed code contains a construct the AST layer vetoes (dangerous calls, obfuscated secrets, dynamic execution).",
         "fix": "Rewrite the code to avoid the flagged construct; run `python -m aetheris_microbrains.audit --explain` again after fixing for the specific finding label.",
     },
+    "layer1_ast_dev_escalate": {
+        "what": "In `dev` profile, a medium-risk process or filesystem construct (`subprocess.run`, `os.remove`, relative `rmtree`) requires human confirmation.",
+        "fix": "Confirm with the user, or add a targeted justified inline comment if appropriate for your dev policy.",
+    },
+    "layer1_ast_suppressed_escalate": {
+        "what": "An `# aetheris: allow ...` inline suppression was present on the diff and requires human confirmation in `strict` profile.",
+        "fix": "Confirm the suppression or remove the flagged construct instead of suppressing it.",
+    },
     "layer1_ast_syntax_error": {
-        "what": "The proposed code does not parse as valid Python.",
+        "what": "The proposed code does not parse as valid Python (or JSON).",
         "fix": "Fix the syntax error. Note: only complete statements lint cleanly - submit the full function or block, not a fragment.",
     },
     "layer1_shell_parser_veto": {
@@ -167,13 +221,25 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
         "what": "Credential-looking material was found in outbound arguments (command line, URL, query).",
         "fix": "Remove the secret from the call. Pass it via environment/config the tool reads itself, never in URLs or argv.",
     },
+    "layer1_mcp_trusted_readonly": {
+        "what": "An allowlisted read-only tool on a pinned/trusted MCP server was permitted structurally.",
+        "fix": "No action needed.",
+    },
+    "layer1_mcp_write_tool_escalate": {
+        "what": "A pinned/trusted MCP server tool with mutating or unknown verb semantics was escalated for human confirmation.",
+        "fix": "Confirm the MCP mutation explicitly if intended.",
+    },
     "layer1_uninspected_tool": {
-        "what": "This tool has no payload the static layers can inspect (or is MCP/unclassified), so it cannot be verified safe.",
-        "fix": "Confirm the call is intended; for MCP tools, pin the server (`mb pin-mcp` / doctor) to enable trusted-tier verdicts.",
+        "what": "This tool has no payload the static layers can inspect (or is an unpinned/drifted MCP server), so it cannot be verified safe.",
+        "fix": "Confirm the call is intended; for MCP tools, pin the server (`python -m aetheris_microbrains.doctor --pin-mcp <server>` or `aetheris-doctor --pin-mcp <server>`) to enable trusted-tier verdicts.",
     },
     "layer1_unrecognized_shell_command_escalate": {
         "what": "A command in the pipeline is not on the allowlist, so its safety is unknown.",
-        "fix": "Use an allowlisted equivalent, or add the command to a policy allowlist if it is genuinely read-only.",
+        "fix": "Use an allowlisted equivalent, or switch to `--profile dev` / add an explicit policy rule if genuinely safe.",
+    },
+    "layer1_protected_path_shell_read": {
+        "what": "The shell command reads or traverses a protected path.",
+        "fix": "Restrict the command to non-protected paths, or get explicit operator confirmation.",
     },
     "layer1_protected_path_shell_read_escalate": {
         "what": "The command reads or traverses a protected path.",
@@ -186,6 +252,10 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
     "layer1_shell_redirection_escalate": {
         "what": "Output redirection targets a location the gate treats as needing confirmation.",
         "fix": "Redirect to a project-local path, or split the command.",
+    },
+    "layer1_strict_ast_": {
+        "what": "Strict-AST mode flagged an unapproved import or dynamic call.",
+        "fix": "Use an allowlisted import, or extend allowed_ast_imports in the policy file.",
     },
     "layer1_strict_ast_allowlist_escalate": {
         "what": "Strict-AST mode flagged an unapproved import or dynamic call.",
@@ -202,6 +272,22 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
     "layer1_imports_flagged_module": {
         "what": "The proposed code imports a local module whose own source contains vetoed constructs.",
         "fix": "Review the imported module's findings first; refactor or avoid it.",
+    },
+    "layer1_error": {
+        "what": "An unexpected exception occurred while evaluating Layer 1 rules (fail-closed).",
+        "fix": "Inspect stderr / journal error details and re-run after resolving malformed inputs.",
+    },
+    "layer1_fail_closed": {
+        "what": "An internal parser error aborted evaluation of a mutating/external call (failed closed to deny).",
+        "fix": "Run `python -m aetheris_microbrains.doctor` and inspect the failing payload format.",
+    },
+    "layer1_escalate_on_error": {
+        "what": "An internal parser error occurred during a non-mutating check and escalated safely.",
+        "fix": "Inspect the payload and confirm manually if safe.",
+    },
+    "layer2_conformal_singleton": {
+        "what": "The calibrated routing classifier selected a unique tool with satisfied conformal guarantee.",
+        "fix": "No action needed (advisory routing recommendation).",
     },
     "layer2_conformal_abstention_ood": {
         "what": "The routing classifier abstained: the request looks out-of-distribution for its calibration.",

@@ -26,8 +26,13 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .atomic import atomic_read, atomic_write
+from .runtime_paths import get_writable_store_dir
 
 DEFAULT_PERSONA_MEMORY_PATH = "memory/store/persona_memory.json"
+
+
+def _default_persona_memory_file() -> Path:
+    return get_writable_store_dir() / "persona_memory.json"
 
 # Bounded recent-outcome window per persona (pinned contract).
 _RECENT_WINDOW = 10
@@ -571,7 +576,7 @@ class AdaptivePersonaMemory:
     """
 
     def __init__(self, filepath: Optional[str] = None) -> None:
-        self.filepath = Path(filepath) if filepath is not None else Path(DEFAULT_PERSONA_MEMORY_PATH)
+        self.filepath = Path(filepath) if filepath is not None else _default_persona_memory_file()
         # Attempts/successes are floats: decay_to_prior scales them toward
         # the neutral prior and entries below the floor are removed.
         self._attempts: Dict[str, float] = {}

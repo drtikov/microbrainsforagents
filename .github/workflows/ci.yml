@@ -16,7 +16,7 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Check critical lint rules (syntax & undefined names)
-        run: ruff check --select E9,F63,F7,F82 aetheris_microbrains examples
+        run: ruff check --select E9,F63,F7,F82 aetheris_microbrains examples .claude/skills/microbrains/install_hook.py
 
   test:
     runs-on: ubuntu-latest
@@ -35,6 +35,25 @@ jobs:
           pip install -e ".[server,dev]"
       - name: Run full test suite (includes hook integration tests)
         run: python -m pytest aetheris_microbrains/tests/ -q -W "error::DeprecationWarning:aetheris_microbrains.*" -W "error:.*__package__.*:DeprecationWarning"
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with server + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[server,dev]"
+      - name: Run full test suite on Windows
+        run: python -m pytest aetheris_microbrains/tests/ -q -W "error::DeprecationWarning:aetheris_microbrains.*" -W "error:.*__package__.*:DeprecationWarning"
+      - name: Run installer self-test and doctor check
+        run: |
+          python .claude/skills/microbrains/install_hook.py --self-test
+          python .claude/skills/microbrains/install_hook.py --project .
+          python -m aetheris_microbrains.doctor --project .
 
   test-minimal:
     runs-on: ubuntu-latest

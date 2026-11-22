@@ -25,7 +25,9 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
+
+from .runtime_paths import file_lock
 
 # Tool-name fragments that indicate state-changing, code-execution, or
 # exfiltration operations, matched case-insensitively on the tool segment.
@@ -146,6 +148,11 @@ def _atomic_write_pins(path: Path, pins: Dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(pins, indent=2, sort_keys=True) + "\n")
             fh.flush()
+        if os.name != "nt":
+            try:
+                os.chmod(tmp_name, 0o600)
+            except OSError:
+                pass
         os.replace(tmp_name, str(path))
     except Exception:
         try:
@@ -159,22 +166,100 @@ def _atomic_write_pins(path: Path, pins: Dict[str, Any]) -> None:
 def save_mcp_pin(server: str, server_cfg: Any, state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Pin `server` to its current config fingerprint (operator action)."""
     path = get_pin_store_path(state_dir)
-    pins = load_mcp_pins(state_dir)
-    updated = dict(pins)
-    updated[str(server).strip().lower()] = {
-        "fingerprint": server_pin_fingerprint(server_cfg),
-        "pinned_at": time.time(),
-    }
-    _atomic_write_pins(path, updated)
+    with file_lock(path):
+        pins = load_mcp_pins(state_dir)
+        updated = dict(pins)
+        key = str(server).strip().lower()
+        prev = updated.get(key) if isinstance(updated.get(key), dict) else {}
+        entry: Dict[str, Any] = {
+            "fingerprint": server_pin_fingerprint(server_cfg),
+            "pinned_at": time.time(),
+        }
+        if isinstance(prev.get("tool_hashes"), dict):
+            entry["tool_hashes"] = prev["tool_hashes"]
+        updated[key] = entry
+        _atomic_write_pins(path, updated)
     return updated
+
+
+def save_mcp_manifest_pin(
+    server: str,
+    server_cfg: Any,
+    tools: Sequence[Dict[str, Any]],
+    state_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Pin both launch config AND cryptographic tool-schema hashes for an MCP server."""
+    from .mcp_security import MCPManifestPinner, scan_mcp_tools
+
+    scan = scan_mcp_tools(tools)
+    if not scan["safe"]:
+        return {
+            "status": "rejected_unsafe_manifest",
+            "server": str(server),
+            "safe": False,
+            "scan_report": scan,
+        }
+    path = get_pin_store_path(state_dir)
+    with file_lock(path):
+        pins = load_mcp_pins(state_dir)
+        updated = dict(pins)
+        updated[str(server).strip().lower()] = {
+            "fingerprint": server_pin_fingerprint(server_cfg),
+            "tool_hashes": scan["tool_hashes"],
+            "pinned_at": time.time(),
+        }
+        _atomic_write_pins(path, updated)
+    manifest_path = path.with_name("mcp_manifest_pins.json")
+    MCPManifestPinner(manifest_path).pin_server(str(server).strip().lower(), tools)
+    return {
+        "status": "pinned",
+        "server": str(server).strip().lower(),
+        "safe": True,
+        "tool_hashes": scan["tool_hashes"],
+        "scan_report": scan,
+    }
+
+
+def verify_mcp_manifest(
+    server: str,
+    tools: Sequence[Dict[str, Any]],
+    state_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Verify live MCP tool schemas against pinned manifest hashes (anti-rug-pull)."""
+    from .mcp_security import MCPManifestPinner, scan_mcp_tools
+
+    path = get_pin_store_path(state_dir)
+    pins = load_mcp_pins(state_dir)
+    key = str(server).strip().lower()
+    pinned = pins.get(key)
+    if isinstance(pinned, dict) and isinstance(pinned.get("tool_hashes"), dict):
+        scan = scan_mcp_tools(tools)
+        pinned_hashes = pinned["tool_hashes"]
+        cur_hashes = scan["tool_hashes"]
+        modified = sorted(k for k in cur_hashes if k in pinned_hashes and cur_hashes[k] != pinned_hashes[k])
+        added = sorted(k for k in cur_hashes if k not in pinned_hashes)
+        removed = sorted(k for k in pinned_hashes if k not in cur_hashes)
+        rug_pull = bool(modified or added or removed)
+        return {
+            "verified": bool(not rug_pull and scan["safe"]),
+            "unpinned_server": False,
+            "rug_pull_detected": rug_pull,
+            "modified_tools": modified,
+            "added_tools": added,
+            "removed_tools": removed,
+            "scan_report": scan,
+        }
+    manifest_path = path.with_name("mcp_manifest_pins.json")
+    return MCPManifestPinner(manifest_path).verify_server(key, tools)
 
 
 def remove_mcp_pin(server: str, state_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Drop `server` from the pin store (operator action)."""
     path = get_pin_store_path(state_dir)
-    pins = load_mcp_pins(state_dir)
-    updated = {k: v for k, v in pins.items() if k != str(server).strip().lower()}
-    _atomic_write_pins(path, updated)
+    with file_lock(path):
+        pins = load_mcp_pins(state_dir)
+        updated = {k: v for k, v in pins.items() if k != str(server).strip().lower()}
+        _atomic_write_pins(path, updated)
     return updated
 
 
@@ -248,6 +333,18 @@ def mcp_tool_tier(
                 "writeish": writeish,
                 "pin_stale": True,
             }
+        pinned_tools = pinned_entry.get("tool_hashes") if isinstance(pinned_entry, dict) else None
+        if isinstance(pinned_tools, dict):
+            known_tools_lower = {str(k).strip().lower() for k in pinned_tools.keys()}
+            if tool_seg.strip().lower() not in known_tools_lower:
+                return {
+                    "tier": "unpinned",
+                    "server": server,
+                    "tool": tool_seg,
+                    "writeish": writeish,
+                    "pin_stale": True,
+                    "rug_pull_detected": True,
+                }
 
     return {
         "tier": "trusted_readonly" if readonly else "trusted_writeish",

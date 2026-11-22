@@ -24,11 +24,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from ..core.brain_nursery import AutonomousBrainNursery, STORE_DIR
+from ..core.brain_nursery import AutonomousBrainNursery
 from ..core.brain_merger import NeuroBrainMerger
+from ..core.runtime_paths import get_writable_store_dir
 
 logger = logging.getLogger(__name__)
-STRATEGY_BANK_FILE = Path(__file__).resolve().parents[1] / "memory" / "store" / "strategy_bank.jsonl"
+STORE_DIR = get_writable_store_dir()
+STRATEGY_BANK_FILE = STORE_DIR / "strategy_bank.jsonl"
 
 
 class AutonomousSleepDreamingEngine:

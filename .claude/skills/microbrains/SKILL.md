@@ -14,14 +14,15 @@ and fail-closed escalation. It is a static-analysis layer, NOT an OS sandbox.
 
 ### 1. Install the hooks into `.claude/settings.local.json`
 
-Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"`), and registers synchronous `PostToolUse` (`Bash|Read|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts apply before context ingestion. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
+Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable with forward slashes), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"` and `--session-state auto`), and registers synchronous `PostToolUse` (`Bash|Read|Grep|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts apply before context ingestion. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
 
 ```bash
-python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny)
+python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny) + --session-state auto
 python .claude/skills/microbrains/install_hook.py --shadow      # observe-only, never blocks
 python .claude/skills/microbrains/install_hook.py --strict-ast  # also allowlist dynamic calls/imports
 python .claude/skills/microbrains/install_hook.py --profile dev # developer workflow allowlist
-python .claude/skills/microbrains/install_hook.py --policy security.toml --session-state ~/.local/state/aetheris/sess.json
+python .claude/skills/microbrains/install_hook.py --policy security.toml --no-session-state
+python .claude/skills/microbrains/install_hook.py --http-daemon http://127.0.0.1:8765  # native Claude Code HTTP hook mode
 python .claude/skills/microbrains/install_hook.py --project-dir /path/to/repo  # target another project
 python .claude/skills/microbrains/install_hook.py --shared      # write portable config to .claude/settings.json
 python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts)
@@ -32,6 +33,8 @@ python .claude/skills/microbrains/install_hook.py --preset solo-dev --no-auto-al
 python .claude/skills/microbrains/install_hook.py --dry-run    # preview the settings JSON without writing
 python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end probe of the installed gate
 ```
+
+Console entrypoints installed by `pip install -e .`: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`.
 
 Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
 
@@ -101,17 +104,19 @@ python -m aetheris_microbrains.doctor            # verify python/package/setting
 python -m aetheris_microbrains.doctor --json     # machine-readable report
 python -m aetheris_microbrains.doctor --pin-mcp <server>    # trust a server, pinned to its current .mcp.json fingerprint
 python -m aetheris_microbrains.doctor --unpin-mcp <server>  # remove the pin (tools fail closed to ask again)
+python -m aetheris_microbrains.doctor --scan-mcp [--manifest-file tools.json] [--server <name>]  # scan .mcp.json & tool schemas for poisoning/rug-pulls
 ```
 
-Pinned MCP servers get tiered structural verdicts: explicit read-only verbs (`get_*`, `list_*`, `read_*`, `search_*`, ...) allow, while mutating or unrecognized tool names still escalate. `.mcp.json` config drift or missing config invalidates the pin automatically (complements schema-level `MCPManifestPinner`).
+Pinned MCP servers get tiered structural verdicts: explicit read-only verbs (`get_*`, `list_*`, `read_*`, `search_*`, ...) allow, while mutating or unrecognized tool names still escalate. `.mcp.json` config drift or missing config invalidates the pin automatically (and manifest pins fail closed on modified or newly added unpinned tools).
 
 ### 6. Hook daemon (optional latency optimization)
 
 ```bash
-python -m aetheris_microbrains.hook_daemon       # warm evaluator on localhost; Ctrl+C to stop
+python -m aetheris_microbrains.hook_daemon       # warm TCP evaluator on localhost; Ctrl+C to stop
+python -m aetheris_microbrains.hook_daemon --http --port 8765  # native Claude Code type:"http" hook server (/v1/hook/pre, /v1/hook/post, /health)
 ```
 
-The hook CLI queries the daemon first and falls back to identical in-process evaluation on any failure - it is a pure optimization, never a dependency. Verdict memoization (5s TTL) only caches safe requests: pre-events without journal logging, non-shadow, non-edit payloads (journal completeness wins).
+The hook CLI queries the TCP daemon first and falls back to identical in-process evaluation on any failure - it is a pure optimization, never a dependency. Or use `--http` + `install_hook.py --http-daemon http://127.0.0.1:8765` to bypass per-call Python spawn overhead completely via native Claude Code HTTP hooks (`Authorization: Bearer $AETHERIS_DAEMON_TOKEN`). Verdict memoization (5s TTL) only caches safe requests: pre-events without journal logging, non-shadow, non-edit payloads (journal completeness wins).
 
 ### Advanced flags (hook.py)
 
@@ -119,7 +124,10 @@ The hook CLI queries the daemon first and falls back to identical in-process eva
 - `--profile strict|dev` - policy profile (or `AETHERIS_PROFILE`)
 - `--policy <file>` - JSON/TOML/YAML PolicyConfig override (or `AETHERIS_POLICY_PATH`)
 - `--journal-path <file>` / `AETHERIS_JOURNAL_PATH` - decision journal location
-- `--session-state <file>` - cross-turn SessionSecurityState JSON
+- `--session-state auto|<file>` - cross-turn SessionSecurityState IFC taint tracking (`auto` enabled by default in installer)
+- `--replace-tool-output` (`AETHERIS_POST_REPLACE_OUTPUT=1`) - emit redacted `updatedToolOutput`/`updatedMCPToolOutput` in `PostToolUse`
+- `--semantic-guard` (`AETHERIS_SEMANTIC_GUARD=1`) - enable optional split-conformal semantic prompt-injection classifier in `PostToolUse`
+- `--sandbox-wrap auto|bwrap` - wrap approved shell commands in OS sandbox containment (`bwrap` on Linux when installed)
 - `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts
 
 ## Response contract

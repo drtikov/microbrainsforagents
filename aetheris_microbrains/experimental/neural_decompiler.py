@@ -1,10 +1,8 @@
 """
-Part 2B: Neural Decompiler (Weight-Space to Symbolic Rule Inversion)
-===================================================================
-Inspired by 2025-2026 decompiler research (Inverting Sub-Symbolic Weights to Logic):
-Translates learned synaptic connections in micro-transformer weight matrices
-BACK into human-readable Python logic rules and scientific hypotheses.
-Completes the bidirectional loop: Code -> Weights -> Self-Evolution -> Decompiled Code.
+Part 2B: Neural Decompiler (Weight-Space to Symbolic Rule Inversion, Experimental)
+=================================================================================
+Experimental utility (not loaded on runtime hook/decision paths): translates learned
+synaptic connections in micro-transformer weight matrices into readable Python rules.
 """
 
 from __future__ import annotations
@@ -90,8 +88,8 @@ class NeuralDecompiler:
             "def neural_router(intent: str) -> str:",
         ]
         for trig, (targ, conf) in unique_rules.items():
-            lines.append(f"    if intent == '{trig}':  # confidence: {conf}")
-            lines.append(f"        return '{targ}'")
+            lines.append(f"    if intent == {trig!r}:  # confidence: {conf}")
+            lines.append(f"        return {targ!r}")
         lines.append("    return 'fallback_default'")
 
         decompiled_python = "\n".join(lines)

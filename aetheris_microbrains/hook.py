@@ -15,27 +15,39 @@ import argparse
 import hashlib
 import json
 import os
-import re
+import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .core.runtime_paths import append_jsonl_bounded, get_default_journal_path
-from .core.secrets import _REDACT_PATTERNS as _HOOK_REDACT_PATTERNS, redact_secrets as _redact_error_text
+from .core.runtime_paths import (
+    append_jsonl_bounded,
+    get_default_journal_path,
+    get_default_session_state_path,
+)
+from .core.secrets import redact_secrets as _redact_error_text
 
 _DEFAULT_HOOK_JOURNAL_PATH = get_default_journal_path()
 
 
 def _resolve_journal_path(journal_path: Optional[str] = None) -> Path:
-    """Resolve explicit CLI/argument journal path, env override, or default state journal."""
+    """Resolve explicit CLI/argument journal path, env override, or default state journal dynamically."""
     explicit = str(journal_path or "").strip()
     if explicit:
         return Path(explicit)
-    env_path = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
-    if env_path:
-        return Path(env_path)
-    return _DEFAULT_HOOK_JOURNAL_PATH
+    return get_default_journal_path()
+
+
+def _resolve_session_state_path(raw_path: Optional[str]) -> Optional[str]:
+    """Resolve explicit path, `auto` per-session state file, or env `AETHERIS_SESSION_STATE_PATH`."""
+    cand = str(raw_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    if not cand:
+        return None
+    if cand.lower() == "auto":
+        return str(get_default_session_state_path())
+    return cand
 
 
 def _append_shadow_error_journal(
@@ -112,8 +124,9 @@ def _resolve_hook_policy(
 
 
 def _load_post_tool_helpers():
-    from .core.layered_decision_engine import is_protected_path, record_decision_journal, scrub_tool_output
+    from .core.layered_decision_engine import is_protected_path, record_decision_journal
     from .core.mcp_security import SessionSecurityState, detect_prompt_injection
+    from .core.secrets import scrub_tool_output
     return scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path
 
 
@@ -153,6 +166,10 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized: Dict[str, Any] = {"tool": tool_name}
     if "file_path" in tool_input or "path" in tool_input or "notebook_path" in tool_input:
         normalized["path"] = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
+    elif clean_name == "search_code" and tool_input.get("glob"):
+        normalized["path"] = tool_input.get("glob")
+    elif clean_name == "list_dir" and tool_input.get("pattern"):
+        normalized["path"] = tool_input.get("pattern")
 
     # Only map shell command arguments to `cmd` when the tool itself is a known shell/exec tool
     if clean_name in _SHELL_CANONICAL_TOOLS and ("command" in tool_input or "cmd" in tool_input):
@@ -211,6 +228,40 @@ _EDIT_RECONSTRUCT_EXTS = {
 _EDIT_RECONSTRUCT_NAMES = {"makefile", "dockerfile", "gnumakefile", "justfile"}
 
 
+def _build_sandbox_wrapped_command(
+    raw_cmd: str,
+    sandbox_mode: str = "none",
+    project_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Wrap an allowed shell command with OS sandboxing (`bwrap` / `sandbox-exec`) when requested."""
+    mode = str(sandbox_mode or "none").strip().lower()
+    if mode in {"", "none", "off", "false"}:
+        return None
+    if mode == "auto":
+        if sys.platform.startswith("linux") and shutil.which("bwrap"):
+            mode = "bwrap"
+        elif sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            mode = "seatbelt"
+        else:
+            return None
+    proj = str(Path(project_dir or os.getcwd()).resolve())
+    quoted_cmd = shlex.quote(raw_cmd)
+    if mode == "bwrap":
+        return (
+            f"bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp "
+            f"--bind {shlex.quote(proj)} {shlex.quote(proj)} --chdir {shlex.quote(proj)} "
+            f"-- /bin/sh -c {quoted_cmd}"
+        )
+    if mode == "seatbelt":
+        profile = (
+            '(version 1)(allow default)'
+            f'(deny file-write* (subpath "/"))'
+            f'(allow file-write* (subpath "{proj}") (subpath "/tmp"))'
+        )
+        return f"sandbox-exec -p {shlex.quote(profile)} /bin/sh -c {quoted_cmd}"
+    return None
+
+
 def evaluate_hook_payload(
     payload: Dict[str, Any],
     strict_ast: bool = False,
@@ -223,6 +274,7 @@ def evaluate_hook_payload(
     session_state_path: Optional[str] = None,
     profile: Optional[str] = None,
     policy_path: Optional[str] = None,
+    sandbox_wrap: str = "none",
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
@@ -261,7 +313,7 @@ def evaluate_hook_payload(
     explicit_journal = str(journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
     if explicit_journal:
         ctx["journal_path"] = str(_resolve_journal_path(explicit_journal))
-    raw_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    raw_sess = _resolve_session_state_path(session_state_path)
     explicit_sess = _scope_session_state_path(raw_sess, payload)
     if explicit_sess:
         ctx["session_state_path"] = explicit_sess
@@ -327,6 +379,14 @@ def evaluate_hook_payload(
             "permissionDecision": perm,
             "permissionDecisionReason": reason,
         }
+        if dec == "allow" and norm.get("tool") == "execute_shell" and norm.get("cmd"):
+            wrapped_cmd = _build_sandbox_wrapped_command(
+                str(norm["cmd"]),
+                sandbox_mode=sandbox_wrap,
+                project_dir=ctx.get("project_dir"),
+            )
+            if wrapped_cmd:
+                hook_specific["updatedInput"] = {"command": wrapped_cmd}
 
     out: Dict[str, Any] = {
         "hookSpecificOutput": hook_specific,
@@ -368,6 +428,8 @@ def evaluate_post_tool_use_payload(
     journal_path: Optional[str] = None,
     session_state_path: Optional[str] = None,
     policy_path: Optional[str] = None,
+    replace_tool_output: bool = False,
+    semantic_guard: bool = False,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
     scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
@@ -425,6 +487,8 @@ def evaluate_post_tool_use_payload(
     _POST_SCRUB_EDGE_SLICE = 65536
     _POST_SCRUB_MAX_OVERSIZED_SLICES = 20
 
+    use_semantic = bool(semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
+
     def _record_inj(sample: str) -> None:
         nonlocal injection_severity
         inj = detect_prompt_injection(sample)
@@ -434,6 +498,18 @@ def evaluate_post_tool_use_payload(
                     injection_findings.append(f_item)
             if inj["severity"] == "high" or injection_severity == "none":
                 injection_severity = inj["severity"]
+        if use_semantic and sample.strip():
+            try:
+                from .core.semantic_guard import detect_semantic_injection
+
+                sem = detect_semantic_injection(sample[:4096])
+                if sem.get("injection_detected"):
+                    if "semantic_prompt_injection" not in injection_findings:
+                        injection_findings.append("semantic_prompt_injection")
+                    if injection_severity == "none":
+                        injection_severity = "medium"
+            except Exception:
+                pass
 
     def _scrub_node(node: Any) -> Any:
         nonlocal total_count, post_scrub_total_bytes, scrub_truncated, oversized_inj_slices
@@ -475,7 +551,7 @@ def evaluate_post_tool_use_payload(
     injection_detected = len(injection_findings) > 0
     any_alert = secrets_found or injection_detected
 
-    raw_sess = str(session_state_path or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    raw_sess = _resolve_session_state_path(session_state_path)
     explicit_sess = _scope_session_state_path(raw_sess, payload)
     if explicit_sess:
         SessionSecurityState(Path(explicit_sess)).record_post_tool(
@@ -486,7 +562,15 @@ def evaluate_post_tool_use_payload(
         )
 
     caps = payload.get("hook_capabilities") if isinstance(payload.get("hook_capabilities"), dict) else {}
-    supports_replace = bool(caps.get("supports_updated_tool_output"))
+    supports_replace = bool(
+        caps.get("supports_updated_tool_output")
+        or replace_tool_output
+        or os.getenv("AETHERIS_POST_REPLACE_OUTPUT") == "1"
+    )
+    supports_mcp_replace = bool(
+        caps.get("supports_updated_mcp_tool_output")
+        or (supports_replace and tool_raw.lower().startswith("mcp__"))
+    )
     host_specific: Optional[Dict[str, Any]] = None
     if shadow_mode:
         host_action = "shadow_observe"
@@ -510,6 +594,8 @@ def evaluate_post_tool_use_payload(
             }
             if supports_replace:
                 host_specific["updatedToolOutput"] = redacted_output
+                if supports_mcp_replace:
+                    host_specific["updatedMCPToolOutput"] = redacted_output
                 host_action = "replace_tool_output"
                 scrubbing_mode = "replace_tool_output"
             else:
@@ -582,12 +668,31 @@ def evaluate_post_tool_use_payload(
     return out
 
 
+def _format_hook_error_stdout(event_kind: str, err_msg: str) -> str:
+    norm_event = str(event_kind or "").strip().lower().replace("_", "-")
+    if norm_event in {"post-tool-use", "posttooluse"}:
+        return _format_hook_stdout(
+            {
+                "hookEventName": "PostToolUse",
+                "additionalContext": f"SECURITY ERROR (Aetheris Microbrains): {err_msg}",
+            }
+        )
+    return _format_hook_stdout(
+        {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": err_msg,
+        }
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
     if host not in {"claude", "codex", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
+    event_kind = "pre-tool-use"
     raw: str = ""
     try:
         parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse/PostToolUse Hook")
@@ -607,7 +712,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.add_argument(
             "--session-state",
             default=str(os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip() or None,
-            help="Optional path for cross-turn SessionSecurityState JSON (or set AETHERIS_SESSION_STATE_PATH)",
+            help="Optional path (or 'auto') for cross-turn SessionSecurityState JSON (or set AETHERIS_SESSION_STATE_PATH)",
         )
         parser.add_argument(
             "--auto-allow",
@@ -641,17 +746,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             default=str(os.getenv("AETHERIS_POLICY_PATH") or "").strip() or None,
             help="Path to JSON/TOML/YAML PolicyConfig file (or set AETHERIS_POLICY_PATH)",
         )
+        parser.add_argument(
+            "--replace-tool-output",
+            action="store_true",
+            help="Emit updatedToolOutput/updatedMCPToolOutput with redacted text in Claude PostToolUse responses",
+        )
+        parser.add_argument(
+            "--semantic-guard",
+            action="store_true",
+            help="Enable optional semantic prompt-injection classifier in PostToolUse (or AETHERIS_SEMANTIC_GUARD=1)",
+        )
+        parser.add_argument(
+            "--sandbox-wrap",
+            choices=["none", "bwrap", "seatbelt", "auto"],
+            default=str(os.getenv("AETHERIS_SANDBOX_WRAP") or "none").strip().lower(),
+            help="Optional OS sandbox wrapper (`bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+        )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
         shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
+        replace_tool_output = bool(args.replace_tool_output or os.getenv("AETHERIS_POST_REPLACE_OUTPUT") == "1")
+        semantic_guard = bool(args.semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
+        sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
         event_kind = str(args.event)
         codex_escalate_deny = bool(args.codex_escalate_deny)
         profile_arg = args.profile
         policy_arg = args.policy
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
-        session_state_path = str(args.session_state or os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip() or None
+        session_state_path = _resolve_session_state_path(args.session_state)
 
         raw = sys.stdin.read().strip()
         if not raw:
@@ -664,6 +788,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     raw_payload="",
                 )
                 print("empty_hook_payload (shadow passthrough)", file=sys.stderr)
+                return 0
+            if event_kind == "post-tool-use":
+                if host == "generic":
+                    print(json.dumps({"decision": "allow", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
                 return 0
             if host == "codex":
                 if codex_escalate_deny:
@@ -709,15 +837,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
                 return 2
-            print(
-                _format_hook_stdout(
-                    {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": err_msg,
-                    }
-                )
-            )
+            print(_format_hook_error_stdout(event_kind, err_msg))
             return 2
 
         if not isinstance(payload, dict):
@@ -735,43 +855,61 @@ def main(argv: Optional[list[str]] = None) -> int:
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
                 return 2
-            print(
-                _format_hook_stdout(
-                    {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": err_msg,
-                    }
-                )
-            )
+            print(_format_hook_error_stdout(event_kind, err_msg))
             return 2
 
         # A1/A3: ask the local warm evaluator daemon first; on ANY failure
-        # (not running, stale version, refused connection, timeout) this
-        # returns None and the identical in-process evaluation below runs.
-        # Skip the daemon when caller-local env overrides (break-glass policy
-        # edit or custom state dir) differ from a standalone daemon process.
+        # returns None and falls back to identical in-process evaluation.
         daemon_result: Optional[Dict[str, Any]] = None
-        if os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1" and not os.getenv("AETHERIS_STATE_DIR"):
+        if os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1" and not os.getenv("AETHERIS_STATE_DIR") and sandbox_wrap in {"", "none"}:
             try:
                 from .hook_daemon import query_daemon
+
+                explicit_flags: list[str] = []
+                if args.strict_ast:
+                    explicit_flags.append("strict_ast")
+                if log_decisions:
+                    explicit_flags.append("log_decisions")
+                if shadow_mode:
+                    explicit_flags.append("shadow")
+                if codex_escalate_deny:
+                    explicit_flags.append("codex_escalate_deny")
+                if replace_tool_output:
+                    explicit_flags.append("replace_tool_output")
+                if semantic_guard:
+                    explicit_flags.append("semantic_guard")
+
+                req_flags: Dict[str, Any] = {
+                    "host": host,
+                    "cwd": os.getcwd(),
+                }
+                if args.strict_ast:
+                    req_flags["strict_ast"] = True
+                if log_decisions:
+                    req_flags["log_decisions"] = True
+                if shadow_mode:
+                    req_flags["shadow"] = True
+                if codex_escalate_deny:
+                    req_flags["codex_escalate_deny"] = True
+                if replace_tool_output:
+                    req_flags["replace_tool_output"] = True
+                if semantic_guard:
+                    req_flags["semantic_guard"] = True
+                if journal_path:
+                    req_flags["journal_path"] = journal_path
+                if session_state_path:
+                    req_flags["session_state_path"] = session_state_path
+                if profile_arg:
+                    req_flags["profile"] = profile_arg
+                if policy_arg:
+                    req_flags["policy_path"] = policy_arg
 
                 daemon_result = query_daemon(
                     {
                         "event": "post" if event_kind == "post-tool-use" else "pre",
                         "payload": payload,
-                        "flags": {
-                            "strict_ast": bool(args.strict_ast),
-                            "log_decisions": log_decisions,
-                            "shadow": shadow_mode,
-                            "host": host,
-                            "codex_escalate_deny": codex_escalate_deny,
-                            "journal_path": journal_path,
-                            "session_state_path": session_state_path,
-                            "profile": profile_arg,
-                            "policy_path": policy_arg,
-                            "cwd": os.getcwd(),
-                        },
+                        "flags": req_flags,
+                        "explicit_flags": explicit_flags,
                     }
                 )
             except Exception:
@@ -791,6 +929,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     journal_path=journal_path,
                     session_state_path=session_state_path,
                     policy_path=policy_arg,
+                    replace_tool_output=replace_tool_output,
+                    semantic_guard=semantic_guard,
                 )
             if shadow_mode:
                 if post_res.get("journal_written") is False:
@@ -818,6 +958,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 session_state_path=session_state_path,
                 profile=profile_arg,
                 policy_path=policy_arg,
+                sandbox_wrap=sandbox_wrap,
             )
         if shadow_mode:
             if result.get("journal_written") is False:
@@ -859,7 +1000,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
         if host == "codex" and result.get("host_action") == "defer_to_host_policy":
             return 0
-        if perm == "allow" and not auto_allow:
+        has_updated_input = isinstance(result.get("hookSpecificOutput"), dict) and "updatedInput" in result["hookSpecificOutput"]
+        if perm == "allow" and not auto_allow and not has_updated_input:
             # Silent pass-through: let host apply normal user permission rules
             return 0
         if result["hookSpecificOutput"] is not None:
@@ -880,15 +1022,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if host == "generic":
             print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
             return 2
-        print(
-            _format_hook_stdout(
-                {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": err_msg,
-                }
-            )
-        )
+        print(_format_hook_error_stdout(event_kind, err_msg))
         return 2
 
 

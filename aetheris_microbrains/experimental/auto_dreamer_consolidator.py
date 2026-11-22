@@ -17,9 +17,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..core.runtime_paths import get_writable_store_dir
+
 log = logging.getLogger("aetheris.memory.auto_dreamer")
 
-_PKG_STORE_DIR = Path(__file__).resolve().parents[1] / "memory" / "store"
+_PKG_STORE_DIR = get_writable_store_dir()
 WIKI_KNOWLEDGE_PATH = _PKG_STORE_DIR / "wiki_knowledge.json"
 MEMORY_NOTES_PATH = _PKG_STORE_DIR / "memory_notes.jsonl"
 

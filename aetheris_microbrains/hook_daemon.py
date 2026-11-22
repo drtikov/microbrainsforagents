@@ -33,8 +33,10 @@ import secrets
 import socket
 import sys
 import tempfile
+import threading
 import time
 from collections import OrderedDict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -104,11 +106,9 @@ class VerdictCache:
         self._store: "OrderedDict[str, tuple]" = OrderedDict()
 
     def _purge_expired(self, now: float) -> None:
-        while self._store:
-            _key, (ts, _v) = next(iter(self._store.items()))
-            if now - ts <= self._ttl:
-                break
-            self._store.popitem(last=False)
+        expired = [k for k, (ts, _v) in self._store.items() if now - ts > self._ttl]
+        for k in expired:
+            self._store.pop(k, None)
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         now = time.monotonic()
@@ -116,10 +116,7 @@ class VerdictCache:
         item = self._store.get(key)
         if item is None:
             return None
-        ts, verdict = item
-        if now - ts > self._ttl:
-            self._store.pop(key, None)
-            return None
+        _ts, verdict = item
         self._store.move_to_end(key)
         return verdict
 
@@ -164,9 +161,27 @@ def _file_sig(raw_path: Optional[str]) -> Any:
         return None
     try:
         st = Path(raw_path).stat()
-        return (int(st.st_mtime_ns), int(st.st_size))
+        return (int(st.st_mtime_ns), int(st.st_size), int(getattr(st, "st_ino", 0)))
     except OSError:
         return None
+
+
+def _merge_flags(daemon_flags: Dict[str, Any], req: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge daemon CLI defaults with client flags without clobbering daemon policy on unset client defaults."""
+    merged = dict(daemon_flags or {})
+    req_flags = req.get("flags") if isinstance(req.get("flags"), dict) else {}
+    explicit = set(req.get("explicit_flags") or ())
+    bool_keys = {"strict_ast", "log_decisions", "shadow", "codex_escalate_deny", "replace_tool_output", "semantic_guard"}
+    for k, v in req_flags.items():
+        if v is None:
+            continue
+        if k in bool_keys:
+            if bool(v) or k in explicit or k not in merged:
+                merged[k] = bool(v)
+        else:
+            if k in explicit or k not in merged:
+                merged[k] = v
+    return merged
 
 
 def _cache_key(
@@ -174,6 +189,7 @@ def _cache_key(
     flags: Dict[str, Any],
     policy_sig: Any = None,
     mcp_sig: Any = None,
+    pins_sig: Any = None,
 ) -> str:
     try:
         canonical = json.dumps(
@@ -182,12 +198,13 @@ def _cache_key(
                 "f": sorted((str(k), str(v)) for k, v in flags.items()),
                 "pol": policy_sig,
                 "mcp": mcp_sig,
+                "pins": pins_sig,
             },
             sort_keys=True,
             separators=(",", ":"),
         )
     except (TypeError, ValueError):
-        canonical = repr((payload, flags, policy_sig, mcp_sig))
+        canonical = repr((payload, flags, policy_sig, mcp_sig, pins_sig))
     return hashlib.sha256(canonical.encode("utf-8", "ignore")).hexdigest()
 
 
@@ -216,7 +233,14 @@ def evaluate_request(
     resolved_journal = _resolve_under_cwd(flags.get("journal_path"), caller_cwd)
     resolved_sess = _resolve_under_cwd(flags.get("session_state_path"), caller_cwd)
     proj_dir = caller_cwd or (str(payload.get("cwd") or "").strip() if isinstance(payload, dict) else "") or None
-    mcp_sig = _file_sig(str(Path(proj_dir) / ".mcp.json")) if proj_dir else None
+    mcp_sig = (
+        (_file_sig(str(Path(proj_dir) / ".mcp.json")), _file_sig(str(Path(proj_dir) / "mcp.json")))
+        if proj_dir
+        else None
+    )
+    from .core.mcp_tiers import get_pin_store_path
+
+    pins_sig = _file_sig(str(get_pin_store_path()))
 
     cacheable = (
         cache is not None
@@ -227,7 +251,7 @@ def evaluate_request(
         and not _payload_is_editish(payload)
     )
     key = (
-        _cache_key(payload, flags, policy_sig=_file_sig(resolved_policy), mcp_sig=mcp_sig)
+        _cache_key(payload, flags, policy_sig=_file_sig(resolved_policy), mcp_sig=mcp_sig, pins_sig=pins_sig)
         if cacheable
         else None
     )
@@ -248,6 +272,8 @@ def evaluate_request(
             journal_path=resolved_journal,
             session_state_path=resolved_sess,
             policy_path=resolved_policy,
+            replace_tool_output=bool(flags.get("replace_tool_output")),
+            semantic_guard=bool(flags.get("semantic_guard")),
         )
     else:
         verdict = evaluate_hook_payload(
@@ -299,6 +325,44 @@ def query_daemon(
         return None
 
 
+def _configure_loopback_socket(srv: socket.socket) -> None:
+    """Prevent local port hijacking on Windows (SO_EXCLUSIVEADDRUSE); use SO_REUSEADDR on POSIX."""
+    if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
+def ping_daemon(
+    state_path: Optional[Path] = None,
+    timeout: float = 0.3,
+) -> Optional[Dict[str, Any]]:
+    """Probe the running daemon cleanly (supports both TCP and HTTP modes)."""
+    p = Path(state_path) if state_path else get_daemon_state_path()
+    try:
+        info = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(info, dict):
+            return None
+        port = int(info.get("port") or 0)
+        if not port:
+            return None
+        mode = str(info.get("mode") or "tcp").lower()
+        if mode == "http":
+            import urllib.request
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        auth_value = str(info.get("auth") or "")
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
+            conn.settimeout(timeout)
+            req = {"action": "ping", "auth": auth_value, "id": secrets.token_hex(4)}
+            conn.sendall((json.dumps(req) + "\n").encode("utf-8"))
+            line = _read_line(conn)
+        return json.loads(line)
+    except Exception:
+        return None
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 0,
@@ -308,7 +372,7 @@ def serve(
 ) -> int:
     """Run the daemon accept loop until Ctrl+C / max_requests; returns 0."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _configure_loopback_socket(srv)
     srv.bind((host, port))
     srv.listen(4)
     bound_port = int(srv.getsockname()[1])
@@ -317,6 +381,7 @@ def serve(
     if target.exists() and target.is_dir():
         target = target / "hook_daemon.json"
     info = {
+        "mode": "tcp",
         "port": bound_port,
         "pid": os.getpid(),
         "auth": auth_value,
@@ -334,23 +399,25 @@ def serve(
                 conn, _addr = srv.accept()
             except OSError:
                 continue
-            served += 1
             try:
                 conn.settimeout(_DEFAULT_RECV_TIMEOUT)
                 line = _read_line(conn)
                 req = json.loads(line)
                 resp: Dict[str, Any]
                 if not isinstance(req, dict) or not hmac.compare_digest(str(req.get("auth") or ""), auth_value):
+                    served += 1
                     resp = {"id": req.get("id") if isinstance(req, dict) else None, "error": "auth"}
+                elif req.get("action") == "ping":
+                    resp = {"id": req.get("id"), "ok": True, "version": DAEMON_VERSION, "mode": "tcp"}
                 else:
+                    served += 1
                     req.pop("auth", None)
-                    merged_flags = dict(daemon_flags)
-                    merged_flags.update(req.get("flags") or {})
-                    req["flags"] = merged_flags
+                    req["flags"] = _merge_flags(daemon_flags, req)
                     verdict, cached = evaluate_request(req, cache=cache)
                     resp = {"id": req.get("id"), "verdict": verdict, "cached": cached}
                 conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
             except Exception as exc:
+                served += 1
                 try:
                     conn.sendall((json.dumps({"error": f"{type(exc).__name__}: {exc}"}) + "\n").encode("utf-8"))
                 except Exception:
@@ -372,21 +439,148 @@ def serve(
     return 0
 
 
+class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def serve_http(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    state_path: Optional[Path] = None,
+    flags: Optional[Dict[str, Any]] = None,
+    token: Optional[str] = None,
+    max_requests: Optional[int] = None,
+) -> int:
+    """Native Claude Code `type: "http"` hook endpoint (zero per-call Python spawn)."""
+    auth_value = str(token or os.getenv("AETHERIS_DAEMON_TOKEN") or "").strip() or secrets.token_hex(16)
+    daemon_flags = dict(flags or {})
+    cache = VerdictCache()
+    target = Path(state_path) if state_path else get_daemon_state_path()
+    if target.exists() and target.is_dir():
+        target = target / "hook_daemon.json"
+    served_lock = threading.Lock()
+    served_count = 0
+
+    class _HookHTTPHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # silence stderr noise
+            return
+
+        def _send_json(self, code: int, body: Dict[str, Any]) -> None:
+            raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            if self.path.split("?")[0] == "/health":
+                self._send_json(200, {"ok": True, "version": DAEMON_VERSION, "mode": "http"})
+            else:
+                self._send_json(404, {"error": "not_found"})
+
+        def do_POST(self) -> None:
+            nonlocal served_count
+            path = self.path.split("?")[0]
+            if path not in {"/v1/hook/pre", "/v1/hook/post"}:
+                self._send_json(404, {"error": "not_found"})
+                return
+            auth_hdr = self.headers.get("Authorization", "")
+            supplied = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+            if not hmac.compare_digest(supplied, auth_value):
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            try:
+                cl = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._send_json(400, {"error": "invalid_content_length"})
+                return
+            if cl < 0 or cl > _MAX_REQUEST_BYTES:
+                self._send_json(413, {"error": "payload_too_large"})
+                return
+            raw_body = self.rfile.read(cl)
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except Exception as exc:
+                self._send_json(400, {"error": f"invalid_json:{exc}"})
+                return
+            if not isinstance(payload, dict):
+                self._send_json(400, {"error": "expected_json_object"})
+                return
+            ev = "post" if path == "/v1/hook/post" else "pre"
+            req = {"event": ev, "payload": payload, "flags": dict(daemon_flags)}
+            verdict, _cached = evaluate_request(req, cache=cache)
+            if daemon_flags.get("shadow"):
+                out_body: Dict[str, Any] = {}
+            elif verdict.get("hookSpecificOutput") is not None:
+                if (
+                    ev == "pre"
+                    and verdict.get("permissionDecision") == "allow"
+                    and not daemon_flags.get("auto_allow")
+                    and "updatedInput" not in verdict["hookSpecificOutput"]
+                ):
+                    out_body = {}
+                else:
+                    out_body = {"hookSpecificOutput": verdict["hookSpecificOutput"]}
+            else:
+                out_body = {}
+            self._send_json(200, out_body)
+            with served_lock:
+                served_count += 1
+                if max_requests is not None and served_count >= max_requests:
+                    threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+    httpd = _ExclusiveThreadingHTTPServer((host, port), _HookHTTPHandler)
+    bound_port = int(httpd.server_address[1])
+    _atomic_write_json(
+        target,
+        {
+            "mode": "http",
+            "port": bound_port,
+            "url": f"http://{host}:{bound_port}",
+            "pid": os.getpid(),
+            "auth": auth_value,
+            "version": DAEMON_VERSION,
+            "started_at": time.time(),
+        },
+    )
+    print(f"hook HTTP daemon listening on http://{host}:{bound_port} (state: {target}, version {DAEMON_VERSION})")
+    try:
+        httpd.serve_forever(poll_interval=0.1)
+    except KeyboardInterrupt:
+        print("hook HTTP daemon stopping (Ctrl+C)")
+    finally:
+        httpd.server_close()
+        try:
+            if target.exists() and json.loads(target.read_text(encoding="utf-8")).get("pid") == os.getpid():
+                target.unlink()
+        except Exception:
+            pass
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m aetheris_microbrains.hook_daemon",
-        description="Warm evaluator daemon for the Aetheris hook (falls back safely).",
+        description="Warm evaluator daemon (TCP or native Claude Code HTTP hook mode; falls back safely).",
     )
-    parser.add_argument("--port", type=int, default=0, help="TCP port (0 = ephemeral)")
+    parser.add_argument("--port", type=int, default=0, help="TCP/HTTP port (0 = ephemeral)")
+    parser.add_argument("--http", action="store_true", help="Serve native Claude Code `type: http` hook endpoints (/v1/hook/pre, /v1/hook/post, /health)")
     parser.add_argument("--state-dir", default=None, help="Override the state directory for hook_daemon.json")
     parser.add_argument("--max-requests", type=int, default=None, help="Stop after N requests (testing)")
     parser.add_argument("--log-decisions", action="store_true", help="Log decisions to the journal")
     parser.add_argument("--shadow", action="store_true", help="Shadow mode passthrough")
     parser.add_argument("--strict-ast", action="store_true", help="Strict AST passthrough")
+    parser.add_argument("--auto-allow", action="store_true", help="Emit allow verdicts explicitly in HTTP mode")
     parser.add_argument("--profile", default=None, help="Policy profile passthrough")
     parser.add_argument("--policy", default=None, help="Policy file passthrough")
     parser.add_argument("--journal-path", default=None, help="Journal path passthrough")
-    parser.add_argument("--session-state", default=None, help="Session state path passthrough")
+    parser.add_argument("--session-state", default=None, help="Session state path (or 'auto') passthrough")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -399,12 +593,16 @@ def main(argv: Optional[list] = None) -> int:
         "log_decisions": bool(args.log_decisions),
         "shadow": bool(args.shadow),
         "strict_ast": bool(args.strict_ast),
+        "auto_allow": bool(args.auto_allow),
         "profile": args.profile,
         "policy_path": args.policy,
         "journal_path": args.journal_path,
         "session_state_path": args.session_state,
     }
     state_path = get_daemon_state_path(Path(args.state_dir)) if args.state_dir else None
+    if args.http:
+        port_val = args.port if args.port else 8765
+        return serve_http(port=port_val, state_path=state_path, flags=flags, max_requests=args.max_requests)
     return serve(port=args.port, state_path=state_path, flags=flags, max_requests=args.max_requests)
 
 

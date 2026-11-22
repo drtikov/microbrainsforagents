@@ -54,17 +54,21 @@ This repository includes a ready-to-use **Claude Code skill** in `.claude/skills
 
 ```bash
 pip install -e .
-python .claude/skills/microbrains/install_hook.py              # turn on enforce mode (allow / ask / deny)
+python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny) + --session-state auto
 python .claude/skills/microbrains/install_hook.py --shadow     # observe-only mode first (logs, never blocks)
 python .claude/skills/microbrains/install_hook.py --preset solo-dev  # preset bundles: solo-dev | ci | paranoid (--no-* flags override)
+python .claude/skills/microbrains/install_hook.py --http-daemon http://127.0.0.1:8765  # native Claude Code HTTP hook mode
 python .claude/skills/microbrains/install_hook.py --shared     # optional: write portable config to .claude/settings.json
 python .claude/skills/microbrains/install_hook.py --dry-run    # preview changes without writing
 python .claude/skills/microbrains/install_hook.py --self-test  # verify imports, probe verdicts, and installed matchers
 python .claude/skills/microbrains/install_hook.py --remove     # uninstall hooks cleanly anytime
 python -m aetheris_microbrains.doctor                          # full installation, policy, journal, MCP pin & daemon health check
+python -m aetheris_microbrains.doctor --scan-mcp               # audit .mcp.json servers & tool manifests for poisoning/rug-pulls
 ```
 
-By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git). To reduce hook cold-start overhead during heavy sessions, you can optionally run the warm localhost evaluator (`python -m aetheris_microbrains.hook_daemon`); the hook CLI queries it with token auth and falls back seamlessly to identical in-process evaluation when absent.
+Installed console entrypoints: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`.
+
+By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection. To eliminate per-call hook startup overhead during heavy sessions, you can either run the warm TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or start the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765`) paired with `install_hook.py --http-daemon http://127.0.0.1:8765`.
 
 ### What It Gives You
 
@@ -157,18 +161,18 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Obfuscated Payload, Outbound Egress & High-Entropy Secret Screening (Layer 1):** Inspects applied Python ASTs/diffs (`eval`/`exec`, `os.system`, `subprocess(shell=True)`, `base64`-to-`exec`, `getattr` obfuscation, `__builtins__` tampering, `secret_leak_pattern_found`, `ast_secret_exfil_pattern`), non-Python diffs (shell scripts, Makefiles, Dockerfiles), **and** scans command strings and arbitrary nested tool/MCP/web arguments for raw API keys (Stripe `sk_live_...`, Anthropic, OpenAI, GitHub, HuggingFace, Google), database URIs (`postgres://`, `mysql://`, `mongodb://`), JWT tokens, Bearer headers, and PEM private keys (`layer1_secret_egress_veto`).
 * **Allowlist-First Shell Guard, Newline Injection & Wrapper Unwrapping:** Catches newline-separated commands (`echo ok\nrm -rf /`), unwraps wrapper commands (`xargs`, `find -exec/-ok`, `env`, `sudo`, `nohup`, `timeout`, inline `VAR=val`, `LD_PRELOAD` overrides) before running checks—blocking destructive shell chains (`rm -rf`, `env sh -c "rm -rf /"`, `curl | sh`, `dd of=/dev/`, `DROP DATABASE`) and secret env-var exposures (`echo $OPENAI_API_KEY`, `printenv GITHUB_TOKEN`), escalating bare `env`/`printenv`/`ls env:` and unrecognized commands.
 * **MCP Supply-Chain Security & Rug-Pull Defenses (`v0.7.6+`):**
-  * `scan_mcp_tools()` scans incoming MCP tool definitions for indirect prompt injection, payload poisoning, and tool shadowing against local built-ins.
-  * `detect_prompt_injection()` intercepts Unicode tag smuggling (`\U000E0000-\U000E007F`), bidirectional text overrides (`\u202E`), zero-width obfuscation, and spoofed system delimiters (`<IMPORTANT>`, `<system>`, `[OVERRIDE]`).
-  * `MCPManifestPinner` cryptographically hashes MCP schemas with SHA-256 and detects rug-pull mutations on restart.
-* **Multi-Turn Session Taint Gate (`SessionSecurityState`):** Tracks taint across multi-step agent conversations. Flags untrusted external inputs (web pages, user inputs) and sensitive file reads. Triggers immediate hard denial (`decision: "deny"`) if the **lethal trifecta** occurs (untrusted external ingestion + sensitive credential access + egress or mutation tool call).
-* **Post-Tool Output & Prompt Injection Screening (`evaluate_post_tool_use_payload` & `--event post-tool-use`):** Audits returned tool content for leaked credentials and indirect prompt injection before context assimilation and writes redacted security journal entries. Note that Claude Code's `PostToolUse` hook protocol injects an `additionalContext` security warning rather than rewriting tool stdout in place (while `mb.scrub_tool_output()` and `--host generic` return `redacted_output` directly for custom harnesses).
+  * `scan_mcp_tools()` scans incoming MCP tool definitions (including cross-tool ShareLock split payloads) for indirect prompt injection, payload poisoning, and tool shadowing against local built-ins (`trust_is_builtin_field=False` by default).
+  * `detect_prompt_injection()` intercepts NFKC/homoglyph evasion, Unicode tag smuggling (`\U000E0000-\U000E007F`), Variation Selectors (`\uFE00-\uFE0F`, `\U000E0100-\U000E01EF`), bidirectional text overrides (`\u202E`), zero-width obfuscation, and spoofed system delimiters (`<IMPORTANT>`, `<system>`, `<system-reminder>`, `[INST]`, `[OVERRIDE]`).
+  * Unified launch+manifest pinning (`save_mcp_manifest_pin`, `verify_mcp_manifest`, `doctor --pin-mcp` / `--scan-mcp`) pins `.mcp.json` commands and cryptographic SHA-256 tool hashes, failing closed on modified or newly added unpinned tools.
+* **Multi-Turn Session Taint Gate (`SessionSecurityState`):** Tracks IFC provenance tags across multi-step agent conversations (enabled automatically via `--session-state auto` in the installer). Flags untrusted external fetches/commands and sensitive file reads, triggering immediate hard denial (`decision: "deny"`) on the **lethal trifecta** before egress/mutation calls run.
+* **Post-Tool Output, Encoded Secrets & Semantic Prompt-Injection Screening (`evaluate_post_tool_use_payload` & `--event post-tool-use`):** Scrubs raw credentials, JSON-quoted secrets, URL basic auth, high-entropy tokens, and multi-line wrapped Base64/hex secret blobs. Emits `additionalContext` security warnings (and `--replace-tool-output` sets `updatedToolOutput`/`updatedMCPToolOutput`), with optional split-conformal `ConformalSemanticGuard` (`--semantic-guard` / `[guard-ml]` extra).
 * **Strict AST Allowlist (`--strict-ast` / `PolicyConfig(strict_ast_allowlist=True)`):** Escalates any Python diff importing modules outside `allowed_ast_imports` or invoking dynamic calls.
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
   * Every decision writes a forensic entry outside the package tree (`AETHERIS_STATE_DIR` or the OS user state directory, with `AETHERIS_JOURNAL_PATH` override and automatic 10 MiB `.1` rotation) containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, any `suppressed_findings`, and a redacted `payload_preview`.
   * Inspect reasons instantly in terminal: use `--last`, `--summary`, `--explain` / `--find <sha-prefix>`, `--daily`, or `--shadow-report` (projects enforce-mode deny/ask rates from `--shadow` journals).
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
-  * Policy controls also support `allowed_web_domains` (`http`/`https` allowlist under `require_approval_for_external`), `trusted_mcp_servers` / `doctor --pin-mcp <server>` (allowlisted read-only MCP verbs allow structurally; config drift fails closed), and opt-in depth-1 `import_taint_enabled`.
+  * Policy controls also support `allowed_web_domains`, `trusted_mcp_servers` / `doctor --pin-mcp <server>` / `--scan-mcp`, opt-in `import_taint_enabled`, additive `extra_protected_patterns`, `allow_inline_suppression`, and AgentSpec-style `custom_rules` (`action: deny | escalate`, `tool`, `path_glob`, `cmd_regex`), plus optional `[ast]` `tree-sitter-bash` shell AST verification.
 * **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
   * Load team policies dynamically via `PolicyConfig.from_file("my_policy.toml")` (or JSON/YAML).
   * **`strict` (default):** Zero-trust execution—escalates unknown commands or mutations to human confirmation.
@@ -259,11 +263,11 @@ Add to your `~/.claude/settings.json` or project `.claude/settings.json` hook co
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "python -m aetheris_microbrains.hook --strict-ast",
+            "command": "python -m aetheris_microbrains.hook --strict-ast --session-state auto",
             "onFailure": "block"
           }
         ]
@@ -272,6 +276,8 @@ Add to your `~/.claude/settings.json` or project `.claude/settings.json` hook co
   }
 }
 ```
+
+Native HTTP mode (`install_hook.py --http-daemon http://127.0.0.1:8765` paired with `python -m aetheris_microbrains.hook_daemon --http --port 8765`) eliminates Python subprocess spawn latency by registering `"type": "http"` hooks against `/v1/hook/pre` and `/v1/hook/post` with bearer-token auth (`$AETHERIS_DAEMON_TOKEN`).
 
 Verify inside Claude Code that the hook is registered via `/hooks` (or test that `rm -rf /` is blocked with exit code `2` and `stderr` output).
 
@@ -339,7 +345,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`v0.7.6`: 376 Passed, 2 Skipped)
+## 🧪 Testing & Reproducible Benchmarks (`465 Passed, 2 Skipped`)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 
@@ -408,6 +414,19 @@ python examples/08_frozen_advisor_benchmark.py
 | Simple Name+Desc Keyword | 94.2% | 92.9% | 98/120 | 7/120 | 79.5% | 48.8% | 0.284 ms |
 | Microbrains Top-4 (Per-Turn) | 100.0% | 100.0% | 78/120 | 0/120 | 52.9% | **4.1%** | 7.412 ms |
 | **Microbrains Top-4 (Session-Sticky)** | **100.0%** | **100.0%** | **78/120** | **0/120** | **56.8%** | **56.8%** | **5.559 ms** |
+
+### 4. Agent Security & Anti-Evasion Benchmark (`examples/10_agent_security_benchmark.py`)
+Reproducible public-pattern security suite covering shell/PowerShell bypasses, Python AST evasion & unsafe suppression attempts, MCP poisoning/spoofing, Unicode Variation Selector smuggling, multi-line Base64/JSON/URL-auth secret scrubbing, IFC lethal trifecta taint blocking, AgentSpec `custom_rules`, and split-conformal `ConformalSemanticGuard`:
+
+```bash
+python examples/10_agent_security_benchmark.py
+```
+
+| Metric | Observed Result |
+| --- | ---: |
+| Attack detection (TPR) | **22 / 22 (100.0%)** |
+| Benign false positives (FPR) | **0 / 12 (0.0%)** |
+| Latency (`p50` / `p95`) | **0.868 ms / 2.654 ms** |
 
 ---
 

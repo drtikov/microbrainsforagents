@@ -34,8 +34,8 @@ PROJECT_DIR = SKILL_DIR.parents[2]
 SETTINGS_LOCAL_PATH = PROJECT_DIR / ".claude" / "settings.local.json"
 SETTINGS_SHARED_PATH = PROJECT_DIR / ".claude" / "settings.json"
 
-PRE_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*"
-POST_TOOL_MATCHER = "Bash|Read|WebFetch|WebSearch|mcp__.*"
+PRE_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+POST_TOOL_MATCHER = "Bash|Read|Grep|WebFetch|WebSearch|mcp__.*"
 
 # Forward slashes + double quotes: hooks run through Git Bash on Windows or
 # sh / cmd.exe; single-quoted paths break under cmd.exe and unescaped backslashes
@@ -45,7 +45,7 @@ _PY = sys.executable.replace("\\", "/")
 
 def _quote_cmd_token(tok: str) -> str:
     """Double-quote a token when it contains spaces or shell metacharacters."""
-    s = str(tok)
+    s = str(tok).replace("\\", "/")
     if not s or any(ch in s for ch in (' ', '\t', '\n', '"', "'", '&', '|', ';', '<', '>', '(', ')')):
         return '"' + s.replace('"', '\\"') + '"'
     return s
@@ -75,10 +75,32 @@ def _hook_entry(
     return entry
 
 
+def _http_hook_entry(
+    url: str,
+    timeout: int = 5,
+    is_async: bool = False,
+    on_failure: str | None = None,
+    token_env: str = "AETHERIS_DAEMON_TOKEN",
+) -> dict:
+    entry: dict = {
+        "type": "http",
+        "url": url,
+        "timeout": timeout,
+        "headers": {"Authorization": f"Bearer ${token_env}"},
+    }
+    if on_failure is not None:
+        entry["onFailure"] = on_failure
+    if is_async:
+        entry["async"] = True
+    return entry
+
+
 def _is_aetheris_entry(entry: dict) -> bool:
     if not isinstance(entry, dict):
         return False
     if "aetheris_microbrains.hook" in str(entry.get("command", "")):
+        return True
+    if entry.get("type") == "http" and "/v1/hook/" in str(entry.get("url", "")):
         return True
     # Matcher wrappers nest the command under "hooks"; recurse to identify wrappers.
     return any(
@@ -153,11 +175,12 @@ def install(
     auto_allow: bool = False,
     profile: str | None = None,
     policy: str | None = None,
-    session_state: str | None = None,
+    session_state: str | None = "auto",
     journal_path: str | None = None,
     async_post: bool = False,
     project_dir: Path | None = None,
     dry_run: bool = False,
+    http_daemon: str | None = None,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -184,7 +207,7 @@ def install(
     if policy:
         pre_extra.extend(["--policy", policy])
         post_extra.extend(["--policy", policy])
-    if session_state:
+    if session_state and str(session_state).lower() != "none":
         pre_extra.extend(["--session-state", session_state])
         post_extra.extend(["--session-state", session_state])
     if journal_path:
@@ -193,15 +216,26 @@ def install(
 
     hooks = settings.setdefault("hooks", {})
     pre = _strip_aetheris_from_event_list(hooks.get("PreToolUse", []))
-    pre.append({
-        "matcher": PRE_TOOL_MATCHER,
-        "hooks": [_hook_entry(_hook_cmd(shared, [], pre_extra), on_failure=None if shadow else "block")],
-    })
     post = _strip_aetheris_from_event_list(hooks.get("PostToolUse", []))
-    post.append({
-        "matcher": POST_TOOL_MATCHER,
-        "hooks": [_hook_entry(_hook_cmd(shared, ["--event", "post-tool-use"], post_extra), is_async=async_post)],
-    })
+    if http_daemon:
+        base_url = str(http_daemon).rstrip("/")
+        pre.append({
+            "matcher": PRE_TOOL_MATCHER,
+            "hooks": [_http_hook_entry(f"{base_url}/v1/hook/pre", on_failure=None if shadow else "block")],
+        })
+        post.append({
+            "matcher": POST_TOOL_MATCHER,
+            "hooks": [_http_hook_entry(f"{base_url}/v1/hook/post", is_async=async_post)],
+        })
+    else:
+        pre.append({
+            "matcher": PRE_TOOL_MATCHER,
+            "hooks": [_hook_entry(_hook_cmd(shared, [], pre_extra), on_failure=None if shadow else "block")],
+        })
+        post.append({
+            "matcher": POST_TOOL_MATCHER,
+            "hooks": [_hook_entry(_hook_cmd(shared, ["--event", "post-tool-use"], post_extra), is_async=async_post)],
+        })
     hooks["PreToolUse"] = pre
     hooks["PostToolUse"] = post
 
@@ -214,8 +248,9 @@ def install(
     mode = "shadow (observe-only)" if shadow else "enforce"
     ast_mode = "strict-AST" if strict_ast else "default-AST"
     scope = "shared" if shared else "local"
-    print(f"Installed Aetheris hooks ({mode}, {ast_mode}, {scope}) -> {target}")
-    print('Probe:  echo \'{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}\' | python -m aetheris_microbrains.hook')
+    transport = f"http:{http_daemon}" if http_daemon else "command"
+    print(f"Installed Aetheris hooks ({mode}, {ast_mode}, {scope}, {transport}) -> {target}")
+    print('Probe:  python -c "import json,aetheris_microbrains as mb; print(mb.evaluate_hook_payload({\'tool_name\':\'Bash\',\'tool_input\':{\'command\':\'rm -rf /\'}}, log_decisions=False)[\'decision\'])"')
     return 0
 
 
@@ -376,7 +411,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")
-    ap.add_argument("--session-state", default=None, help="Path for cross-turn SessionSecurityState JSON")
+    ap.add_argument("--session-state", default="auto", help="Path (or 'auto') for cross-turn SessionSecurityState JSON (default: auto)")
+    ap.add_argument("--no-session-state", action="store_true", help="Disable cross-turn SessionSecurityState tracking")
+    ap.add_argument("--http-daemon", default=None, metavar="URL", help="Install native Claude Code `type: http` hooks targeting URL (e.g. http://127.0.0.1:8765)")
     ap.add_argument("--journal-path", default=None, help="Override path for decision_journal.jsonl")
     ap.add_argument("--project-dir", default=None, help="Target project root containing `.claude/` (defaults to repo root)")
     ap.add_argument("--async-post", action=argparse.BooleanOptionalAction, default=None, help="Run PostToolUse asynchronously instead of blocking before output ingestion (negate with --no-async-post)")
@@ -393,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     strict_ast, shadow, auto_allow, async_post, profile = resolve_preset(
         args.preset, args.strict_ast, args.shadow, args.auto_allow, args.async_post, args.profile
     )
+    sess_arg = None if args.no_session_state else args.session_state
     return install(
         strict_ast,
         shadow,
@@ -400,11 +438,12 @@ def main(argv: list[str] | None = None) -> int:
         auto_allow=auto_allow,
         profile=profile,
         policy=args.policy,
-        session_state=args.session_state,
+        session_state=sess_arg,
         journal_path=args.journal_path,
         async_post=async_post,
         project_dir=proj,
         dry_run=args.dry_run,
+        http_daemon=args.http_daemon,
     )
 
 

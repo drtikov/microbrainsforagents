@@ -52,6 +52,20 @@ dev = [
     "pytest>=8.0.0",
     "hypothesis>=6.0.0",
 ]
+ast = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-bash>=0.23.0",
+]
+guard-ml = [
+    "onnxruntime>=1.16.0",
+    "tokenizers>=0.19.0",
+]
+
+[project.scripts]
+aetheris-hook = "aetheris_microbrains.hook:main"
+aetheris-doctor = "aetheris_microbrains.doctor:main"
+aetheris-audit = "aetheris_microbrains.audit:main"
+aetheris-daemon = "aetheris_microbrains.hook_daemon:main"
 
 [project.urls]
 Homepage = "https://github.com/drtikov/microbrainsforagents"
@@ -64,3 +78,6 @@ exclude = ["aetheris_microbrains.tests*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.npz", "*.md", "py.typed"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*decision_journal*.jsonl", "memory/store/neuro_brains/_candidates/*"]

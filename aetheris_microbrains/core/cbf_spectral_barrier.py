@@ -169,24 +169,24 @@ class CBFSpectralBarrierEngine:
 
     def check_stability_invariants(self, weight_matrix: np.ndarray) -> Dict[str, Any]:
         """Audits spectral stability metrics."""
-        W = np.asarray(weight_matrix, dtype=np.float64)
-        if W.ndim < 2:
-            norm_val = float(np.linalg.norm(W))
-            return {
-                "spectral_norm": norm_val,
-                "is_stable": norm_val <= self.spectral_limit,
-                "condition_number": 1.0,
-            }
         try:
+            W = np.asarray(weight_matrix, dtype=np.float64)
+            if W.ndim < 2:
+                norm_val = float(np.linalg.norm(W))
+                return {
+                    "spectral_norm": norm_val,
+                    "is_stable": bool(np.isfinite(norm_val) and norm_val <= self.spectral_limit),
+                    "condition_number": 1.0,
+                }
             s = np.linalg.svd(W, compute_uv=False)
             sigma_max = float(s[0]) if len(s) > 0 else 0.0
             sigma_min = float(s[-1]) if len(s) > 0 else 1e-12
             cond = sigma_max / max(1e-12, sigma_min)
             return {
                 "spectral_norm": sigma_max,
-                "is_stable": sigma_max <= self.spectral_limit,
+                "is_stable": bool(np.isfinite(sigma_max) and sigma_max <= self.spectral_limit),
                 "condition_number": float(cond),
                 "singular_values_top3": [float(x) for x in s[:3]],
             }
         except Exception as e:
-            return {"error": str(e), "is_stable": True}
+            return {"error": str(e), "is_stable": False}

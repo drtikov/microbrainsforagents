@@ -942,15 +942,25 @@ async def prefilter_candidates(req: PrefilterRequest):
                     findings = diff_res.get("findings") or ["prefilter_rejected"]
                     reason = ",".join(findings)
                 else:
-                    score = 0.5
-                    if "def " in code and "def test_" in code:
-                        score = 0.90
-                    elif "def " in code:
-                        score = 0.75
-                    elif "import " in code:
-                        score = 0.60
+                    ast_nodes = set(diff_res.get("ast_nodes") or [])
+                    hazards = diff_res.get("interface_hazards") or []
+                    complexity = int(diff_res.get("cyclomatic_complexity") or 0)
+                    score = 0.50
+                    if "ast_node_function_def" in ast_nodes or "ast_node_class_def" in ast_nodes:
+                        score += 0.25
+                    elif "ast_node_import" in ast_nodes or "ast_node_import_from" in ast_nodes:
+                        score += 0.10
+                    if "ast_node_assert_stmt" in ast_nodes or re.search(r"(?m)^\s*def\s+test_", code):
+                        score += 0.15
+                    if "ast_node_try_except" in ast_nodes:
+                        score += 0.05
+                    if complexity > 25:
+                        score -= 0.10
+                    if hazards:
+                        score -= 0.20 * min(2, len(hazards))
+                    score = round(max(0.05, min(0.99, score)), 4)
                     passed = score >= req.threshold
-                    reason = "syntax_and_security_ok"
+                    reason = "syntax_and_security_ok" if not hazards else f"interface_hazards:{','.join(hazards[:2])}"
 
                 results.append(PrefilterResult(
                     candidate_id=cand_id,

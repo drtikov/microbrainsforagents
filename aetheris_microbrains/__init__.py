@@ -38,7 +38,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "recalibrate_from_decision_journal": (".core.layered_decision_engine", "recalibrate_from_decision_journal"),
     "record_decision_journal": (".core.layered_decision_engine", "record_decision_journal"),
     "redact_secrets": (".core.layered_decision_engine", "redact_secrets"),
-    "scrub_tool_output": (".core.layered_decision_engine", "scrub_tool_output"),
+    "scrub_tool_output": (".core.secrets", "scrub_tool_output"),
     # Audit & inspection
     "get_journal_entries": (".audit", "get_journal_entries"),
     "format_entry": (".audit", "format_entry"),
@@ -50,8 +50,14 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # MCP risk tiers & doctor
     "mcp_tool_tier": (".core.mcp_tiers", "mcp_tool_tier"),
     "save_mcp_pin": (".core.mcp_tiers", "save_mcp_pin"),
+    "save_mcp_manifest_pin": (".core.mcp_tiers", "save_mcp_manifest_pin"),
+    "verify_mcp_manifest": (".core.mcp_tiers", "verify_mcp_manifest"),
     "remove_mcp_pin": (".core.mcp_tiers", "remove_mcp_pin"),
     "run_doctor": (".doctor", "run_doctor"),
+    "ConformalSemanticGuard": (".core.semantic_guard", "ConformalSemanticGuard"),
+    "detect_semantic_injection": (".core.semantic_guard", "detect_semantic_injection"),
+    "shannon_entropy": (".core.secrets", "shannon_entropy"),
+    "detect_high_entropy_secrets": (".core.secrets", "detect_high_entropy_secrets"),
     # OpenCL & Core microbrains
     "OpenCLMicroBrainAccelerator": (".core.opencl_microbrain_accelerator", "OpenCLMicroBrainAccelerator"),
     "get_opencl_accelerator": (".core.opencl_microbrain_accelerator", "get_opencl_accelerator"),

@@ -17,13 +17,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .core.runtime_paths import get_default_journal_path, get_state_dir
+from .core.mcp_security import scan_mcp_tools
 from .core.mcp_tiers import (
     get_pin_store_path,
     load_mcp_config,
@@ -31,12 +30,15 @@ from .core.mcp_tiers import (
     remove_mcp_pin,
     save_mcp_pin,
     server_pin_fingerprint,
+    verify_mcp_manifest,
 )
+from .core.runtime_paths import get_default_journal_path, get_state_dir
+from .core.secrets import redact_secrets
 
 _SETTINGS_LOCAL = Path(".claude") / "settings.local.json"
 _SETTINGS_SHARED = Path(".claude") / "settings.json"
-_EXPECTED_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*"
-_EXPECTED_POST_MATCHER = "Bash|Read|WebFetch|WebSearch|mcp__.*"
+_EXPECTED_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+_EXPECTED_POST_MATCHER = "Bash|Read|Grep|WebFetch|WebSearch|mcp__.*"
 
 
 class _Report:
@@ -101,6 +103,8 @@ def _is_aetheris_entry(entry: Any) -> bool:
         return False
     if "aetheris_microbrains.hook" in str(entry.get("command", "")):
         return True
+    if entry.get("type") == "http" and "/v1/hook/" in str(entry.get("url", "")):
+        return True
     return any(
         _is_aetheris_entry(h) for h in entry.get("hooks", []) if isinstance(h, dict)
     )
@@ -114,6 +118,23 @@ def _check_settings(rep: _Report, project_dir: Path) -> None:
             target = cand
             break
     if target is None:
+        user_global = Path.home() / ".claude" / "settings.json"
+        if user_global.is_file():
+            try:
+                ug_data = json.loads(user_global.read_text(encoding="utf-8"))
+                ug_hooks = ug_data.get("hooks", {}) if isinstance(ug_data, dict) else {}
+                ug_has_aetheris = isinstance(ug_hooks, dict) and any(
+                    _is_aetheris_entry(e)
+                    for ev in ("PreToolUse", "PostToolUse")
+                    for e in (ug_hooks.get(ev, []) if isinstance(ug_hooks.get(ev, []), list) else [])
+                )
+                if ug_has_aetheris:
+                    rep.warn(
+                        "settings:user_global",
+                        f"global hooks found in {user_global}, but no project settings under {claude_dir}",
+                    )
+            except Exception:
+                pass
         rep.fail("settings", f"no settings file under {claude_dir}; run install_hook.py")
         return
     try:
@@ -180,9 +201,12 @@ def _check_policy(rep: _Report, policy_path: Optional[str]) -> None:
         rep.fail("policy", f"{resolved}: {exc}")
 
 
-def _check_journal(rep: _Report) -> None:
-    journal = get_default_journal_path()
+def _check_journal(rep: _Report, state_dir: Optional[Path] = None) -> None:
     env_override = bool(str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip())
+    if state_dir is not None and not env_override:
+        journal = Path(state_dir) / "decision_journal.jsonl"
+    else:
+        journal = get_default_journal_path()
     try:
         stat = journal.stat()
         age_min = max(0.0, (time.time() - stat.st_mtime) / 60.0)
@@ -231,7 +255,7 @@ def _check_mcp_pins(rep: _Report, project_dir: Path, state_dir: Optional[Path] =
 
 
 def _check_daemon(rep: _Report, state_dir: Optional[Path] = None) -> None:
-    from .hook_daemon import DAEMON_VERSION
+    from .hook_daemon import DAEMON_VERSION, ping_daemon
 
     base = Path(state_dir) if state_dir else get_state_dir()
     daemon_file = base / "hook_daemon.json"
@@ -243,18 +267,14 @@ def _check_daemon(rep: _Report, state_dir: Optional[Path] = None) -> None:
         rep.ok("daemon", "not running (hook falls back to in-process evaluation)")
         return
     port = int(info.get("port") or 0)
-    alive = False
-    if port:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                alive = True
-        except OSError:
-            alive = False
     raw_ver = info.get("version")
     ver = str(raw_ver if raw_ver is not None else "?")
     has_auth = bool(str(info.get("auth") or "").strip())
+    mode = str(info.get("mode") or "tcp").lower()
+    pong = ping_daemon(state_path=daemon_file, timeout=0.3) if port else None
+    alive = isinstance(pong, dict) and bool(pong.get("ok"))
     if not alive:
-        rep.warn("daemon", f"stale daemon file (version {ver}, port {port} unreachable); hook falls back to in-process")
+        rep.warn("daemon", f"stale daemon file (mode={mode}, version {ver}, port {port} unreachable); hook falls back to in-process")
     elif raw_ver != DAEMON_VERSION or not has_auth:
         rep.warn(
             "daemon",
@@ -262,7 +282,74 @@ def _check_daemon(rep: _Report, state_dir: Optional[Path] = None) -> None:
             "clients fall back to in-process",
         )
     else:
-        rep.ok("daemon", f"running on 127.0.0.1:{port} (version {ver})")
+        rep.ok("daemon", f"running ({mode}) on 127.0.0.1:{port} (version {ver})")
+
+
+def scan_mcp_command(
+    project_dir: Path,
+    manifest_file: Optional[Path] = None,
+    server: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> int:
+    """Audit `.mcp.json` server definitions and optional tool schemas for poisoning/rug-pulls."""
+    servers_cfg = load_mcp_config(project_dir)
+    issues: List[str] = []
+    print("=" * 62)
+    print("AETHERIS MICROBRAINS - MCP SUPPLY-CHAIN SCAN")
+    print("=" * 62)
+    if not servers_cfg:
+        print(f"[info] no .mcp.json servers found under {project_dir}")
+    for srv_name, srv_cfg in sorted(servers_cfg.items()):
+        if server and srv_name != server.strip().lower():
+            continue
+        cfg_warnings: List[str] = []
+        if isinstance(srv_cfg, dict):
+            url = str(srv_cfg.get("url") or "").strip().lower()
+            if url.startswith("http://") and not url.startswith(("http://127.0.0.1", "http://localhost")):
+                cfg_warnings.append("unencrypted non-loopback http:// MCP URL")
+            cmd_line = " ".join([str(srv_cfg.get("command") or ""), *[str(a) for a in (srv_cfg.get("args") or [])]])
+            if "@latest" in cmd_line or "-y " in cmd_line and "@" not in cmd_line:
+                cfg_warnings.append("unpinned npx/package invocation (use pinned @version)")
+            env_map = srv_cfg.get("env")
+            if isinstance(env_map, dict):
+                raw_env = json.dumps(env_map)
+                if redact_secrets(raw_env) != raw_env:
+                    cfg_warnings.append("raw credential pattern in .mcp.json env block")
+        status_tag = "[warn]" if cfg_warnings else "[ ok ]"
+        detail = "; ".join(cfg_warnings) if cfg_warnings else "config hygiene clean"
+        print(f"{status_tag} server={srv_name} - {detail}")
+        if cfg_warnings:
+            issues.extend(f"{srv_name}:{w}" for w in cfg_warnings)
+
+    if manifest_file is not None:
+        mpath = Path(manifest_file)
+        try:
+            raw_m = json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[FAIL] failed to parse manifest {mpath}: {exc}", file=sys.stderr)
+            return 1
+        tools = raw_m.get("tools", raw_m) if isinstance(raw_m, dict) else raw_m
+        if not isinstance(tools, list):
+            print(f"[FAIL] manifest {mpath} must contain a tool list", file=sys.stderr)
+            return 1
+        scan = scan_mcp_tools(tools)
+        if not scan["safe"]:
+            print(f"[FAIL] tool poisoning/shadowing detected: {scan['findings']}")
+            for ft in scan["flagged_tools"]:
+                print(f"       - {ft['name']}: {ft['findings']}")
+            return 1
+        print(f"[ ok ] manifest scan passed ({scan['tool_count']} tool(s), zero injections)")
+        if server:
+            v_res = verify_mcp_manifest(server, tools, state_dir=state_dir)
+            if v_res.get("rug_pull_detected"):
+                print(
+                    f"[FAIL] MCP rug pull detected for {server!r}: modified={v_res['modified_tools']}, "
+                    f"added={v_res['added_tools']}, removed={v_res['removed_tools']}"
+                )
+                return 1
+            elif v_res.get("verified"):
+                print(f"[ ok ] schema pin verified for {server!r}")
+    return 1 if any("raw credential" in i or "unencrypted" in i for i in issues) else 0
 
 
 def pin_command(server: str, unpin: bool, project_dir: Path, state_dir: Optional[Path] = None) -> int:
@@ -304,7 +391,7 @@ def run_doctor(
     _check_imports(rep)
     _check_settings(rep, root)
     _check_policy(rep, policy_path)
-    _check_journal(rep)
+    _check_journal(rep, state_dir=state_dir)
     _check_mcp_pins(rep, root, state_dir=state_dir)
     _check_daemon(rep, state_dir=state_dir)
     return rep.to_dict()
@@ -323,9 +410,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
     parser.add_argument("--project-dir", default=None, help="Project root containing .claude/ (defaults to CWD)")
+    parser.add_argument("--state-dir", default=None, help="Override state directory (defaults to AETHERIS_STATE_DIR / OS state dir)")
     parser.add_argument("--policy", default=None, help="Policy file to validate (defaults to AETHERIS_POLICY_PATH)")
     parser.add_argument("--pin-mcp", default=None, metavar="SERVER", help="Pin an MCP server to its current .mcp.json config")
     parser.add_argument("--unpin-mcp", default=None, metavar="SERVER", help="Remove an MCP server pin")
+    parser.add_argument("--scan-mcp", action="store_true", help="Audit .mcp.json configs and optional --manifest-file schemas")
+    parser.add_argument("--manifest-file", default=None, help="JSON MCP tools/list manifest file to scan/verify with --scan-mcp")
+    parser.add_argument("--server", default=None, help="Filter --scan-mcp or verify pinned manifest against a specific server name")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -335,10 +426,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             pass
 
     root = Path(args.project_dir) if args.project_dir else Path.cwd()
+    sdir = Path(args.state_dir) if args.state_dir else None
+    if args.scan_mcp:
+        return scan_mcp_command(
+            root,
+            manifest_file=Path(args.manifest_file) if args.manifest_file else None,
+            server=args.server,
+            state_dir=sdir,
+        )
     if args.pin_mcp or args.unpin_mcp:
-        return pin_command(args.pin_mcp or args.unpin_mcp or "", bool(args.unpin_mcp), root)
+        return pin_command(args.pin_mcp or args.unpin_mcp or "", bool(args.unpin_mcp), root, state_dir=sdir)
 
-    report = run_doctor(project_dir=root, policy_path=args.policy)
+    report = run_doctor(project_dir=root, policy_path=args.policy, state_dir=sdir)
     if args.json:
         print(json.dumps(report, indent=2))
     else:

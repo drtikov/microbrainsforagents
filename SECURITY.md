@@ -72,12 +72,23 @@ allowed_ast_imports:
   - typing
   - dataclasses
 
-# Additional protected project files
-protected_patterns:
-  - ".env*"
-  - ".git/hooks/"
+# Additional protected project files (additive on top of DEFAULT_PROTECTED_PATTERNS)
+extra_protected_patterns:
   - "deploy/production.yaml"
   - "secrets/"
+
+# Optionally disallow `# aetheris: allow` inline suppressions (or leave true for auditable dev overrides)
+allow_inline_suppression: true
+
+# AgentSpec-style declarative custom rules (trigger -> action: "deny" | "escalate")
+custom_rules:
+  - id: "block_prod_ssh"
+    action: "deny"
+    tool: "Bash"
+    cmd_regex: "ssh\\s+prod"
+  - id: "escalate_vault_files"
+    action: "escalate"
+    path_glob: "*internal_vault*"
 
 # Allowlist Profile: "strict" (default) or "dev"
 # "strict" escalates any unrecognized command or mutating shell op.
@@ -148,8 +159,13 @@ Static pre-flight inspection catches structural and syntactic patterns at parse 
 * **Runtime-assembled strings across variables or imports:** Dynamic variable indirection (e.g., `X=.env; cat $X` or constructing tokens across separate variables/functions) cannot always be resolved statically; unknown commands safely **escalate** to the user.
 * **Indirect external build scripts:** Commands inside external `Makefile` targets or `package.json` lifecycle scripts invoked indirectly (`make`, `npm run`) escalate in `strict` mode rather than evaluating full build graphs.
 * **Symlink & TOCTOU races:** Static path inspection checks path strings before execution and cannot enforce kernel-level filesystem invariants against symlink swaps or concurrent modifications at execution time.
-* **In-band context disclosure:** If secrets are already inside an LLM's context window, pre-tool hooks cannot stop the model from printing them directly into chat replies.
-* **OS / syscall confinement:** Kernel-level sandboxing (containers, namespaces, `seccomp`, network egress proxies) remains the responsibility of the host runtime.
+* **In-band context disclosure:** If secrets are already inside an LLM's context window, pre-tool hooks cannot stop the model from printing them directly into chat replies (though PostToolUse output scrubbing with `--replace-tool-output` redacts secrets and `SessionSecurityState` IFC taint tracking blocks cross-turn exfiltration after sensitive reads or untrusted external fetches).
+* **OS / syscall confinement:** Kernel-level sandboxing remains the responsibility of the host OS/runtime (combine Aetheris Microbrains with Docker, gVisor, Bubblewrap, or `--sandbox-wrap bwrap` on Linux / sandboxed containers).
+
+### SOTA Architecture Controls Included
+* **IFC Provenance & Lethal Trifecta (`SessionSecurityState`):** Tracks source integrity/confidentiality tags across turns (enabled by default in the installer via `--session-state auto`), escalating on detected prompt injection and blocking network egress or mutating calls once both untrusted external content and sensitive local reads coexist.
+* **Unified MCP Server + Schema Pinning (`doctor --pin-mcp` / `--scan-mcp`):** Pins both `.mcp.json` server launch commands and cryptographic tool-schema SHA-256 hashes (ShareLock split-payload scan + fail-closed schema drift / rug-pull detection).
+* **Optional Structural & Semantic Backends:** Optional `[ast]` (`tree-sitter-bash`) AST shell verification alongside `shlex`, `[guard-ml]` split-conformal `ConformalSemanticGuard` (`--semantic-guard`), and `--sandbox-wrap` OS containment wrapper.
 
 ### Reporting a Vulnerability
 Please report security issues or filter bypasses privately via GitHub Security Advisories on `drtikov/microbrainsforagents`, or email [drtikov@gmail.com](mailto:drtikov@gmail.com) with reproduction details before public disclosure.

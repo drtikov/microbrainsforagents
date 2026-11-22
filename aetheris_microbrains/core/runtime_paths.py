@@ -56,14 +56,27 @@ def get_default_journal_path() -> Path:
     return get_state_dir() / "decision_journal.jsonl"
 
 
+def get_writable_store_dir() -> Path:
+    """Return a writable store directory under the per-user state dir (never inside site-packages)."""
+    return get_state_dir() / "store"
+
+
+def get_default_session_state_path() -> Path:
+    """Return the default path for `SessionSecurityState` outside the package tree."""
+    env_path = str(os.getenv("AETHERIS_SESSION_STATE_PATH") or "").strip()
+    if env_path and env_path.lower() != "auto":
+        return Path(env_path).expanduser()
+    return get_state_dir() / "sessions" / "session.json"
+
+
 def get_default_audit_log_path() -> Path:
     """Return the default path for `continual_learning_audit.json` outside the package tree."""
     return get_state_dir() / "continual_learning_audit.json"
 
 
 @contextmanager
-def _journal_lock(target: Path) -> Iterator[None]:
-    """Cross-platform advisory file lock serializing rotation and appends."""
+def file_lock(target: Path) -> Iterator[None]:
+    """Cross-platform advisory file lock serializing atomic reads/writes/rotations."""
     if _fcntl is None and _msvcrt is None:
         yield
         return
@@ -93,6 +106,9 @@ def _journal_lock(target: Path) -> Iterator[None]:
         fh.close()
 
 
+_journal_lock = file_lock
+
+
 def append_jsonl_bounded(
     target: Path,
     line: str,
@@ -100,7 +116,7 @@ def append_jsonl_bounded(
 ) -> None:
     """Atomically append one JSONL line with 0o600 permissions and lock-serialized rotation."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _journal_lock(target):
+    with file_lock(target):
         if max_bytes > 0 and target.exists():
             try:
                 if target.stat().st_size >= max_bytes:

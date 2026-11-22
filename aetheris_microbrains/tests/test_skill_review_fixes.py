@@ -25,8 +25,8 @@ from aetheris_microbrains.hook import _normalize_hook_payload, evaluate_hook_pay
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALLER = _REPO_ROOT / ".claude" / "skills" / "microbrains" / "install_hook.py"
 
-_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|mcp__.*"
-_POST_MATCHER = "Bash|Read|WebFetch|WebSearch|mcp__.*"
+_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+_POST_MATCHER = "Bash|Read|Grep|WebFetch|WebSearch|mcp__.*"
 
 # ---------------------------------------------------------------------------
 # I1: harness-native local vs external web tools
