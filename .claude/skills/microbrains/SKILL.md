@@ -30,6 +30,7 @@ python .claude/skills/microbrains/install_hook.py --async-post  # run PostToolUs
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
 python .claude/skills/microbrains/install_hook.py --preset solo-dev   # bundles: dev profile + auto-allow + async post (also: ci, paranoid)
 python .claude/skills/microbrains/install_hook.py --preset solo-dev --no-auto-allow --no-async-post  # override any preset boolean
+python .claude/skills/microbrains/install_hook.py --context-guard    # block redundant/oversized whole reads + hung stdin / root search
 python .claude/skills/microbrains/install_hook.py --dry-run    # preview the settings JSON without writing
 python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end probe of the installed gate
 ```
@@ -59,6 +60,8 @@ python -m aetheris_microbrains.audit --explain   # what/why/fix for the most rec
 python -m aetheris_microbrains.audit --explain --find <sha-prefix>  # explain a specific decision
 python -m aetheris_microbrains.audit --daily     # per-day digest with top reason codes
 python -m aetheris_microbrains.audit --shadow-report  # enforce-mode projection + prompt-fatigue estimate (shadow installs)
+python -m aetheris_microbrains.audit --digest    # deterministic I/O hotspot & friction triage tables
+python -m aetheris_microbrains.audit --savings   # preserved-token & cost savings ledger (--statusline for 1-line bar)
 ```
 
 Translate the `reason_code` + `label` into a one-sentence human explanation and the
@@ -105,6 +108,8 @@ python -m aetheris_microbrains.doctor --json     # machine-readable report
 python -m aetheris_microbrains.doctor --pin-mcp <server>    # trust a server, pinned to its current .mcp.json fingerprint
 python -m aetheris_microbrains.doctor --unpin-mcp <server>  # remove the pin (tools fail closed to ask again)
 python -m aetheris_microbrains.doctor --scan-mcp [--manifest-file tools.json] [--server <name>]  # scan .mcp.json & tool schemas for poisoning/rug-pulls
+python -m aetheris_microbrains.doctor --slice <role>   # extract role-scoped sections from instruction markdown
+python -m aetheris_microbrains.doctor --check-budget   # verify markdown character budget & placeholder hygiene
 ```
 
 Pinned MCP servers get tiered structural verdicts: explicit read-only verbs (`get_*`, `list_*`, `read_*`, `search_*`, ...) allow, while mutating or unrecognized tool names still escalate. `.mcp.json` config drift or missing config invalidates the pin automatically (and manifest pins fail closed on modified or newly added unpinned tools).
@@ -116,7 +121,7 @@ python -m aetheris_microbrains.hook_daemon       # warm TCP evaluator on localho
 python -m aetheris_microbrains.hook_daemon --http --port 8765  # native Claude Code type:"http" hook server (/v1/hook/pre, /v1/hook/post, /health)
 ```
 
-The hook CLI queries the TCP daemon first and falls back to identical in-process evaluation on any failure - it is a pure optimization, never a dependency. Or use `--http` + `install_hook.py --http-daemon http://127.0.0.1:8765` to bypass per-call Python spawn overhead completely via native Claude Code HTTP hooks (`Authorization: Bearer $AETHERIS_DAEMON_TOKEN`). Verdict memoization (5s TTL) only caches safe requests: pre-events without journal logging, non-shadow, non-edit payloads (journal completeness wins).
+The hook CLI queries the TCP daemon first and falls back to identical in-process evaluation on any failure - it is a pure optimization, never a dependency. Or use `--http` + `install_hook.py --http-daemon http://127.0.0.1:8765` to bypass per-call Python spawn overhead completely via native Claude Code HTTP hooks (`Authorization: Bearer $AETHERIS_DAEMON_TOKEN`; the installer emits `allowedEnvVars` so the env var is actually interpolated). Verdict memoization (5s TTL) only caches safe requests: pre-events without journal logging, non-shadow, non-edit payloads (journal completeness wins).
 
 ### Advanced flags (hook.py)
 
@@ -128,6 +133,7 @@ The hook CLI queries the TCP daemon first and falls back to identical in-process
 - `--replace-tool-output` (`AETHERIS_POST_REPLACE_OUTPUT=1`) - emit redacted `updatedToolOutput`/`updatedMCPToolOutput` in `PostToolUse`
 - `--semantic-guard` (`AETHERIS_SEMANTIC_GUARD=1`) - enable optional split-conformal semantic prompt-injection classifier in `PostToolUse`
 - `--sandbox-wrap auto|bwrap` - wrap approved shell commands in OS sandbox containment (`bwrap` on Linux when installed)
+- `--context-guard` (`AETHERIS_CONTEXT_GUARD=1`) - block redundant unchanged whole reads, serve inline outlines on oversized reads, and block hung stdin / root-origin searches
 - `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts
 
 ## Response contract

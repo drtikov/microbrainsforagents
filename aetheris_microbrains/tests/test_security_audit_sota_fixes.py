@@ -48,13 +48,17 @@ from aetheris_microbrains.core.semantic_guard import (
 from aetheris_microbrains.core.state_cbf_filter import BarrierConstraint
 from aetheris_microbrains.doctor import scan_mcp_command
 from aetheris_microbrains.hook import (
+    _build_sandbox_wrapped_command,
     _format_hook_error_stdout,
     evaluate_hook_payload,
     evaluate_post_tool_use_payload,
 )
 from aetheris_microbrains.hook_daemon import (
     VerdictCache,
+    _gc_session_states,
     _merge_flags,
+    evaluate_request,
+    query_daemon,
     serve_http,
 )
 
@@ -522,3 +526,125 @@ def test_agent_security_benchmark_10_passes():
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     assert mod.main() == 0
+
+
+# ---------------------------------------------------------------------------
+# Bug-fix regressions: daemon/installer review findings (B1-B9)
+# ---------------------------------------------------------------------------
+
+
+def test_installer_http_entry_emits_allowed_env_vars(tmp_path):
+    """Claude Code interpolates $VAR in hook headers ONLY when listed in allowedEnvVars;
+    without it the Authorization header silently resolves to an empty string (P0)."""
+    mod = _load_installer()
+    entry = mod._http_hook_entry("http://127.0.0.1:8765/v1/hook/pre")
+    assert entry["allowedEnvVars"] == ["AETHERIS_DAEMON_TOKEN"]
+
+    proj = tmp_path / "proj_env"
+    proj.mkdir()
+    assert mod.main(["--project-dir", str(proj), "--http-daemon", "http://127.0.0.1:9001"]) == 0
+    s = json.loads((proj / ".claude" / "settings.local.json").read_text(encoding="utf-8"))
+    for event_name in ("PreToolUse", "PostToolUse"):
+        hook = s["hooks"][event_name][0]["hooks"][0]
+        assert hook["type"] == "http"
+        assert hook["allowedEnvVars"] == ["AETHERIS_DAEMON_TOKEN"]
+        assert "$AETHERIS_DAEMON_TOKEN" in hook["headers"]["Authorization"]
+
+
+def test_query_daemon_ignores_http_mode_state(tmp_path, monkeypatch):
+    """query_daemon is a TCP client; an HTTP-mode state file must fall back to
+    in-process evaluation BEFORE any connection attempt."""
+    state = tmp_path / "hook_daemon.json"
+    state.write_text(
+        json.dumps({"mode": "http", "port": 59999, "auth": "k", "version": 1}),
+        encoding="utf-8",
+    )
+
+    import socket as _sock
+
+    def _no_connect(address, timeout=None):
+        raise AssertionError("query_daemon attempted a TCP connect against an HTTP daemon")
+
+    monkeypatch.setattr(_sock, "create_connection", _no_connect)
+    assert query_daemon({"event": "pre", "payload": {"tool_name": "Read"}}, state_path=state) is None
+
+
+def test_serve_http_rejects_non_claude_host_flag(tmp_path):
+    rc = serve_http(host="127.0.0.1", port=0, state_path=tmp_path / "h.json", flags={"host": "codex"}, token="k")
+    assert rc == 2
+
+
+def test_serve_http_clean_bind_failure(tmp_path):
+    import socket as _sock
+
+    with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        rc = serve_http(host="127.0.0.1", port=port, state_path=tmp_path / "h.json", token="k")
+    assert rc == 1
+
+
+def test_sandbox_wrap_windows_returns_none(monkeypatch):
+    import aetheris_microbrains.hook as hook_mod
+
+    monkeypatch.setattr(hook_mod.sys, "platform", "win32")
+    assert _build_sandbox_wrapped_command("ls", "bwrap") is None
+    assert _build_sandbox_wrapped_command("ls", "seatbelt") is None
+
+
+def test_semantic_guard_errors_counted_not_swallowed(monkeypatch):
+    import aetheris_microbrains.core.semantic_guard as sg_mod
+
+    def _boom(_sample):
+        raise RuntimeError("guard exploded")
+
+    monkeypatch.setattr(sg_mod, "detect_semantic_injection", _boom)
+    out = evaluate_post_tool_use_payload(
+        {"tool_name": "Bash", "tool_response": {"stdout": "hello world"}},
+        host="claude",
+        semantic_guard=True,
+    )
+    assert out.get("semantic_guard_errors", 0) >= 1
+
+
+def test_gc_session_states_removes_only_stale(tmp_path):
+    import os
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    stale = sessions / "old.json"
+    fresh = sessions / "new.json"
+    stale.write_text("{}", encoding="utf-8")
+    fresh.write_text("{}", encoding="utf-8")
+    old_ts = time.time() - 8 * 86400
+    os.utime(stale, (old_ts, old_ts))
+
+    removed = _gc_session_states(sessions)
+    assert removed == 1
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_daemon_session_state_auto_resolves_default(tmp_path, monkeypatch):
+    """The daemon 'auto' session-state flag must resolve to the default per-session
+    path, not be mangled into <cwd>/auto by the CWD-relative path resolver."""
+    import aetheris_microbrains.core.runtime_paths as rp_mod
+
+    calls = []
+
+    def _spy():
+        calls.append(1)
+        return tmp_path / "sessions" / "session.json"
+
+    monkeypatch.setattr(rp_mod, "get_default_session_state_path", _spy)
+    verdict, _cached = evaluate_request(
+        {
+            "event": "pre",
+            "payload": {"tool_name": "Grep", "tool_input": {"query": "x"}},
+            "flags": {"session_state_path": "auto", "cwd": str(tmp_path)},
+        },
+        cache=None,
+    )
+    assert verdict.get("decision") == "allow"
+    assert calls, "'auto' did not resolve through get_default_session_state_path"

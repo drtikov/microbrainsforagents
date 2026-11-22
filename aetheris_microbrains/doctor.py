@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -403,6 +404,75 @@ def _render_report(report: Dict[str, Any]) -> str:
     return rep.render()
 
 
+_SCOPE_COMMENT_RE = re.compile(r"<!--\s*scope\s*:\s*([\w,\s-]+?)\s*-->", re.IGNORECASE)
+_UNFILLED_PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+
+
+class PolicySliceRenderer:
+    """Role-filtered markdown slicer and instruction character-budget checker."""
+
+    @staticmethod
+    def slice_by_role(text: str, role: str) -> str:
+        """Keep preamble and sections either unscoped or matching `role` via `<!-- scope: ... -->`."""
+        target_role = str(role or "").strip().lower()
+        lines = str(text or "").splitlines(keepends=True)
+        preamble: List[str] = []
+        sections: List[List[str]] = []
+        current: Optional[List[str]] = None
+
+        for line in lines:
+            if line.startswith("## "):
+                if current is not None:
+                    sections.append(current)
+                current = [line]
+            elif current is not None:
+                current.append(line)
+            else:
+                preamble.append(line)
+        if current is not None:
+            sections.append(current)
+
+        out: List[str] = list(preamble)
+        for sec in sections:
+            sec_text = "".join(sec)
+            matches = _SCOPE_COMMENT_RE.findall(sec_text)
+            if not matches:
+                out.append(sec_text)
+                continue
+            declared = {
+                tok.strip().lower()
+                for m in matches
+                for tok in re.split(r"[\s,]+", m)
+                if tok.strip()
+            }
+            if "all" in declared or (target_role and target_role in declared):
+                out.append(sec_text)
+        return "".join(out).strip() + ("\n" if text.strip() else "")
+
+    @staticmethod
+    def check_budget(text: str, max_chars: int = 10_000) -> Dict[str, Any]:
+        content = str(text or "")
+        placeholders = sorted(set(_UNFILLED_PLACEHOLDER_RE.findall(content)))
+        over_budget = len(content) > int(max_chars)
+        return {
+            "ok": (not over_budget) and (len(placeholders) == 0),
+            "chars": len(content),
+            "max_chars": int(max_chars),
+            "over_budget": over_budget,
+            "placeholders": placeholders,
+        }
+
+
+def slice_markdown_by_role(text: str, role: str) -> str:
+    """Filter markdown sections by `<!-- scope: role1, role2 -->` annotations."""
+    return PolicySliceRenderer.slice_by_role(text, role)
+
+
+def check_markdown_budget(text: str, max_chars: int = 10_000) -> Dict[str, Any]:
+    """Validate markdown length against `max_chars` and detect leftover `{{PLACEHOLDER}}` tokens."""
+    return PolicySliceRenderer.check_budget(text, max_chars=max_chars)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m aetheris_microbrains.doctor",
@@ -417,6 +487,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--scan-mcp", action="store_true", help="Audit .mcp.json configs and optional --manifest-file schemas")
     parser.add_argument("--manifest-file", default=None, help="JSON MCP tools/list manifest file to scan/verify with --scan-mcp")
     parser.add_argument("--server", default=None, help="Filter --scan-mcp or verify pinned manifest against a specific server name")
+    parser.add_argument("--slice", default=None, metavar="ROLE", help="Print role-filtered sections of a policy/skill markdown file")
+    parser.add_argument("--slice-file", default=None, help="Markdown file for --slice/--check-budget (defaults to .claude/skills/microbrains/SKILL.md)")
+    parser.add_argument("--check-budget", action="store_true", help="Verify markdown file character budget and unreplaced placeholders")
+    parser.add_argument("--max-chars", type=int, default=10_000, help="Character ceiling for --check-budget (default: 10000)")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -427,6 +501,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     root = Path(args.project_dir) if args.project_dir else Path.cwd()
     sdir = Path(args.state_dir) if args.state_dir else None
+
+    if args.slice or args.check_budget:
+        md_path = Path(args.slice_file) if args.slice_file else (root / ".claude" / "skills" / "microbrains" / "SKILL.md")
+        if not md_path.is_file():
+            print(f"ERROR: markdown file not found: {md_path}", file=sys.stderr)
+            return 1
+        md_text = md_path.read_text(encoding="utf-8", errors="replace")
+        if args.slice:
+            print(slice_markdown_by_role(md_text, args.slice), end="")
+            return 0
+        budget = check_markdown_budget(md_text, max_chars=args.max_chars)
+        if args.json:
+            print(json.dumps(budget, indent=2))
+        else:
+            status = "ok" if budget["ok"] else "FAIL"
+            print(f"[{status}] {md_path}: {budget['chars']}/{budget['max_chars']} chars, placeholders={budget['placeholders']}")
+        return 0 if budget["ok"] else 1
+
     if args.scan_mcp:
         return scan_mcp_command(
             root,

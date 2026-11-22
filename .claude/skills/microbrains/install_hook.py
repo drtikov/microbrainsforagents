@@ -87,6 +87,7 @@ def _http_hook_entry(
         "url": url,
         "timeout": timeout,
         "headers": {"Authorization": f"Bearer ${token_env}"},
+        "allowedEnvVars": [token_env],
     }
     if on_failure is not None:
         entry["onFailure"] = on_failure
@@ -181,6 +182,7 @@ def install(
     project_dir: Path | None = None,
     dry_run: bool = False,
     http_daemon: str | None = None,
+    context_guard: bool = False,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -202,6 +204,9 @@ def install(
         post_extra.append("--shadow")
     if auto_allow:
         pre_extra.append("--auto-allow")
+    if context_guard:
+        pre_extra.append("--context-guard")
+        post_extra.append("--context-guard")
     if profile:
         pre_extra.extend(["--profile", profile])
     if policy:
@@ -420,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--remove", action="store_true", help="Uninstall the Aetheris hooks")
     ap.add_argument("--dry-run", action="store_true", help="Print the settings that would be written; modify nothing")
     ap.add_argument("--preset", choices=["solo-dev", "ci", "paranoid"], default=None, help="Opinionated flag bundle (explicit flags still override)")
+    ap.add_argument("--context-guard", action=argparse.BooleanOptionalAction, default=False, help="Enable deterministic context-hygiene gating for redundant/oversized reads (negate with --no-context-guard)")
     ap.add_argument("--self-test", action="store_true", help="In-process installation checks (imports, probe verdicts, installed settings)")
     args = ap.parse_args(argv)
     proj = Path(args.project_dir) if args.project_dir else None
@@ -444,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         project_dir=proj,
         dry_run=args.dry_run,
         http_daemon=args.http_daemon,
+        context_guard=bool(args.context_guard),
     )
 
 

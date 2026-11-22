@@ -231,7 +231,13 @@ def evaluate_request(
 
     resolved_policy = _resolve_under_cwd(flags.get("policy_path"), caller_cwd)
     resolved_journal = _resolve_under_cwd(flags.get("journal_path"), caller_cwd)
-    resolved_sess = _resolve_under_cwd(flags.get("session_state_path"), caller_cwd)
+    from .core.runtime_paths import get_default_session_state_path
+
+    resolved_sess = (
+        str(get_default_session_state_path())
+        if str(flags.get("session_state_path") or "").strip().lower() == "auto"
+        else _resolve_under_cwd(flags.get("session_state_path"), caller_cwd)
+    )
     proj_dir = caller_cwd or (str(payload.get("cwd") or "").strip() if isinstance(payload, dict) else "") or None
     mcp_sig = (
         (_file_sig(str(Path(proj_dir) / ".mcp.json")), _file_sig(str(Path(proj_dir) / "mcp.json")))
@@ -306,6 +312,8 @@ def query_daemon(
         info = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(info, dict) or int(info.get("version") or 0) != DAEMON_VERSION:
             return None
+        if str(info.get("mode") or "tcp").strip().lower() == "http":
+            return None  # HTTP daemons are called by Claude Code directly; this TCP client must fall back in-process
         port = int(info.get("port") or 0)
         auth_value = str(info.get("auth") or "")
         if not port or not auth_value:
@@ -448,6 +456,24 @@ class _ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def _gc_session_states(sessions_dir: Path, max_age_sec: float = 7 * 86400) -> int:
+    """Best-effort removal of stale per-session taint files (returns removed count)."""
+    removed = 0
+    now = time.time()
+    try:
+        entries = list(Path(sessions_dir).glob("*.json"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if now - entry.stat().st_mtime > max_age_sec:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def serve_http(
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -459,10 +485,18 @@ def serve_http(
     """Native Claude Code `type: "http"` hook endpoint (zero per-call Python spawn)."""
     auth_value = str(token or os.getenv("AETHERIS_DAEMON_TOKEN") or "").strip() or secrets.token_hex(16)
     daemon_flags = dict(flags or {})
+    http_host_flag = str(daemon_flags.get("host") or "claude").strip().lower()
+    if http_host_flag != "claude":
+        print(f"hook HTTP daemon requires host='claude' (got '{http_host_flag}'): HTTP hook payloads follow the Claude Code contract")
+        return 2
     cache = VerdictCache()
     target = Path(state_path) if state_path else get_daemon_state_path()
     if target.exists() and target.is_dir():
         target = target / "hook_daemon.json"
+    try:
+        _gc_session_states(target.parent / "sessions")
+    except Exception:
+        pass
     served_lock = threading.Lock()
     served_count = 0
 
@@ -535,7 +569,11 @@ def serve_http(
                 if max_requests is not None and served_count >= max_requests:
                     threading.Thread(target=httpd.shutdown, daemon=True).start()
 
-    httpd = _ExclusiveThreadingHTTPServer((host, port), _HookHTTPHandler)
+    try:
+        httpd = _ExclusiveThreadingHTTPServer((host, port), _HookHTTPHandler)
+    except OSError as exc:
+        print(f"hook HTTP daemon failed to bind {host}:{port}: {exc} (port already in use? choose another --port)")
+        return 1
     bound_port = int(httpd.server_address[1])
     _atomic_write_json(
         target,
@@ -581,6 +619,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--policy", default=None, help="Policy file passthrough")
     parser.add_argument("--journal-path", default=None, help="Journal path passthrough")
     parser.add_argument("--session-state", default=None, help="Session state path (or 'auto') passthrough")
+    parser.add_argument(
+        "--no-session-state",
+        dest="no_session_state",
+        action="store_true",
+        help="Disable cross-turn session taint state (weaker IFC; also enables verdict caching)",
+    )
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -597,7 +641,7 @@ def main(argv: Optional[list] = None) -> int:
         "profile": args.profile,
         "policy_path": args.policy,
         "journal_path": args.journal_path,
-        "session_state_path": args.session_state,
+        "session_state_path": None if args.no_session_state else (args.session_state or "auto"),
     }
     state_path = get_daemon_state_path(Path(args.state_dir)) if args.state_dir else None
     if args.http:

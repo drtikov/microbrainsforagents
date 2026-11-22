@@ -3781,8 +3781,13 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # Optional SOTA tree-sitter-bash AST check when tree_sitter_bash is installed
     ts_bash = _scan_bash_ast_tree_sitter(cmd, policy=policy)
     if ts_bash.get("available"):
-        findings.extend(ts_bash.get("findings") or [])
-        protected_path_reads.extend(ts_bash.get("protected_reads") or [])
+        # dedupe-preserving merge: tree-sitter re-flags constructs the shlex pass already caught
+        for f_name in ts_bash.get("findings") or []:
+            if f_name not in findings:
+                findings.append(f_name)
+        for p_read in ts_bash.get("protected_reads") or []:
+            if p_read not in protected_path_reads:
+                protected_path_reads.append(p_read)
 
     # `$IFS` / `${IFS}` used as a word separator is an obfuscation technique, not routine agent usage
     if re.search(r"\$\{?IFS\b", cmd):

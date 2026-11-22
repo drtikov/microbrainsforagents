@@ -244,6 +244,8 @@ def _build_sandbox_wrapped_command(
             mode = "seatbelt"
         else:
             return None
+    if mode in {"bwrap", "seatbelt"} and sys.platform == "win32":
+        return None  # neither wrapper exists on Windows; emitting one would produce an unrunnable command
     proj = str(Path(project_dir or os.getcwd()).resolve())
     quoted_cmd = shlex.quote(raw_cmd)
     if mode == "bwrap":
@@ -275,6 +277,9 @@ def evaluate_hook_payload(
     profile: Optional[str] = None,
     policy_path: Optional[str] = None,
     sandbox_wrap: str = "none",
+    context_guard: bool = False,
+    economics_ledger_path: Optional[str] = None,
+    hygiene_ledger_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
@@ -319,6 +324,71 @@ def evaluate_hook_payload(
         ctx["session_state_path"] = explicit_sess
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
+    hygiene_blocked = False
+    avoided_tokens = 0
+    use_context_guard = bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")
+    if use_context_guard and dec == "allow":
+        from .core.context_hygiene import ContextHygieneGate
+        from .core.economics_ledger import record_savings_event
+
+        tool_raw = str(
+            payload.get("tool_name")
+            or payload.get("tool")
+            or payload.get("name")
+            or norm.get("tool")
+            or ""
+        ).strip()
+        raw_inp = payload.get("tool_input")
+        if not isinstance(raw_inp, dict):
+            raw_inp = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+        sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        hygiene_v = ContextHygieneGate().evaluate_pre_tool(
+            tool_raw,
+            raw_inp,
+            session_id=sess_id,
+            cwd=ctx.get("project_dir"),
+            ledger_path=hygiene_ledger_path,
+        )
+        if not hygiene_v.allowed:
+            hygiene_blocked = True
+            avoided_tokens = int(hygiene_v.avoided_tokens)
+            record_savings_event(
+                "context_hygiene_block",
+                hygiene_v.avoided_bytes,
+                tool=tool_raw or str(norm.get("tool") or ""),
+                reason_code=hygiene_v.reason_code,
+                target=hygiene_v.target_path,
+                session_id=sess_id,
+                ledger_path=economics_ledger_path,
+            )
+            dec = "deny"
+            verdict["decision"] = "deny"
+            verdict["reason_code"] = hygiene_v.reason_code
+            verdict["label"] = hygiene_v.reason
+            verdict["layer"] = "hygiene"
+            if log_decisions or shadow_mode:
+                from .core.layered_decision_engine import record_decision_journal
+
+                j_entry = {
+                    "event_type": "context_hygiene_decision",
+                    "timestamp": round(time.time(), 6),
+                    "tool": tool_raw or str(norm.get("tool") or ""),
+                    "decision": "escalate" if shadow_mode else "deny",
+                    "shadow_mode": shadow_mode,
+                    "shadow_decision": "deny" if shadow_mode else None,
+                    "shadow_reason_code": hygiene_v.reason_code if shadow_mode else None,
+                    "reason_code": hygiene_v.reason_code,
+                    "label": hygiene_v.reason,
+                    "layer": "hygiene",
+                    "target": hygiene_v.target_path,
+                    "avoided_tokens": avoided_tokens,
+                    "authorizes_execution": False,
+                    "input_sha256": hashlib.sha256(
+                        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                    ).hexdigest()[:16],
+                }
+                target_jp = _resolve_journal_path(explicit_journal) if explicit_journal else None
+                record_decision_journal(j_entry, journal_path=target_jp)
     # Advisory tool-routing recommendations must never become execution authorization
     if verdict.get("decision_kind") == "routing_recommendation" and dec == "allow":
         dec = "escalate"
@@ -413,6 +483,9 @@ def evaluate_hook_payload(
     if shadow_mode:
         out["shadow_decision"] = verdict.get("shadow_decision", dec)
         out["shadow_reason_code"] = verdict.get("shadow_reason_code", verdict["reason_code"])
+    if hygiene_blocked:
+        out["hygiene_blocked"] = True
+        out["avoided_tokens"] = avoided_tokens
     return out
 
 
@@ -430,6 +503,8 @@ def evaluate_post_tool_use_payload(
     policy_path: Optional[str] = None,
     replace_tool_output: bool = False,
     semantic_guard: bool = False,
+    context_guard: bool = False,
+    hygiene_ledger_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
     scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
@@ -488,9 +563,10 @@ def evaluate_post_tool_use_payload(
     _POST_SCRUB_MAX_OVERSIZED_SLICES = 20
 
     use_semantic = bool(semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
+    semantic_errors = 0
 
     def _record_inj(sample: str) -> None:
-        nonlocal injection_severity
+        nonlocal injection_severity, semantic_errors
         inj = detect_prompt_injection(sample)
         if inj["injection_detected"]:
             for f_item in inj["findings"]:
@@ -509,7 +585,7 @@ def evaluate_post_tool_use_payload(
                     if injection_severity == "none":
                         injection_severity = "medium"
             except Exception:
-                pass
+                semantic_errors += 1  # fail-observed: a guard error must not read as "no injection"
 
     def _scrub_node(node: Any) -> Any:
         nonlocal total_count, post_scrub_total_bytes, scrub_truncated, oversized_inj_slices
@@ -559,6 +635,18 @@ def evaluate_post_tool_use_payload(
             secrets_found=secrets_found,
             injection_detected=injection_detected,
             is_protected_path=target_is_protected,
+        )
+    if bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1"):
+        from .core.context_hygiene import ContextHygieneGate
+
+        sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        cwd_dir = str(payload["cwd"]) if isinstance(payload, dict) and payload.get("cwd") else None
+        ContextHygieneGate().notify_post_tool(
+            tool_raw,
+            tool_input or payload,
+            session_id=sess_id,
+            cwd=cwd_dir,
+            ledger_path=hygiene_ledger_path,
         )
 
     caps = payload.get("hook_capabilities") if isinstance(payload.get("hook_capabilities"), dict) else {}
@@ -629,6 +717,8 @@ def evaluate_post_tool_use_payload(
         "hookSpecificOutput": host_specific,
         "exit_code": 0,
     }
+    if semantic_errors:
+        out["semantic_guard_errors"] = semantic_errors
 
     explicit_journal = str(journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip()
     target_jpath = _resolve_journal_path(explicit_journal) if explicit_journal else None
@@ -762,12 +852,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             default=str(os.getenv("AETHERIS_SANDBOX_WRAP") or "none").strip().lower(),
             help="Optional OS sandbox wrapper (`bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
         )
+        parser.add_argument(
+            "--context-guard",
+            action="store_true",
+            help="Enable context-hygiene gating (block redundant/oversized whole reads, hung stdin, root searches)",
+        )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
         shadow_mode = bool(args.shadow or os.getenv("AETHERIS_HOOK_SHADOW") == "1")
         replace_tool_output = bool(args.replace_tool_output or os.getenv("AETHERIS_POST_REPLACE_OUTPUT") == "1")
         semantic_guard = bool(args.semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
+        context_guard = bool(args.context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")
         sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
         event_kind = str(args.event)
@@ -861,7 +957,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         # A1/A3: ask the local warm evaluator daemon first; on ANY failure
         # returns None and falls back to identical in-process evaluation.
         daemon_result: Optional[Dict[str, Any]] = None
-        if os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1" and not os.getenv("AETHERIS_STATE_DIR") and sandbox_wrap in {"", "none"}:
+        if (
+            os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1"
+            and not os.getenv("AETHERIS_STATE_DIR")
+            and sandbox_wrap in {"", "none"}
+            and not context_guard
+        ):
             try:
                 from .hook_daemon import query_daemon
 
@@ -931,6 +1032,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     policy_path=policy_arg,
                     replace_tool_output=replace_tool_output,
                     semantic_guard=semantic_guard,
+                    context_guard=context_guard,
                 )
             if shadow_mode:
                 if post_res.get("journal_written") is False:
@@ -959,6 +1061,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 profile=profile_arg,
                 policy_path=policy_arg,
                 sandbox_wrap=sandbox_wrap,
+                context_guard=context_guard,
             )
         if shadow_mode:
             if result.get("journal_written") is False:

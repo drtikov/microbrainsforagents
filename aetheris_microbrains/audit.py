@@ -297,6 +297,30 @@ REASON_EXPLANATIONS: Dict[str, Dict[str, str]] = {
         "what": "No structural signal was available, so the request escalated by default (fail-closed).",
         "fix": "Provide more concrete context (tool, path, command) so a structural layer can decide.",
     },
+    "hygiene_redundant_whole_read": {
+        "what": "Context hygiene blocked a repeat whole-file Read on an unmodified file already loaded in this session.",
+        "fix": "Read a specific line range with `offset` and `limit`, or edit directly.",
+    },
+    "hygiene_oversized_whole_read": {
+        "what": "Context hygiene intercepted an oversized whole-file Read and returned a structural symbol map instead.",
+        "fix": "Pick the target symbol line range from the returned outline and issue a ranged Read.",
+    },
+    "hygiene_shell_read_oversized": {
+        "what": "Context hygiene blocked an unbounded shell file-reader (`cat`/`type`/`Get-Content`) over the size limit.",
+        "fix": "Pipe through `grep`/`rg`/`Select-String` or `head -n`/`tail -n`, or use a ranged Read.",
+    },
+    "hygiene_spilled_output_whole_read": {
+        "what": "Context hygiene blocked an unbounded whole-file read of a spilled tool-output artifact.",
+        "fix": "Search the spill file with `grep`/`rg` or inspect the tail with `tail -n 40`.",
+    },
+    "hygiene_stdin_hang_risk": {
+        "what": "An interpreter invocation (`python -` or `node -`) had no pipe, redirect, or heredoc feeding stdin.",
+        "fix": "Supply a script path, `-c` expression, `<<` heredoc, or upstream pipe.",
+    },
+    "hygiene_root_origin_search": {
+        "what": "A recursive search targeted a filesystem or drive root directly.",
+        "fix": "Scope the search command to a repository or target directory path.",
+    },
 }
 
 
@@ -403,6 +427,142 @@ def print_shadow_report(entries: List[Dict[str, Any]]) -> None:
     print("=" * 60)
 
 
+class FrictionDigestBuilder:
+    """Deterministic two-stage compressor turning decision journals into compact triage tables."""
+
+    @staticmethod
+    def recommend_action(reason_code: str, count: int) -> str:
+        rc = str(reason_code or "").lower()
+        if "oversized_whole_read" in rc or "diff_scale_exceeded" in rc:
+            return "split_file"
+        if "redundant_whole_read" in rc or "shell_read" in rc:
+            return "tune_threshold" if count >= 4 else "benign"
+        if "stdin_hang_risk" in rc or "root_origin_search" in rc:
+            return "scaffold_helper"
+        if "unrecognized_shell_command" in rc or "strict_ast" in rc:
+            return "allowlist_rule" if count >= 3 else "benign"
+        return "benign"
+
+    @classmethod
+    def build(cls, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        hotspots: Dict[str, Dict[str, int]] = {}
+        matrix: Dict[tuple[str, str], int] = {}
+        stall_signals: Dict[str, int] = {}
+
+        for e in entries:
+            dec, raw_reason = _effective_decision_and_reason(e)
+            reason = raw_reason.split(":")[0]
+            tool = str(e.get("tool") or "unknown")
+            target = str(e.get("target") or e.get("path") or "").strip()
+
+            if target:
+                hb = hotspots.setdefault(target, {"events": 0, "blocks": 0})
+                hb["events"] += 1
+                if dec in {"deny", "escalate"}:
+                    hb["blocks"] += 1
+
+            if dec in {"deny", "escalate"}:
+                key = (reason, tool)
+                matrix[key] = matrix.get(key, 0) + 1
+
+            if reason in {
+                "hygiene_stdin_hang_risk",
+                "hygiene_root_origin_search",
+                "hygiene_redundant_whole_read",
+                "hygiene_spilled_output_whole_read",
+            }:
+                stall_signals[reason] = stall_signals.get(reason, 0) + 1
+
+        top_hotspots = sorted(
+            ({"target": k, **v} for k, v in hotspots.items()),
+            key=lambda row: (-row["blocks"], -row["events"], row["target"]),
+        )[:10]
+
+        friction_rows = [
+            {
+                "reason_code": rc,
+                "tool": tl,
+                "count": cnt,
+                "recommendation": cls.recommend_action(rc, cnt),
+            }
+            for (rc, tl), cnt in sorted(matrix.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+        ][:15]
+
+        return {
+            "total_entries": len(entries),
+            "io_hotspots": top_hotspots,
+            "friction_matrix": friction_rows,
+            "stall_signals": stall_signals,
+        }
+
+
+def build_friction_digest(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build deterministic pre-digest tables from journal entries for triage or light adjudication."""
+    return FrictionDigestBuilder.build(entries)
+
+
+def print_friction_digest(entries: List[Dict[str, Any]], as_json: bool = False) -> None:
+    """Render deterministic friction digest tables."""
+    digest = build_friction_digest(entries)
+    if as_json:
+        print(json.dumps(digest, indent=2, ensure_ascii=False))
+        return
+    print("=" * 64)
+    print(f"AETHERIS MICROBRAINS - FRICTION DIGEST ({digest['total_entries']} entries)")
+    print("=" * 64)
+    if not digest["friction_matrix"] and not digest["io_hotspots"]:
+        print("No friction or hotspot signals detected.")
+        print("=" * 64)
+        return
+    if digest["friction_matrix"]:
+        print("\nGate Friction Matrix:")
+        print(f"  {'REASON CODE':<36} {'TOOL':<14} {'CNT':>4}  RECOMMENDATION")
+        for row in digest["friction_matrix"]:
+            print(
+                f"  {row['reason_code']:<36} {row['tool']:<14} {row['count']:>4}  {row['recommendation']}"
+            )
+    if digest["io_hotspots"]:
+        print("\nI/O Hotspots:")
+        for h in digest["io_hotspots"]:
+            print(f"  - {h['target']} (events={h['events']}, blocks={h['blocks']})")
+    if digest["stall_signals"]:
+        print("\nStall / Context Signals:")
+        for k, v in sorted(digest["stall_signals"].items()):
+            print(f"  - {k}: {v}")
+    print("=" * 64)
+
+
+def print_savings_report(
+    economics_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    *,
+    as_json: bool = False,
+    statusline_only: bool = False,
+) -> None:
+    """Print preserved-token economics summary or single-line status bar text."""
+    from .core.economics_ledger import format_statusline, summarize_savings
+
+    summary = summarize_savings(ledger_path=economics_path or None, session_id=session_id or None)
+    if statusline_only:
+        print(format_statusline(summary, as_json=as_json))
+        return
+    if as_json:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return
+    print("=" * 60)
+    print("AETHERIS MICROBRAINS - TOKEN SAVINGS LEDGER")
+    print("=" * 60)
+    print(f"Hygiene Events:   {summary['events']}")
+    print(f"Avoided Bytes:    {summary['avoided_bytes']}")
+    print(f"Tokens Preserved: {summary['tokens_preserved']}")
+    print(f"Est. USD Saved:   ${summary['est_usd_saved']:.4f}")
+    if summary["by_reason"]:
+        print("\nBy Reason Code:")
+        for rc, bucket in sorted(summary["by_reason"].items(), key=lambda kv: -kv[1]["tokens"]):
+            print(f"  - {rc:<36} {bucket['tokens']:>7} tok ({bucket['events']}x)")
+    print("=" * 60)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m aetheris_microbrains.audit",
@@ -416,6 +576,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--daily", action="store_true", help="Per-day decision digest with top reason codes")
     parser.add_argument("--days", type=int, default=7, help="Days to include for --daily (default 7)")
     parser.add_argument("--shadow-report", action="store_true", help="Enforce-mode projection + prompt-fatigue estimate from shadow events")
+    parser.add_argument("--digest", action="store_true", help="Compact deterministic friction & I/O hotspot digest tables")
+    parser.add_argument("--savings", action="store_true", help="Show token & cost preservation ledger summary")
+    parser.add_argument("--statusline", action="store_true", help="Emit compact single-line token savings statusbar")
+    parser.add_argument("--json", action="store_true", help="Emit --digest/--savings/--statusline output as JSON")
+    parser.add_argument("--economics-path", type=str, default="", help="Path to economics_ledger.jsonl")
+    parser.add_argument("--session-id", type=str, default="", help="Optional session_id filter for --savings/--statusline")
     parser.add_argument("--journal-path", type=str, default="", help="Path to decision_journal.jsonl")
 
     args = parser.parse_args(argv)
@@ -426,9 +592,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+
+    if args.savings or args.statusline:
+        print_savings_report(
+            economics_path=args.economics_path or None,
+            session_id=args.session_id or None,
+            as_json=args.json,
+            statusline_only=args.statusline,
+        )
+        return 0
+
     p = args.journal_path or None
-    read_all = bool(args.summary or args.daily or args.shadow_report or args.find)
+    read_all = bool(args.summary or args.daily or args.shadow_report or args.digest or args.find)
     entries = get_journal_entries(journal_path=p, limit=None if read_all else max(100, args.tail))
+
+    if args.digest:
+        print_friction_digest(entries, as_json=args.json)
+        return 0
 
     if args.summary:
         print_summary(entries)
