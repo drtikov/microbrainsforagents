@@ -106,6 +106,53 @@ def test_notebookedit_dangerous_cell_denies():
     assert verdict["reason_code"] == "layer1_ast_security_veto"
 
 
+def test_notebookedit_markdown_cell_escalates_not_denies():
+    """Markdown cells must not be Python-linted; prose should ask, never false-deny."""
+    verdict = evaluate_hook_payload(
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "analysis.ipynb",
+                "cell_type": "markdown",
+                "new_source": "# Title\n\nSome **markdown** text with <code>print(x)</code> examples.",
+            },
+        },
+        log_decisions=False,
+    )
+    assert verdict["decision"] == "escalate"
+    assert verdict["reason_code"] == "layer1_uninspected_tool"
+
+
+def test_notebookedit_raw_cell_escalates_not_denies():
+    verdict = evaluate_hook_payload(
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "analysis.ipynb",
+                "cell_type": "raw",
+                "new_source": "def broken(:",
+            },
+        },
+        log_decisions=False,
+    )
+    assert verdict["decision"] == "escalate"
+
+
+def test_notebookedit_code_cell_still_linted_with_explicit_type():
+    verdict = evaluate_hook_payload(
+        {
+            "tool_name": "NotebookEdit",
+            "tool_input": {
+                "notebook_path": "analysis.ipynb",
+                "cell_type": "code",
+                "new_source": "import os\nos.system('rm -rf /tmp/x')",
+            },
+        },
+        log_decisions=False,
+    )
+    assert verdict["decision"] == "deny"
+
+
 # ---------------------------------------------------------------------------
 # I4: read-only pip introspection allowlisted in any profile
 # ---------------------------------------------------------------------------

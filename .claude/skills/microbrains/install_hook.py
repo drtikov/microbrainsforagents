@@ -9,7 +9,15 @@ Usage:
     python install_hook.py [--strict-ast] [--shadow] [--shared] [--auto-allow]
                            [--profile strict|dev] [--policy FILE]
                            [--session-state FILE] [--journal-path FILE]
-                           [--project-dir DIR] [--async-post] [--remove]
+                           [--project-dir DIR] [--async-post]
+                           [--preset solo-dev|ci|paranoid] [--no-auto-allow]
+                           [--no-async-post] [--dry-run] [--self-test] [--remove]
+
+Presets (`--preset`):
+    solo-dev   dev profile + auto-allow + async post (low-friction local work)
+    ci         strict profile, enforce mode, synchronous post (deterministic CI)
+    paranoid   strict profile + strict AST + enforce (maximum scrutiny)
+Explicit flags always override the preset.
 """
 
 from __future__ import annotations
@@ -149,6 +157,7 @@ def install(
     journal_path: str | None = None,
     async_post: bool = False,
     project_dir: Path | None = None,
+    dry_run: bool = False,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -196,6 +205,11 @@ def install(
     hooks["PreToolUse"] = pre
     hooks["PostToolUse"] = post
 
+    if dry_run:
+        print(f"DRY RUN - would write to {target}:")
+        print(json.dumps(settings, indent=2))
+        return 0
+
     _atomic_write_json(target, settings)
     mode = "shadow (observe-only)" if shadow else "enforce"
     ast_mode = "strict-AST" if strict_ast else "default-AST"
@@ -209,6 +223,7 @@ def remove(
     shared: bool = False,
     settings_path: Path | None = None,
     project_dir: Path | None = None,
+    dry_run: bool = False,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -227,39 +242,169 @@ def remove(
     for event in ("PreToolUse", "PostToolUse"):
         if event in hooks:
             hooks[event] = _strip_aetheris_from_event_list(hooks[event])
+    if dry_run:
+        print(f"DRY RUN - would write to {target}:")
+        print(json.dumps(settings, indent=2))
+        return 0
     _atomic_write_json(target, settings)
     print(f"Removed Aetheris hooks from {target}")
     return 0
 
 
-def main() -> int:
+def resolve_preset(
+    preset: str | None,
+    strict_ast: bool | None,
+    shadow: bool | None,
+    auto_allow: bool | None,
+    async_post: bool | None,
+    profile: str | None,
+) -> tuple[bool, bool, bool, bool, str | None]:
+    """Merge a `--preset` bundle with explicitly-passed flags (explicit always wins)."""
+    if preset == "solo-dev":
+        profile = profile or "dev"
+        auto_allow = True if auto_allow is None else auto_allow
+        async_post = True if async_post is None else async_post
+    elif preset == "ci":
+        profile = profile or "strict"
+        async_post = False if async_post is None else async_post
+    elif preset == "paranoid":
+        profile = profile or "strict"
+        strict_ast = True if strict_ast is None else strict_ast
+    return bool(strict_ast), bool(shadow), bool(auto_allow), bool(async_post), profile
+
+
+def self_test(project_dir: Path | None = None) -> int:
+    """In-process installation health check: imports, probe verdicts, installed settings.
+
+    Static and in-process only: no subprocesses, no writes, no network.
+    """
+    import importlib
+
+    # `python install_hook.py` puts the skill dir (not the repo root) on sys.path,
+    # so add the project root where the aetheris_microbrains package lives.
+    repo_root = str(PROJECT_DIR if project_dir is None else Path(project_dir))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    failures: list[str] = []
+    print("=" * 60)
+    print("AETHERIS MICROBRAINS - INSTALLER SELF-TEST")
+    print("=" * 60)
+
+    v = sys.version_info
+    ok = v >= (3, 10)
+    print(f"[{'ok' if ok else 'FAIL'}] Python {v.major}.{v.minor}.{v.micro} (needs >= 3.10)")
+    if not ok:
+        failures.append("python-version")
+
+    try:
+        hook_mod = importlib.import_module("aetheris_microbrains.hook")
+        print("[ok] aetheris_microbrains.hook importable")
+    except Exception as exc:
+        print(f"[FAIL] aetheris_microbrains.hook import failed: {exc}")
+        print("       Fix: `pip install -e .` from the repo (or `pip install aetheris-microbrains`)")
+        hook_mod = None
+        failures.append("import")
+
+    if hook_mod is not None:
+        try:
+            deny_v = hook_mod.evaluate_hook_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+                log_decisions=False,
+            )
+            allow_v = hook_mod.evaluate_hook_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}},
+                log_decisions=False,
+            )
+            ok = deny_v.get("decision") == "deny" and allow_v.get("decision") == "allow"
+            print(f"[{'ok' if ok else 'FAIL'}] probe verdicts: rm -> {deny_v.get('decision')}, git status -> {allow_v.get('decision')}")
+            if not ok:
+                failures.append("probe-verdicts")
+        except Exception as exc:
+            print(f"[FAIL] in-process probe raised: {exc}")
+            failures.append("probe-crash")
+
+    proj = Path(project_dir) if project_dir else PROJECT_DIR
+    target = None
+    for cand in (proj / ".claude" / "settings.local.json", proj / ".claude" / "settings.json"):
+        if cand.is_file():
+            target = cand
+            break
+    if target is None:
+        print(f"[FAIL] no settings file under {proj / '.claude'}; run the installer first")
+        failures.append("not-installed")
+    else:
+        settings, rc = _load_validated_settings(target)
+        if rc != 0 or settings is None:
+            print(f"[FAIL] {target.name} failed JSON/structure validation")
+            failures.append("settings-invalid")
+        else:
+            pre = [e for e in settings.get("hooks", {}).get("PreToolUse", []) if _is_aetheris_entry(e)]
+            post = [e for e in settings.get("hooks", {}).get("PostToolUse", []) if _is_aetheris_entry(e)]
+            ok = len(pre) == 1 and len(post) == 1
+            print(f"[{'ok' if ok else 'FAIL'}] hook entries in {target.name}: pre={len(pre)} post={len(post)}")
+            if not ok:
+                failures.append("hook-entries")
+            if pre:
+                matcher_ok = pre[0].get("matcher") == PRE_TOOL_MATCHER
+                print(f"[{'ok' if matcher_ok else 'FAIL'}] PreToolUse matcher: {pre[0].get('matcher')!r}")
+                if not matcher_ok:
+                    failures.append("pre-matcher")
+                inner_list = pre[0].get("hooks")
+                inner = inner_list[0] if isinstance(inner_list, list) and inner_list else {}
+                print(f"[info] PreToolUse onFailure={inner.get('onFailure')!r} "
+                      f"(honored by Claude Code >= 2.1.295; older versions ignore it)")
+            if post:
+                post_matcher_ok = post[0].get("matcher") == POST_TOOL_MATCHER
+                print(f"[{'ok' if post_matcher_ok else 'FAIL'}] PostToolUse matcher: {post[0].get('matcher')!r}")
+                if not post_matcher_ok:
+                    failures.append("post-matcher")
+
+    print("-" * 60)
+    if failures:
+        print(f"SELF-TEST FAILED: {', '.join(failures)}")
+        return 1
+    print("SELF-TEST PASSED")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
-    ap.add_argument("--shadow", action="store_true", help="Observe-only: log decisions, never block")
-    ap.add_argument("--auto-allow", action="store_true", help="Emit permissionDecision='allow' on safe verdicts (skips Claude Code prompts for gate-approved calls)")
+    ap.add_argument("--strict-ast", action=argparse.BooleanOptionalAction, default=None, help="Enable strict AST import/dynamic-call allowlist (negate with --no-strict-ast)")
+    ap.add_argument("--shadow", action=argparse.BooleanOptionalAction, default=None, help="Observe-only: log decisions, never block (negate with --no-shadow)")
+    ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=None, help="Emit permissionDecision='allow' on safe verdicts (negate with --no-auto-allow)")
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")
     ap.add_argument("--session-state", default=None, help="Path for cross-turn SessionSecurityState JSON")
     ap.add_argument("--journal-path", default=None, help="Override path for decision_journal.jsonl")
     ap.add_argument("--project-dir", default=None, help="Target project root containing `.claude/` (defaults to repo root)")
-    ap.add_argument("--async-post", action="store_true", help="Run PostToolUse asynchronously instead of blocking before output ingestion")
+    ap.add_argument("--async-post", action=argparse.BooleanOptionalAction, default=None, help="Run PostToolUse asynchronously instead of blocking before output ingestion (negate with --no-async-post)")
     ap.add_argument("--remove", action="store_true", help="Uninstall the Aetheris hooks")
-    args = ap.parse_args()
+    ap.add_argument("--dry-run", action="store_true", help="Print the settings that would be written; modify nothing")
+    ap.add_argument("--preset", choices=["solo-dev", "ci", "paranoid"], default=None, help="Opinionated flag bundle (explicit flags still override)")
+    ap.add_argument("--self-test", action="store_true", help="In-process installation checks (imports, probe verdicts, installed settings)")
+    args = ap.parse_args(argv)
     proj = Path(args.project_dir) if args.project_dir else None
+    if args.self_test:
+        return self_test(project_dir=proj)
     if args.remove:
-        return remove(shared=args.shared, project_dir=proj)
+        return remove(shared=args.shared, project_dir=proj, dry_run=args.dry_run)
+    strict_ast, shadow, auto_allow, async_post, profile = resolve_preset(
+        args.preset, args.strict_ast, args.shadow, args.auto_allow, args.async_post, args.profile
+    )
     return install(
-        args.strict_ast,
-        args.shadow,
+        strict_ast,
+        shadow,
         shared=args.shared,
-        auto_allow=args.auto_allow,
-        profile=args.profile,
+        auto_allow=auto_allow,
+        profile=profile,
         policy=args.policy,
         session_state=args.session_state,
         journal_path=args.journal_path,
-        async_post=args.async_post,
+        async_post=async_post,
         project_dir=proj,
+        dry_run=args.dry_run,
     )
 
 

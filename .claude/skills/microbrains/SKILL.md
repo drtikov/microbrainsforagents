@@ -27,6 +27,10 @@ python .claude/skills/microbrains/install_hook.py --shared      # write portable
 python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts)
 python .claude/skills/microbrains/install_hook.py --async-post  # run PostToolUse asynchronously instead of blocking
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
+python .claude/skills/microbrains/install_hook.py --preset solo-dev   # bundles: dev profile + auto-allow + async post (also: ci, paranoid)
+python .claude/skills/microbrains/install_hook.py --preset solo-dev --no-auto-allow --no-async-post  # override any preset boolean
+python .claude/skills/microbrains/install_hook.py --dry-run    # preview the settings JSON without writing
+python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end probe of the installed gate
 ```
 
 Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
@@ -48,6 +52,10 @@ When a tool call was denied and the user (or you) needs to know why:
 python -m aetheris_microbrains.audit --last      # most recent decision
 python -m aetheris_microbrains.audit --tail 20   # last 20
 python -m aetheris_microbrains.audit --summary   # aggregate
+python -m aetheris_microbrains.audit --explain   # what/why/fix for the most recent decision
+python -m aetheris_microbrains.audit --explain --find <sha-prefix>  # explain a specific decision
+python -m aetheris_microbrains.audit --daily     # per-day digest with top reason codes
+python -m aetheris_microbrains.audit --shadow-report  # enforce-mode projection + prompt-fatigue estimate (shadow installs)
 ```
 
 Translate the `reason_code` + `label` into a one-sentence human explanation and the
@@ -85,6 +93,25 @@ report = mb.scan_mcp_tools(<tool_schemas_list>)                 # returns dict: 
 inj = mb.detect_prompt_injection(<tool_output_text>)           # returns dict: injection_detected, severity, findings
 scrubbed = mb.scrub_tool_output(<tool_output_text>)            # returns dict: secrets_found, secret_types, redacted_text
 ```
+
+### 5. Health check & MCP pinning (doctor)
+
+```bash
+python -m aetheris_microbrains.doctor            # verify python/package/settings/matchers/policy/journal/pins/daemon
+python -m aetheris_microbrains.doctor --json     # machine-readable report
+python -m aetheris_microbrains.doctor --pin-mcp <server>    # trust a server, pinned to its current .mcp.json fingerprint
+python -m aetheris_microbrains.doctor --unpin-mcp <server>  # remove the pin (tools fail closed to ask again)
+```
+
+Pinned MCP servers get tiered structural verdicts: explicit read-only verbs (`get_*`, `list_*`, `read_*`, `search_*`, ...) allow, while mutating or unrecognized tool names still escalate. `.mcp.json` config drift or missing config invalidates the pin automatically (complements schema-level `MCPManifestPinner`).
+
+### 6. Hook daemon (optional latency optimization)
+
+```bash
+python -m aetheris_microbrains.hook_daemon       # warm evaluator on localhost; Ctrl+C to stop
+```
+
+The hook CLI queries the daemon first and falls back to identical in-process evaluation on any failure - it is a pure optimization, never a dependency. Verdict memoization (5s TTL) only caches safe requests: pre-events without journal logging, non-shadow, non-edit payloads (journal completeness wins).
 
 ### Advanced flags (hook.py)
 

@@ -47,6 +47,11 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "scan_mcp_tools": (".core.mcp_security", "scan_mcp_tools"),
     "MCPManifestPinner": (".core.mcp_security", "MCPManifestPinner"),
     "SessionSecurityState": (".core.mcp_security", "SessionSecurityState"),
+    # MCP risk tiers & doctor
+    "mcp_tool_tier": (".core.mcp_tiers", "mcp_tool_tier"),
+    "save_mcp_pin": (".core.mcp_tiers", "save_mcp_pin"),
+    "remove_mcp_pin": (".core.mcp_tiers", "remove_mcp_pin"),
+    "run_doctor": (".doctor", "run_doctor"),
     # OpenCL & Core microbrains
     "OpenCLMicroBrainAccelerator": (".core.opencl_microbrain_accelerator", "OpenCLMicroBrainAccelerator"),
     "get_opencl_accelerator": (".core.opencl_microbrain_accelerator", "get_opencl_accelerator"),

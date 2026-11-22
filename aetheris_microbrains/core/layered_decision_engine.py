@@ -36,6 +36,7 @@ import shlex
 import textwrap
 import time
 from collections import Counter, deque
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -197,6 +198,19 @@ class PolicyConfig:
     max_diff_lines: int = 480
     strict_ast_allowlist: bool = False
     allowed_ast_imports: Tuple[str, ...] = DEFAULT_ALLOWED_AST_IMPORTS
+    # Operator web domain allowlist: `webfetch`/`websearch` targets on these
+    # domains are allowed even when `require_approval_for_external` is set.
+    # Empty by default (behavior unchanged); subdomains match implicitly.
+    allowed_web_domains: Tuple[str, ...] = ()
+    # Operator-trusted MCP servers (`mcp__<server>__tool`). Trusted/pinned
+    # servers get tiered verdicts: read-ish tool names allow structurally,
+    # write-ish names still escalate; unpinned servers keep the fail-closed ask.
+    trusted_mcp_servers: Tuple[str, ...] = ()
+    # Cross-file import taint (depth 1): opt-in (`False` by default so normal
+    # local edits importing packages/utilities never false-escalate). When
+    # enabled, a clean proposed Python diff importing a local project module
+    # whose own source contains AST-vetoed constructs escalates (never denies).
+    import_taint_enabled: bool = False
     profile: str = "strict"  # "strict" (default) or "dev" (permits routine dev ops on non-protected files)
 
     @classmethod
@@ -210,7 +224,7 @@ class PolicyConfig:
             raise ValueError(f"Unknown PolicyConfig field(s): {', '.join(unknown)}")
         kwargs: Dict[str, Any] = {}
         for k, v in data.items():
-            if k in ("protected_patterns", "allowed_ast_imports"):
+            if k in ("protected_patterns", "allowed_ast_imports", "allowed_web_domains", "trusted_mcp_servers"):
                 if not isinstance(v, (list, tuple, set)):
                     raise ValueError(f"PolicyConfig field {k!r} must be a list/tuple, got {type(v).__name__}")
                 kwargs[k] = tuple(str(x) for x in v)
@@ -486,6 +500,7 @@ def evaluate_layer0_policy(
     tool_name: str,
     target_path: Optional[str] = None,
     policy: Optional[PolicyConfig] = None,
+    input_data: Any = None,
 ) -> Dict[str, Any]:
     """Evaluate Layer 0 deterministic policy (risk class + protected boundaries)."""
     cfg = policy or DEFAULT_POLICY
@@ -515,7 +530,14 @@ def evaluate_layer0_policy(
             "reason_code": "layer0_irreversible_requires_confirmation",
         }
 
-    if risk_class == "EXTERNAL_ACTION" and cfg.require_approval_for_external:
+    if (
+        risk_class == "EXTERNAL_ACTION"
+        and cfg.require_approval_for_external
+        # Operator-allowlisted web targets skip the blanket external confirmation
+        # here so Layer 1's structural verification (which re-checks the same
+        # allowlist) can still produce a verified allow.
+        and not (clean_tool in _HARNESS_WEB_TOOLS and _web_target_allowlisted(input_data, cfg))
+    ):
         return {
             "decision": "escalate",
             "risk_class": risk_class,
@@ -3037,6 +3059,317 @@ def _split_shell_subcommands(cmd: str) -> List[str]:
     return parts
 
 
+_PS_SAFE_READONLY_CMDLETS: Set[str] = {
+    "get-date", "get-location", "get-childitem", "get-content", "get-item",
+    "get-itemproperty", "get-host", "get-process", "get-service", "get-command",
+    "get-help", "get-module", "get-alias", "get-history", "test-path",
+    "select-object", "select-string", "measure-object", "compare-object",
+    "sort-object", "format-table", "format-list", "format-wide", "where-object",
+    "write-output", "write-host", "clear-host", "exit",
+}
+_PS_DANGEROUS_CMDLETS: Dict[str, str] = {
+    "invoke-expression": "powershell_invoke_expression",
+    "iex": "powershell_invoke_expression",
+    "invoke-item": "powershell_invoke_item",
+    "ii": "powershell_invoke_item",
+    "invoke-command": "powershell_invoke_command",
+    "icm": "powershell_invoke_command",
+    "start-process": "powershell_start_process",
+    "saps": "powershell_start_process",
+    "start": "powershell_start_process",
+    "add-type": "powershell_add_type",
+}
+_PS_MUTATING_CMDLETS: Set[str] = {
+    "set-content", "sc", "add-content", "ac", "out-file", "clear-content", "clc",
+    "remove-item", "ri", "del", "rd", "erase", "rmdir", "rm",
+    "move-item", "mi", "mv", "copy-item", "ci", "cp", "rename-item", "rni",
+    "new-item", "ni", "set-itemproperty", "new-itemproperty", "remove-itemproperty",
+}
+_PS_EGRESS_CMDLETS: Set[str] = {
+    "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "wget",
+    "write-output", "write-host", "echo",
+}
+_PS_UNIX_DELEGATED_DESTRUCTIVE: Set[str] = {
+    "rm", "dd", "chmod", "mkfs", "del", "erase", "rmdir", "rd",
+}
+_PS_REDIR_RE = re.compile(r"(?:[1-6*]?>>?|&>>?)\s*(\"[^\"]*\"|'[^']*'|[^\s;|&<>]+)")
+
+
+def _extract_ps_nested_blocks(script: str) -> List[str]:
+    """Extract inner bodies of `{ ... }` scriptblocks and `$( ... )` subexpressions."""
+    blocks: List[str] = []
+    n = len(script)
+    i = 0
+    in_single = False
+    in_double = False
+    while i < n:
+        ch = script[i]
+        if ch == "`" and not in_single and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if not in_single and (ch == "{" or (ch == "$" and i + 1 < n and script[i + 1] == "(")):
+            open_ch = "{" if ch == "{" else "("
+            close_ch = "}" if ch == "{" else ")"
+            start = i + (1 if ch == "{" else 2)
+            depth = 1
+            j = start
+            sub_single = False
+            sub_double = False
+            while j < n and depth > 0:
+                c = script[j]
+                if c == "`" and not sub_single and j + 1 < n:
+                    j += 2
+                    continue
+                if c == "'" and not sub_double:
+                    sub_single = not sub_single
+                elif c == '"' and not sub_single:
+                    sub_double = not sub_double
+                elif not sub_single:
+                    if c == open_ch:
+                        depth += 1
+                    elif c == close_ch:
+                        depth -= 1
+                        if depth == 0:
+                            break
+                j += 1
+            blocks.append(script[start:j])
+            i = start  # continue scanning so outer structure advances safely
+            continue
+        i += 1
+    return blocks
+
+
+def _tokenize_ps_statement(stmt: str) -> Tuple[List[str], bool]:
+    """Tokenize a PowerShell statement keeping Windows backslashes intact."""
+    try:
+        raw_toks = shlex.split(stmt, posix=False)
+        unbalanced = False
+    except ValueError:
+        raw_toks = stmt.strip().split()
+        unbalanced = True
+    cleaned: List[str] = []
+    for tok in raw_toks:
+        if len(tok) >= 2 and ((tok[0] == tok[-1] == '"') or (tok[0] == tok[-1] == "'")):
+            cleaned.append(tok[1:-1])
+        else:
+            cleaned.append(tok)
+    return cleaned, unbalanced
+
+
+def _inspect_ps_script(
+    script: str,
+    policy: Optional[PolicyConfig],
+    findings: List[str],
+    unrecognized: List[str],
+    protected_path_reads: List[str],
+    sensitive_env_vars: List[str],
+    state: Dict[str, bool],
+    depth: int = 0,
+) -> None:
+    """Recursively inspect a PowerShell `-Command` script and nested blocks/subexpressions."""
+    if depth > 4 or not script.strip():
+        return
+    scan_text = script
+    if "`" in script:
+        # PowerShell backtick escapes can disguise cmdlets (e.g. `i`ex` or `Remove-`Item`)
+        if "powershell_backtick_escape" not in unrecognized:
+            unrecognized.append("powershell_backtick_escape")
+        scan_text = script.replace("`", "")
+
+    if "::" in scan_text and "powershell_dotnet_static_call" not in unrecognized:
+        unrecognized.append("powershell_dotnet_static_call")
+
+    nested = _extract_ps_nested_blocks(scan_text)
+    if nested or "{" in scan_text or "}" in scan_text or "$(" in scan_text:
+        if "powershell_scriptblock_or_subexpr" not in unrecognized:
+            unrecognized.append("powershell_scriptblock_or_subexpr")
+        for body in nested:
+            _inspect_ps_script(
+                body,
+                policy,
+                findings,
+                unrecognized,
+                protected_path_reads,
+                sensitive_env_vars,
+                state,
+                depth=depth + 1,
+            )
+
+    for m in _PS_REDIR_RE.finditer(scan_text):
+        r_target = m.group(1).strip().strip("\"'")
+        if not r_target or r_target.lower() in {"$null", "/dev/null", "null"}:
+            continue
+        if is_protected_path(r_target, policy=policy):
+            findings.append("powershell_protected_path_mutation")
+        elif "powershell_redirection" not in unrecognized:
+            unrecognized.append("powershell_redirection")
+
+    # Strip out redirection operators+targets so statement tokenization sees the command
+    stmt_text = _PS_REDIR_RE.sub(" ", scan_text)
+    for raw_stmt in _split_shell_subcommands(stmt_text):
+        stmt = raw_stmt.strip()
+        if not stmt:
+            continue
+        toks, unbalanced = _tokenize_ps_statement(stmt)
+        if unbalanced and "powershell_unbalanced_quotes" not in unrecognized:
+            unrecognized.append("powershell_unbalanced_quotes")
+        if not toks:
+            continue
+        # Handle leading PowerShell call (`&`) or dot-source (`.`) operator
+        if toks[0] in {"&", "."}:
+            if "powershell_call_operator" not in unrecognized:
+                unrecognized.append("powershell_call_operator")
+            toks = toks[1:]
+            if not toks:
+                continue
+        elif toks[0].startswith(("&", ".")) and len(toks[0]) > 1 and not toks[0].startswith((".", "./", ".\\")):
+            if toks[0].startswith("&"):
+                if "powershell_call_operator" not in unrecognized:
+                    unrecognized.append("powershell_call_operator")
+                toks = [toks[0][1:]] + toks[1:]
+
+        first_raw = re.split(r"[\s({]", toks[0], 1)[0].strip().strip("'\"").lower()
+        first = os.path.basename(first_raw).removesuffix(".exe").removesuffix(".com")
+        stmt_args = toks[1:]
+        if not first:
+            continue
+
+        # Inspect every token for PowerShell env/provider drives and protected filesystem paths
+        for tok in toks:
+            tok_low = tok.lower()
+            env_m = re.search(r"(?:^|\$)(env|cert|hkcu|hklm|variable):([A-Za-z0-9_]*)", tok_low)
+            if env_m:
+                drv, env_key = env_m.group(1), env_m.group(2)
+                if drv == "env" and env_key:
+                    if _SENSITIVE_ENV_VAR_RE.search(env_key):
+                        findings.append("shell_sensitive_env_exposure")
+                        if env_key not in sensitive_env_vars:
+                            sensitive_env_vars.append(env_key)
+                    else:
+                        state["sensitive_env_access"] = True
+                else:
+                    state["sensitive_env_access"] = True
+
+            for cand in _extract_candidate_paths_from_arg(tok):
+                cand_norm = cand.replace("\\", "/")
+                if _PROC_ENVIRON_RE.search(cand_norm):
+                    findings.append("shell_proc_environ_access")
+                    break
+                if is_protected_path(cand, policy=policy):
+                    if first in _PS_MUTATING_CMDLETS:
+                        findings.append("shell_protected_path_mutation")
+                    elif first in _PS_EGRESS_CMDLETS:
+                        findings.append(f"shell_protected_path_egress:{first}")
+                    elif cand not in protected_path_reads:
+                        protected_path_reads.append(cand)
+                    break
+
+        if first in _PS_DANGEROUS_CMDLETS:
+            findings.append(_PS_DANGEROUS_CMDLETS[first])
+            continue
+
+        if first in {"remove-item", "ri"}:
+            has_rec_or_force = False
+            for a in stmt_args:
+                alow = a.lower()
+                if alow.startswith("-") and not alow.startswith("--") and len(alow) >= 2:
+                    if "-recurse".startswith(alow) or "-force".startswith(alow):
+                        has_rec_or_force = True
+                        break
+            targets_danger = any(
+                _is_destructive_rm_target(a, policy=policy)
+                for a in stmt_args
+                if not a.startswith("-")
+            )
+            if has_rec_or_force or targets_danger:
+                findings.append("powershell_remove_item_recursive")
+            else:
+                unrecognized.append("powershell:remove-item")
+            continue
+
+        if first in _PS_UNIX_DELEGATED_DESTRUCTIVE or first.startswith("mkfs."):
+            sub_res = analyze_shell_command(" ".join(toks), policy=policy)
+            if not sub_res.get("is_safe", True):
+                findings.extend(sub_res.get("findings", []))
+            else:
+                unrecognized.append(f"powershell:{first}")
+            continue
+
+        if first in _PS_SAFE_READONLY_CMDLETS:
+            continue
+
+        unrecognized.append(f"powershell:{first}")
+
+
+def _analyze_powershell_invocation(
+    args: List[str],
+    policy: Optional[PolicyConfig] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str], bool]:
+    """B3: analyze `powershell`/`pwsh -Command` payloads against an explicit read-only cmdlet surface.
+
+    Returns `(findings, unrecognized, fully_safe)`. `-EncodedCommand` vetoes
+    (`powershell_encoded_command`); `-File` and opaque invocations stay
+    unrecognized (escalate); scriptblocks/redirections/subexpressions escalate or
+    veto if dangerous cmdlets or protected-path writes are inside. Optional `extra`
+    receives `protected_path_reads`, `sensitive_env_access`, and `sensitive_env_vars`.
+    """
+    findings: List[str] = []
+    unrecognized: List[str] = []
+    protected_reads: List[str] = []
+    sensitive_vars: List[str] = []
+    state = {"sensitive_env_access": False}
+    mode: Optional[str] = None
+    script_parts: List[str] = []
+    for idx, a in enumerate(args):
+        low = a.lower()
+        if low in {"-encodedcommand", "-enc", "-e", "-ec"} or (
+            low.startswith("-en") and "-encodedcommand".startswith(low)
+        ):
+            findings.append("powershell_encoded_command")
+            return findings, unrecognized, False
+        if low in {"-command", "-c"} or (
+            low.startswith("-co") and "-command".startswith(low)
+        ):
+            # PowerShell takes everything after -Command as the script; later
+            # flag-looking tokens are part of it, not invocation flags.
+            mode = "command"
+            script_parts = args[idx + 1 :]
+            break
+        if low in {"-file", "-f"} or (low.startswith("-fi") and "-file".startswith(low)):
+            mode = "file"
+            break
+    if mode != "command" or not script_parts:
+        unrecognized.append("powershell_opaque_payload")
+        return findings, unrecognized, False
+
+    script = " ".join(script_parts)
+    _inspect_ps_script(
+        script,
+        policy=policy,
+        findings=findings,
+        unrecognized=unrecognized,
+        protected_path_reads=protected_reads,
+        sensitive_env_vars=sensitive_vars,
+        state=state,
+    )
+    dedup_findings = list(dict.fromkeys(findings))
+    dedup_unrec = list(dict.fromkeys(unrecognized))
+    if extra is not None:
+        extra["protected_path_reads"] = protected_reads
+        extra["sensitive_env_access"] = state["sensitive_env_access"]
+        extra["sensitive_env_vars"] = sensitive_vars
+    return dedup_findings, dedup_unrec, (not dedup_findings and not dedup_unrec)
+
+
 def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig] = None) -> Dict[str, Any]:
     """Layer 1 structural POSIX/Windows shell parser using shlex tokenization.
 
@@ -3311,7 +3644,20 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             )
             if not is_safe_analytical_xargs:
                 unrecognized.append(wrappers_seen[0] if wrappers_seen else "env_assignment")
-        if not _is_command_allowlisted(exe, args, policy=policy):
+        ps_handled = False
+        if exe in {"powershell", "pwsh"}:
+            ps_handled = True
+            ps_extra: Dict[str, Any] = {}
+            ps_findings, ps_unrecognized, _ps_safe = _analyze_powershell_invocation(args, policy=policy, extra=ps_extra)
+            findings.extend(ps_findings)
+            unrecognized.extend(ps_unrecognized)
+            for p_read in ps_extra.get("protected_path_reads") or ():
+                protected_path_reads.append(p_read)
+            if ps_extra.get("sensitive_env_access"):
+                sensitive_env_access = True
+            for e_var in ps_extra.get("sensitive_env_vars") or ():
+                sensitive_env_vars.append(e_var)
+        if not ps_handled and not _is_command_allowlisted(exe, args, policy=policy):
             unrecognized.append(exe)
 
         # Bare or secret-targeted environment inspection commands
@@ -3621,6 +3967,171 @@ _VERIFIED_EDIT_WRITE_TOOLS: Set[str] = {
 _HARNESS_WEB_TOOLS: Set[str] = {"webfetch", "websearch"}
 
 
+def _web_target_allowlisted(input_data: Any, cfg: PolicyConfig) -> bool:
+    """True when an http/https webfetch target host is on the operator domain allowlist."""
+    if not cfg.allowed_web_domains:
+        return False
+    tool_input = input_data.get("tool_input") if isinstance(input_data, dict) else None
+    raw_url = ""
+    if isinstance(tool_input, dict):
+        raw_url = str(tool_input.get("url") or tool_input.get("query") or "").strip()
+    if not raw_url:
+        return False
+    parsed = urlparse(raw_url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    return any(
+        host == d.strip().lower().rstrip(".") or host.endswith("." + d.strip().lower().rstrip("."))
+        for d in cfg.allowed_web_domains
+        if d.strip()
+    )
+
+
+def _mcp_tier_verdict(
+    clean_tool: str,
+    cfg: PolicyConfig,
+    project_dir: Optional[Path] = None,
+) -> Optional[Tuple[str, str, list, str, int]]:
+    """Tiered verdict for `mcp__` tools; None falls through to the fail-closed ask.
+
+    Read-only tools on operator-trusted/pinned servers allow structurally (in
+    `dev` profile, or when `require_approval_for_external` is False); write-ish
+    tools on trusted servers still escalate (the name heuristic is not proof of
+    safety). Unpinned or drifted servers keep `layer1_uninspected_tool`.
+    """
+    try:
+        from .mcp_tiers import mcp_tool_tier
+
+        res = mcp_tool_tier(
+            clean_tool,
+            trusted_servers=tuple(cfg.trusted_mcp_servers or ()),
+            project_dir=project_dir,
+        )
+    except Exception:
+        return None
+    server = str(res.get("server") or "")
+    tool_seg = str(res.get("tool") or "")
+    if res.get("tier") == "trusted_readonly":
+        return ("allow", f"mcp:{server}:{tool_seg}", [clean_tool], "layer1_mcp_trusted_readonly", 1)
+    if res.get("tier") == "trusted_writeish":
+        return (
+            "escalate",
+            f"mcp_write_tool:{server}:{tool_seg}",
+            ["allow", "deny"],
+            "layer1_mcp_write_tool_escalate",
+            1,
+        )
+    return None
+
+
+_PROJECT_MODULE_CACHE: Dict[str, Tuple[Tuple[int, int], List[str]]] = {}
+_IMPORT_TAINT_MAX_FILE_BYTES = 512 * 1024
+_IMPORT_TAINT_MAX_MODULES = 8
+_BENIGN_PEP562_LAZY_FINDINGS = {
+    "dynamic_import:importlib.import_module",
+    "obfuscated_subscript_builtin:<dynamic>",
+}
+
+
+def _resolve_module_candidates(module_name: str, base_dirs: List[Path]) -> List[Path]:
+    """Map an import name (+ relative dots) onto concrete project file candidates."""
+    rel = str(module_name or "").strip()
+    prefix_dots = 0
+    while rel.startswith("."):
+        prefix_dots += 1
+        rel = rel[1:]
+    parts = [p for p in rel.strip().split(".") if p]
+    if not parts:
+        return []
+    out: List[Path] = []
+    for base in base_dirs:
+        b = base
+        for _ in range(max(0, prefix_dots - 1)):
+            b = b.parent
+        stem = b.joinpath(*parts)
+        out.append(stem.with_name(stem.name + ".py"))
+        out.append(stem / "__init__.py")
+    return out
+
+
+def _check_imported_project_modules(
+    imported_modules: List[str],
+    target_path: str,
+    policy: Optional[PolicyConfig] = None,
+    project_dir: Optional[Path] = None,
+) -> List[str]:
+    """Depth-1 cross-file taint: flag locally-resolved imports whose module
+    source contains AST-vetoed constructs. Escalate-only by contract; results
+    are cached per `(st_mtime_ns, st_size)` so the hot path stays cheap."""
+    base_dirs: List[Path] = []
+    tp = str(target_path or "").strip()
+    if tp:
+        try:
+            tp_path = Path(tp)
+            if not tp_path.is_absolute() and project_dir is not None:
+                tp_path = Path(project_dir) / tp_path
+            base_dirs.append(tp_path.parent.resolve())
+        except OSError:
+            base_dirs.append(Path(tp).parent)
+    if project_dir is not None:
+        try:
+            base_dirs.append(Path(project_dir).resolve())
+        except OSError:
+            base_dirs.append(Path(project_dir))
+    try:
+        base_dirs.append(Path.cwd())
+    except OSError:
+        pass
+
+    flagged: List[str] = []
+    for mod in list(imported_modules)[:_IMPORT_TAINT_MAX_MODULES]:
+        resolved_file = None
+        for cand in _resolve_module_candidates(str(mod), base_dirs):
+            try:
+                if cand.is_file() and cand.stat().st_size <= _IMPORT_TAINT_MAX_FILE_BYTES:
+                    resolved_file = cand
+                    break
+            except OSError:
+                continue
+        if resolved_file is None:
+            continue
+        key = str(resolved_file)
+        if is_protected_path(key, policy):
+            continue
+        try:
+            st = resolved_file.stat()
+            sig = (int(st.st_mtime_ns), int(st.st_size))
+        except OSError:
+            continue
+        cached = _PROJECT_MODULE_CACHE.get(key)
+        if cached is not None and cached[0] == sig:
+            module_findings = cached[1]
+        else:
+            try:
+                src = resolved_file.read_text(encoding="utf-8", errors="ignore")
+                res = analyze_code_diff(key, src, original_source=src)
+                module_findings = [f for f in (res.get("findings") or []) if f]
+                if (
+                    module_findings
+                    and resolved_file.name == "__init__.py"
+                    and "def __getattr__(" in src
+                ):
+                    module_findings = [
+                        f for f in module_findings if f not in _BENIGN_PEP562_LAZY_FINDINGS
+                    ]
+            except Exception:
+                module_findings = []
+            _PROJECT_MODULE_CACHE[key] = (sig, module_findings)
+        if module_findings and str(mod) not in flagged:
+            flagged.append(str(mod))
+    return flagged
+
+
 def decide(
     input_data: Any,
     context: Optional[Dict[str, Any]] = None,
@@ -3876,7 +4387,7 @@ def decide(
             if clean_tool not in avail_norm:
                 return _finish("deny", clean_tool, ["deny"], "layer0_unregistered_tool", 0)
 
-        l0 = evaluate_layer0_policy(tool_name, target_path, cfg)
+        l0 = evaluate_layer0_policy(tool_name, target_path, cfg, input_data=input_data)
         if l0["decision"] == "deny":
             # Break-glass: operator-held env var unlocks policy-plane maintenance only
             # (hook config, skill files). The agent cannot set env vars in the hook
@@ -4045,6 +4556,24 @@ def decide(
                     1,
                 )
 
+            # B4: depth-1 cross-file import taint — a clean diff that pulls in a
+            # local module containing vetoed constructs escalates (never denies).
+            if (
+                cfg.import_taint_enabled
+                and diff_res.get("language") == "python"
+                and diff_res["syntax_valid"]
+                and not diff_res["findings"]
+            ):
+                proj_dir = Path(str(ctx["project_dir"])) if ctx.get("project_dir") else None
+                tainted = _check_imported_project_modules(
+                    diff_res.get("imported_modules") or [],
+                    str(target_path or ""),
+                    policy=cfg,
+                    project_dir=proj_dir,
+                )
+                if tainted:
+                    return _finish("escalate", tainted[0], ["allow", "deny"], "layer1_imports_flagged_module", 1)
+
         # Named executable/unknown tools NEVER fall through to Layer 2 routing advice.
         # Allow at Layer 1 ONLY for verified shell/edit tools with inspected payloads or explicit READ_ONLY tools.
         if tool_name:
@@ -4052,11 +4581,22 @@ def decide(
                 (clean_tool in _VERIFIED_SHELL_TOOLS and bool(cmd_str))
                 or (clean_tool in _VERIFIED_EDIT_WRITE_TOOLS and diff_text is not None)
                 or (TOOL_RISK_CLASSES.get(clean_tool) == "READ_ONLY")
-                or (clean_tool in _HARNESS_WEB_TOOLS and not cfg.require_approval_for_external)
+                or (
+                    clean_tool in _HARNESS_WEB_TOOLS
+                    and (
+                        not cfg.require_approval_for_external
+                        or _web_target_allowlisted(input_data, cfg)
+                    )
+                )
             )
             if is_verified:
                 ok_code = "layer1_hunk_only_checked" if hunk_only_checked else "layer1_structural_verified"
                 return _finish("allow", tool_name, [tool_name], ok_code, 1)
+            if clean_tool.startswith("mcp__"):
+                proj_dir = Path(str(ctx["project_dir"])) if ctx.get("project_dir") else None
+                tier_v = _mcp_tier_verdict(clean_tool, cfg, project_dir=proj_dir)
+                if tier_v is not None:
+                    return _finish(*tier_v)
             return _finish("escalate", tool_name, ["allow", "deny"], "layer1_uninspected_tool", 1)
 
     except Exception as exc:

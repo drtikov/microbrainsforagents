@@ -6,6 +6,7 @@ PostToolUse scrubbing, and diff secret scanning never diverge.
 
 from __future__ import annotations
 
+import base64
 import re
 from typing import Any, Dict, List, Tuple
 
@@ -61,11 +62,121 @@ _REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = tuple(
 )
 
 
+_BASE64_BLOB_RE = re.compile(r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])")
+_HEX_BLOB_RE = re.compile(r"\b[0-9a-fA-F]{64,}\b")
+_ENCODED_SCAN_MAX_BLOBS = 200
+_ENCODED_BLOB_MAX_CHARS = 8192
+
+# Credential-named keys carrying opaque values with no recognizable token
+# format (`api_key: mQ3xV7pL2wR8...`). Values containing placeholder markers,
+# POSIX `PWD=/path` directory assignments, or env references are untouched.
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|"
+    r"password|passwd|pwd|private[_-]?key|credential[s]?|session[_-]?token|refresh[_-]?token)\b"
+    r"(\s*[:=]\s*)([\"']?)([A-Za-z0-9_\-./+=]{12,})\3"
+)
+_SENSITIVE_VALUE_SKIP_MARKERS: Tuple[str, ...] = (
+    "example", "placeholder", "changeme", "your_", "dummy", "test", "xxx",
+    "<your", "$", "{{", "%(", "os.environ", "getenv", "redacted",
+)
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
+
+
+def _redact_sensitive_key_values(text: str) -> Tuple[str, int]:
+    """Redact opaque values assigned to credential-named keys in tool outputs.
+
+    Catches credential dumps that use no recognizable token format. Runs after
+    the token-pattern pass, so values already redacted (bracket placeholders)
+    are not re-matched, and quoted/unquoted values both qualify. Skips POSIX
+    `PWD=/dir/...` directory variables.
+    """
+    out = str(text or "")
+    count = 0
+
+    def _sub(match: "re.Match[str]") -> str:
+        nonlocal count
+        key = match.group(1).lower()
+        value = match.group(4)
+        low = value.lower()
+        if any(marker in low for marker in _SENSITIVE_VALUE_SKIP_MARKERS):
+            return match.group(0)
+        if key == "pwd" and (
+            value.startswith(("/", "~/", "./", "../"))
+            or _WINDOWS_DRIVE_PATH_RE.match(value)
+        ):
+            return match.group(0)
+        count += 1
+        quote = match.group(3)
+        return match.group(1) + match.group(2) + quote + "[REDACTED_SENSITIVE_VALUE]" + quote
+
+    out = _SENSITIVE_KEY_RE.sub(_sub, out)
+    return out, count
+
+
+def detect_sensitive_key_values(text: str) -> int:
+    """Count credential-named key/value pairs whose values look like secrets."""
+    _out, n = _redact_sensitive_key_values(str(text or ""))
+    return n
+
+
+def _decode_base64_candidate(blob: str) -> bytes:
+    """Decode standard or URL-safe base64 candidates (with optional stripped `=` padding)."""
+    if "-" in blob or "_" in blob:
+        padded = blob + ("=" * ((4 - len(blob) % 4) % 4))
+        return base64.urlsafe_b64decode(padded.encode("ascii"))
+    return base64.b64decode(blob, validate=True)
+
+
+def _redact_encoded_secret_blobs(text: str) -> Tuple[str, List[str], int]:
+    """Decode base64/urlsafe-base64/hex blobs and redact any matching credential patterns.
+
+    Bounded to _ENCODED_SCAN_MAX_BLOBS blobs per call with per-blob size caps so
+    pathological outputs cannot turn scrubbing into a decode bomb.
+    """
+    src = str(text or "")
+    hits: List[str] = []
+    redacted_count = 0
+    out = src
+    for blob_re, codec in ((_BASE64_BLOB_RE, "b64"), (_HEX_BLOB_RE, "hex")):
+        seen = 0
+        for match in blob_re.finditer(src):
+            seen += 1
+            if seen > _ENCODED_SCAN_MAX_BLOBS:
+                break
+            blob = match.group(0)
+            if len(blob) > _ENCODED_BLOB_MAX_CHARS:
+                continue
+            try:
+                if codec == "b64":
+                    decoded = _decode_base64_candidate(blob).decode("utf-8", errors="ignore")
+                else:
+                    decoded = bytes.fromhex(blob).decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            if not decoded:
+                continue
+            matched = next((t for t, pat, _r in _SECRET_PATTERNS if pat.search(decoded)), None)
+            if matched is not None:
+                if matched not in hits:
+                    hits.append(matched)
+                out = out.replace(blob, "[REDACTED_ENCODED_" + matched.upper() + "]")
+                redacted_count += 1
+    return out, hits, redacted_count
+
+
+def detect_encoded_secrets(text: str) -> List[str]:
+    """Return secret types found inside base64/hex-encoded blobs in `text`."""
+    _out, hits, _n = _redact_encoded_secret_blobs(text)
+    return hits
+
+
 def redact_secrets(text: str) -> str:
-    """Mask known credential/token patterns before logging or printing errors."""
+    """Mask known, encoded, and sensitive key/value credential patterns before logging or printing."""
     out = str(text or "")
     for pat, repl in _REDACT_PATTERNS:
         out = pat.sub(repl, out)
+    out, _enc_types, _enc_hits = _redact_encoded_secret_blobs(out)
+    out, _sens_n = _redact_sensitive_key_values(out)
     return out
 
 
@@ -80,6 +191,17 @@ def scrub_tool_output(text: Any) -> Dict[str, Any]:
             total_hits += n_subs
             if secret_type not in found_types:
                 found_types.append(secret_type)
+    out, enc_types, enc_hits = _redact_encoded_secret_blobs(out)
+    if enc_hits:
+        total_hits += enc_hits
+        for st in enc_types:
+            if st not in found_types:
+                found_types.append(st)
+    out, sens_n = _redact_sensitive_key_values(out)
+    if sens_n:
+        total_hits += sens_n
+        if "sensitive_key_value" not in found_types:
+            found_types.append("sensitive_key_value")
     return {
         "redacted_text": out,
         "secrets_found": total_hits > 0,

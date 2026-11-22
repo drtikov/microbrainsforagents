@@ -54,13 +54,17 @@ This repository includes a ready-to-use **Claude Code skill** in `.claude/skills
 
 ```bash
 pip install -e .
-python .claude/skills/microbrains/install_hook.py           # turn on enforce mode (allow / ask / deny)
-python .claude/skills/microbrains/install_hook.py --shadow  # observe-only mode first (logs, never blocks)
-python .claude/skills/microbrains/install_hook.py --shared  # optional: write portable config to .claude/settings.json
-python .claude/skills/microbrains/install_hook.py --remove  # uninstall hooks cleanly anytime
+python .claude/skills/microbrains/install_hook.py              # turn on enforce mode (allow / ask / deny)
+python .claude/skills/microbrains/install_hook.py --shadow     # observe-only mode first (logs, never blocks)
+python .claude/skills/microbrains/install_hook.py --preset solo-dev  # preset bundles: solo-dev | ci | paranoid (--no-* flags override)
+python .claude/skills/microbrains/install_hook.py --shared     # optional: write portable config to .claude/settings.json
+python .claude/skills/microbrains/install_hook.py --dry-run    # preview changes without writing
+python .claude/skills/microbrains/install_hook.py --self-test  # verify imports, probe verdicts, and installed matchers
+python .claude/skills/microbrains/install_hook.py --remove     # uninstall hooks cleanly anytime
+python -m aetheris_microbrains.doctor                          # full installation, policy, journal, MCP pin & daemon health check
 ```
 
-By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git).
+By default, the installer writes hooks to `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git). To reduce hook cold-start overhead during heavy sessions, you can optionally run the warm localhost evaluator (`python -m aetheris_microbrains.hook_daemon`); the hook CLI queries it with token auth and falls back seamlessly to identical in-process evaluation when absent.
 
 ### What It Gives You
 
@@ -162,8 +166,9 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
   * Every decision writes a forensic entry outside the package tree (`AETHERIS_STATE_DIR` or the OS user state directory, with `AETHERIS_JOURNAL_PATH` override and automatic 10 MiB `.1` rotation) containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, any `suppressed_findings`, and a redacted `payload_preview`.
-  * Inspect reasons instantly in terminal: run `python -m aetheris_microbrains.audit --last` to see why an agent was stopped, or `--summary` for aggregate health metrics.
+  * Inspect reasons instantly in terminal: use `--last`, `--summary`, `--explain` / `--find <sha-prefix>`, `--daily`, or `--shadow-report` (projects enforce-mode deny/ask rates from `--shadow` journals).
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
+  * Policy controls also support `allowed_web_domains` (`http`/`https` allowlist under `require_approval_for_external`), `trusted_mcp_servers` / `doctor --pin-mcp <server>` (allowlisted read-only MCP verbs allow structurally; config drift fails closed), and opt-in depth-1 `import_taint_enabled`.
 * **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
   * Load team policies dynamically via `PolicyConfig.from_file("my_policy.toml")` (or JSON/YAML).
   * **`strict` (default):** Zero-trust execution—escalates unknown commands or mutations to human confirmation.

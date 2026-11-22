@@ -188,7 +188,11 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif diff is None and "content" in tool_input and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}:
             diff = str(tool_input.get("content") or "")
         elif diff is None and tool_lower == "notebookedit" and "new_source" in tool_input:
-            diff = str(tool_input.get("new_source") or "")
+            # Only Python-lint code cells; markdown/raw cells are not executable, and
+            # linting their prose as Python would false-positive on syntax errors.
+            # They degrade to a verified-tool escalation (ask) instead of a deny.
+            if str(tool_input.get("cell_type") or "code").strip().lower() == "code":
+                diff = str(tool_input.get("new_source") or "")
         if diff is not None:
             normalized["diff"] = diff
 
@@ -229,6 +233,8 @@ def evaluate_hook_payload(
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
     ctx: Dict[str, Any] = {}
+    if isinstance(payload, dict) and payload.get("cwd"):
+        ctx["project_dir"] = str(payload["cwd"])
     if file_content is not None:
         ctx["file_content"] = file_content
     elif norm.get("edit_ops") and norm.get("path"):
@@ -407,17 +413,47 @@ def evaluate_post_tool_use_payload(
     found_types: list[str] = []
     injection_findings: list[str] = []
     injection_severity = "none"
+    # Byte budget bounding deep injection scanning across the whole response so huge
+    # tool outputs (MCP dumps, large reads) cannot make the sync Post hook
+    # pathological. Even past the budget, we still scan a bounded head/tail slice
+    # of oversized strings so attackers cannot bypass injection checks at byte 0 or
+    # by padding past 4 MiB; full secret redaction always runs per string.
+    post_scrub_total_bytes = 0
+    scrub_truncated = False
+    oversized_inj_slices = 0
+    _POST_SCRUB_TOTAL_BYTE_BUDGET = 4 * 1024 * 1024
+    _POST_SCRUB_EDGE_SLICE = 65536
+    _POST_SCRUB_MAX_OVERSIZED_SLICES = 20
+
+    def _record_inj(sample: str) -> None:
+        nonlocal injection_severity
+        inj = detect_prompt_injection(sample)
+        if inj["injection_detected"]:
+            for f_item in inj["findings"]:
+                if f_item not in injection_findings:
+                    injection_findings.append(f_item)
+            if inj["severity"] == "high" or injection_severity == "none":
+                injection_severity = inj["severity"]
 
     def _scrub_node(node: Any) -> Any:
-        nonlocal total_count, injection_severity
+        nonlocal total_count, post_scrub_total_bytes, scrub_truncated, oversized_inj_slices
         if isinstance(node, str):
-            inj = detect_prompt_injection(node)
-            if inj["injection_detected"]:
-                for f_item in inj["findings"]:
-                    if f_item not in injection_findings:
-                        injection_findings.append(f_item)
-                if inj["severity"] == "high" or injection_severity == "none":
-                    injection_severity = inj["severity"]
+            remaining = _POST_SCRUB_TOTAL_BYTE_BUDGET - post_scrub_total_bytes
+            post_scrub_total_bytes += len(node)
+            if remaining >= len(node) and len(node) > 0:
+                _record_inj(node)
+            elif len(node) == 0:
+                pass
+            else:
+                scrub_truncated = True
+                if oversized_inj_slices < _POST_SCRUB_MAX_OVERSIZED_SLICES:
+                    oversized_inj_slices += 1
+                    head_len = max(remaining, _POST_SCRUB_EDGE_SLICE)
+                    if len(node) <= head_len:
+                        sample = node
+                    else:
+                        sample = node[:head_len] + "\n" + node[-_POST_SCRUB_EDGE_SLICE:]
+                    _record_inj(sample)
             res = scrub_tool_output(node)
             if res["secrets_found"]:
                 total_count += int(res["secret_count"])
@@ -500,6 +536,7 @@ def evaluate_post_tool_use_payload(
         "injection_findings": injection_findings,
         "redacted_output": redacted_output,
         "scrubbing_mode": scrubbing_mode,
+        "scrub_truncated": scrub_truncated,
         "host": resolved_host,
         "host_action": host_action,
         "authorizes_execution": False,
@@ -709,16 +746,52 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return 2
 
+        # A1/A3: ask the local warm evaluator daemon first; on ANY failure
+        # (not running, stale version, refused connection, timeout) this
+        # returns None and the identical in-process evaluation below runs.
+        # Skip the daemon when caller-local env overrides (break-glass policy
+        # edit or custom state dir) differ from a standalone daemon process.
+        daemon_result: Optional[Dict[str, Any]] = None
+        if os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1" and not os.getenv("AETHERIS_STATE_DIR"):
+            try:
+                from .hook_daemon import query_daemon
+
+                daemon_result = query_daemon(
+                    {
+                        "event": "post" if event_kind == "post-tool-use" else "pre",
+                        "payload": payload,
+                        "flags": {
+                            "strict_ast": bool(args.strict_ast),
+                            "log_decisions": log_decisions,
+                            "shadow": shadow_mode,
+                            "host": host,
+                            "codex_escalate_deny": codex_escalate_deny,
+                            "journal_path": journal_path,
+                            "session_state_path": session_state_path,
+                            "profile": profile_arg,
+                            "policy_path": policy_arg,
+                            "cwd": os.getcwd(),
+                        },
+                    }
+                )
+            except Exception:
+                daemon_result = None
+        if daemon_result is not None:
+            daemon_result["via_daemon"] = True
+
         if event_kind == "post-tool-use":
-            post_res = evaluate_post_tool_use_payload(
-                payload,
-                log_decisions=log_decisions,
-                shadow_mode=shadow_mode,
-                host=host,
-                journal_path=journal_path,
-                session_state_path=session_state_path,
-                policy_path=policy_arg,
-            )
+            if daemon_result is not None:
+                post_res = daemon_result
+            else:
+                post_res = evaluate_post_tool_use_payload(
+                    payload,
+                    log_decisions=log_decisions,
+                    shadow_mode=shadow_mode,
+                    host=host,
+                    journal_path=journal_path,
+                    session_state_path=session_state_path,
+                    policy_path=policy_arg,
+                )
             if shadow_mode:
                 if post_res.get("journal_written") is False:
                     j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
@@ -731,18 +804,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(_format_hook_stdout(post_res["hookSpecificOutput"]))
             return int(post_res.get("exit_code", 0))
 
-        result = evaluate_hook_payload(
-            payload,
-            strict_ast=args.strict_ast,
-            log_decisions=log_decisions,
-            shadow_mode=shadow_mode,
-            host=host,
-            codex_escalate_deny=codex_escalate_deny,
-            journal_path=journal_path,
-            session_state_path=session_state_path,
-            profile=profile_arg,
-            policy_path=policy_arg,
-        )
+        if daemon_result is not None:
+            result = daemon_result
+        else:
+            result = evaluate_hook_payload(
+                payload,
+                strict_ast=args.strict_ast,
+                log_decisions=log_decisions,
+                shadow_mode=shadow_mode,
+                host=host,
+                codex_escalate_deny=codex_escalate_deny,
+                journal_path=journal_path,
+                session_state_path=session_state_path,
+                profile=profile_arg,
+                policy_path=policy_arg,
+            )
         if shadow_mode:
             if result.get("journal_written") is False:
                 j_err = _redact_error_text(str(result.get("journal_error") or "unknown"))
