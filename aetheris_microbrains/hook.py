@@ -564,16 +564,22 @@ def evaluate_post_tool_use_payload(
 
     use_semantic = bool(semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
     semantic_errors = 0
+    _severity_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+    def _promote_severity(candidate: str) -> None:
+        nonlocal injection_severity
+        cand = str(candidate or "none").strip().lower()
+        if _severity_rank.get(cand, 0) > _severity_rank.get(injection_severity, 0):
+            injection_severity = cand
 
     def _record_inj(sample: str) -> None:
-        nonlocal injection_severity, semantic_errors
+        nonlocal semantic_errors
         inj = detect_prompt_injection(sample)
         if inj["injection_detected"]:
             for f_item in inj["findings"]:
                 if f_item not in injection_findings:
                     injection_findings.append(f_item)
-            if inj["severity"] == "high" or injection_severity == "none":
-                injection_severity = inj["severity"]
+            _promote_severity(str(inj["severity"]))
         if use_semantic and sample.strip():
             try:
                 from .core.semantic_guard import detect_semantic_injection
@@ -582,8 +588,7 @@ def evaluate_post_tool_use_payload(
                 if sem.get("injection_detected"):
                     if "semantic_prompt_injection" not in injection_findings:
                         injection_findings.append("semantic_prompt_injection")
-                    if injection_severity == "none":
-                        injection_severity = "medium"
+                    _promote_severity(str(sem.get("severity") or "medium"))
             except Exception:
                 semantic_errors += 1  # fail-observed: a guard error must not read as "no injection"
 

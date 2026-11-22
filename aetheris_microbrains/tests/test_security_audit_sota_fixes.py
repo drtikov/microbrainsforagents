@@ -648,3 +648,73 @@ def test_daemon_session_state_auto_resolves_default(tmp_path, monkeypatch):
     )
     assert verdict.get("decision") == "allow"
     assert calls, "'auto' did not resolve through get_default_session_state_path"
+
+
+def test_recalibrate_explicit_journal_path_not_shadowed_by_ring_buffer(tmp_path):
+    """F2 regression: explicit `journal_path` must take precedence over in-process ring buffer."""
+    import aetheris_microbrains.core.layered_decision_engine as lde
+
+    # Populate ring buffer with a single unrelated entry
+    lde.decide(
+        {"tool": "read_file", "path": "README.md"},
+        context={"log_decisions": True, "journal_path": str(tmp_path / "ring_dummy.jsonl")},
+    )
+    assert len(lde._DECISION_RING_BUFFER) > 0
+
+    jpath = tmp_path / "explicit_journal.jsonl"
+    rows = [
+        {"decision": "deny", "layer": 1, "latency_ms": 0.4},
+        {"decision": "deny", "layer": 1, "latency_ms": 0.6},
+        {"decision": "escalate", "layer": 3, "latency_ms": 0.8},
+    ]
+    jpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    rep = lde.recalibrate_from_decision_journal(journal_path=jpath)
+    assert rep["n_episodes"] == 3
+    assert rep["decision_counts"]["deny"] == 2
+    assert rep["decision_counts"]["escalate"] == 1
+
+
+def test_post_tool_injection_severity_promotes_low_to_medium(monkeypatch):
+    """Severity promotion must upgrade `low` -> `medium` rather than locking on first finding."""
+    import aetheris_microbrains.core.semantic_guard as sg_mod
+    import aetheris_microbrains.hook as hook_mod
+
+    monkeypatch.setattr(
+        hook_mod,
+        "_load_post_tool_helpers",
+        lambda: (
+            lambda txt: {"secrets_found": False, "secret_count": 0, "secret_types": [], "redacted_text": txt},
+            lambda *a, **kw: {"written": False},
+            lambda s: (
+                {"injection_detected": True, "findings": ["weak_marker"], "severity": "low"}
+                if "first" in s
+                else {"injection_detected": True, "findings": ["mid_marker"], "severity": "medium"}
+            ),
+            lambda *a, **kw: type("S", (), {"record_post_tool": lambda *x, **y: None})(),
+            lambda *a, **kw: False,
+        ),
+    )
+    monkeypatch.setattr(sg_mod, "detect_semantic_injection", lambda _s: {"injection_detected": False})
+
+    out = evaluate_post_tool_use_payload(
+        {"tool_name": "Read", "tool_response": ["first chunk", "second chunk"]},
+        host="claude",
+    )
+    assert out["prompt_injection_detected"] is True
+    assert out["injection_severity"] == "medium"
+
+
+def test_audit_format_entry_uses_risk_bound_label():
+    """audit.format_entry must render `Risk Bound:` rather than `Conformal:` for binomial bounds."""
+    from aetheris_microbrains.audit import format_entry
+
+    rendered = format_entry({
+        "decision": "allow",
+        "layer": 1,
+        "reason_code": "layer1_structural_verified",
+        "label": "ok",
+        "upper_error_bound_95": 0.042,
+    })
+    assert "Risk Bound: Upper Error Bound 95% = 0.042" in rendered
+    assert "Conformal:" not in rendered

@@ -98,7 +98,7 @@ def format_entry(entry: Dict[str, Any]) -> str:
         f"│ Details:    {label}",
     ]
     if conf_bound is not None:
-        box.append(f"│ Conformal:  Upper Error Bound 95% = {conf_bound}")
+        box.append(f"│ Risk Bound: Upper Error Bound 95% = {conf_bound}")
     if preview:
         box.append(f"│ Payload:    {preview}")
     if entry.get("escalation_contract"):

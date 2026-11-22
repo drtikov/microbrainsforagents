@@ -5068,8 +5068,8 @@ def recalibrate_from_decision_journal(
     if journal_entries is not None:
         entries = [dict(e) for e in journal_entries if isinstance(e, dict)]
     else:
-        target = Path(journal_path) if journal_path else _effective_default_journal_path()
-        if _DECISION_RING_BUFFER:
+        target = Path(journal_path) if journal_path is not None else _effective_default_journal_path()
+        if journal_path is None and _DECISION_RING_BUFFER:
             entries = list(_DECISION_RING_BUFFER)
         elif target.is_file():
             try:
