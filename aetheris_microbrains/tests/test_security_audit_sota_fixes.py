@@ -326,26 +326,21 @@ def test_conformal_semantic_guard_calibration_and_detection():
 
 def test_prefilter_scores_ast_and_hazards_beyond_test_name():
     pytest.importorskip("fastapi")
-    from fastapi.testclient import TestClient
-    from aetheris_microbrains.core.microbrain_server import app
+    import asyncio
+    from aetheris_microbrains.core.microbrain_server import PrefilterRequest, prefilter_candidates
 
-    client = TestClient(app)
-    resp = client.post(
-        "/microbrain/prefilter",
-        json={
-            "candidates": [
-                {"id": "evil", "code": "def test_tricky():\n    import os\n    os.system('rm -rf /')\n"},
-                {"id": "good", "code": "def compute_sum(a: int, b: int) -> int:\n    assert a >= 0\n    return a + b\n"},
-            ],
-            "threshold": 0.5,
-        },
+    req = PrefilterRequest(
+        candidates=[
+            {"id": "evil", "code": "def test_tricky():\n    import os\n    os.system('rm -rf /')\n"},
+            {"id": "good", "code": "def compute_sum(a: int, b: int) -> int:\n    assert a >= 0\n    return a + b\n"},
+        ],
+        threshold=0.5,
     )
-    assert resp.status_code == 200
-    data = resp.json()
-    by_id = {r["candidate_id"]: r for r in data["results"]}
-    assert by_id["evil"]["passed"] is False
-    assert by_id["good"]["passed"] is True
-    assert by_id["good"]["score"] > by_id["evil"]["score"]
+    resp = asyncio.run(prefilter_candidates(req))
+    by_id = {r.candidate_id: r for r in resp.results}
+    assert by_id["evil"].passed is False
+    assert by_id["good"].passed is True
+    assert by_id["good"].score > by_id["evil"].score
 
 
 # ---------------------------------------------------------------------------
