@@ -62,6 +62,10 @@ python -m aetheris_microbrains.audit --daily     # per-day digest with top reaso
 python -m aetheris_microbrains.audit --shadow-report  # enforce-mode projection + prompt-fatigue estimate (shadow installs)
 python -m aetheris_microbrains.audit --digest    # deterministic I/O hotspot & friction triage tables
 python -m aetheris_microbrains.audit --savings   # preserved-token & cost savings ledger (--statusline for 1-line bar)
+python -m aetheris_microbrains.audit --propose-rules  # synthesize verified candidate allow rules from recurring escalations
+python -m aetheris_microbrains.audit --propose-rules --stage  # stage verified candidates into pending_rules.json
+python -m aetheris_microbrains.audit --approve-rule <rule_id> # approve and activate a staged rule with cryptographic provenance
+python -m aetheris_microbrains.audit --eval-policy <cand.json> # replay journal & red-team probes with 95% risk bound
 ```
 
 Translate the `reason_code` + `label` into a one-sentence human explanation and the
@@ -100,7 +104,15 @@ inj = mb.detect_prompt_injection(<tool_output_text>)           # returns dict: i
 scrubbed = mb.scrub_tool_output(<tool_output_text>)            # returns dict: secrets_found, secret_types, redacted_text
 ```
 
-### 5. Health check & MCP pinning (doctor)
+### 5. Rule Governance, Vitality & Policy Synthesis
+
+When recurring benign commands escalate and create approval fatigue:
+- Synthesize candidate rules from journal history: `python -m aetheris_microbrains.audit --propose-rules --stage`.
+- Inspect and approve verified rules: `python -m aetheris_microbrains.audit --approve-rule <rule_id> --approver <name>`.
+- Rules carry vitality decay: idle rules automatically degrade back to `ask` (`layer0_stale_rule_reconfirm`) until reconfirmed.
+- Replay test candidate policies before rollout: `python -m aetheris_microbrains.audit --eval-policy candidate.json`.
+
+### 6. Health check & MCP pinning (doctor)
 
 ```bash
 python -m aetheris_microbrains.doctor            # verify python/package/settings/matchers/policy/journal/pins/daemon
@@ -114,7 +126,7 @@ python -m aetheris_microbrains.doctor --check-budget   # verify markdown charact
 
 Pinned MCP servers get tiered structural verdicts: explicit read-only verbs (`get_*`, `list_*`, `read_*`, `search_*`, ...) allow, while mutating or unrecognized tool names still escalate. `.mcp.json` config drift or missing config invalidates the pin automatically (and manifest pins fail closed on modified or newly added unpinned tools).
 
-### 6. Hook daemon (optional latency optimization)
+### 7. Hook daemon (optional latency optimization)
 
 ```bash
 python -m aetheris_microbrains.hook_daemon       # warm TCP evaluator on localhost; Ctrl+C to stop
