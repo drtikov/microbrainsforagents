@@ -381,6 +381,11 @@ def self_test(
             host="antigravity",
             log_decisions=False,
         )
+        cred_read = hook_mod.evaluate_hook_payload(
+            {"toolCall": {"id": "probe_3b", "name": "read_file", "args": {"Path": ".env"}}},
+            host="antigravity",
+            log_decisions=False,
+        )
         bad_py = hook_mod.evaluate_hook_payload(
             {"toolCall": {"id": "probe_4", "name": "write_file", "args": {"Path": "broken.py", "Content": "def oops(:\n"}}},
             host="antigravity",
@@ -397,7 +402,9 @@ def self_test(
             and allow_cmd.get("exit_code") == 0
             and allow_cmd.get("hookSpecificOutput", {}).get("decision") == "allow"
             and ask_cmd.get("exit_code") == 0
-            and ask_cmd.get("hookSpecificOutput", {}).get("decision") == "force_ask"
+            and ask_cmd.get("hookSpecificOutput", {}).get("decision") == "ask"
+            and cred_read.get("exit_code") == 0
+            and cred_read.get("hookSpecificOutput", {}).get("decision") == "force_ask"
             and bad_py.get("exit_code") == 0
             and bad_py.get("hookSpecificOutput", {}).get("decision") == "deny"
             and post_res.get("exit_code") == 0

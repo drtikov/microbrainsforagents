@@ -154,7 +154,7 @@ def test_antigravity_pre_and_post_hook_contract_and_cli(monkeypatch, capsys):
     )
     assert esc_res["decision"] == "escalate"
     assert esc_res["exit_code"] == 0
-    assert esc_res["hookSpecificOutput"]["decision"] == "force_ask"
+    assert esc_res["hookSpecificOutput"]["decision"] == "ask"
     assert esc_res["hookSpecificOutput"]["reason"]
 
     shadow_res = evaluate_hook_payload(
@@ -296,7 +296,7 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
         "toolCall": {"id": "ao_1", "name": "run_command", "args": {"CommandLine": 'python -c "print(1)"'}},
     }
 
-    # 1. First PreToolUse on an escalated command returns force_ask and records pending
+    # 1. First PreToolUse on an escalated command returns ask (respects native Always Allow) and records pending
     r1 = evaluate_hook_payload(
         py_ok,
         host="antigravity",
@@ -306,11 +306,11 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
         approvals_path=str(ap_file),
     )
     assert r1["decision"] == "escalate"
-    assert r1["hookSpecificOutput"]["decision"] == "force_ask"
+    assert r1["hookSpecificOutput"]["decision"] == "ask"
     store1 = json.loads(ap_file.read_text(encoding="utf-8"))
     assert "shell:python" in store1["pending"]
 
-    # 2. If PostToolUse never fires (user denied), second PreToolUse still returns force_ask
+    # 2. If PostToolUse never fires (user denied), second PreToolUse still returns ask
     r2 = evaluate_hook_payload(
         py_ok,
         host="antigravity",
@@ -320,7 +320,7 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
         approvals_path=str(ap_file),
     )
     assert r2["decision"] == "escalate"
-    assert r2["hookSpecificOutput"]["decision"] == "force_ask"
+    assert r2["hookSpecificOutput"]["decision"] == "ask"
 
     # 3. Once PostToolUse fires (user approved & command ran), subsequent matching PreToolUse is auto-allowed
     post_r = evaluate_post_tool_use_payload(
@@ -417,10 +417,10 @@ def test_antigravity_auto_approve_escalations(tmp_path):
     py_cmd = {
         "toolCall": {"id": "aae_1", "name": "run_command", "args": {"CommandLine": "python -c 'print(1)'"}}
     }
-    # Without auto_approve_escalations: returns force_ask
+    # Without auto_approve_escalations: routine escalations emit ask (allows native Always Allow)
     r_normal = evaluate_hook_payload(py_cmd, host="antigravity", profile="dev", log_decisions=False)
     assert r_normal["decision"] == "escalate"
-    assert r_normal["hookSpecificOutput"]["decision"] == "force_ask"
+    assert r_normal["hookSpecificOutput"]["decision"] == "ask"
 
     # With auto_approve_escalations: returns allow directly without force_ask
     r_auto = evaluate_hook_payload(
@@ -454,3 +454,65 @@ def test_antigravity_auto_approve_escalations(tmp_path):
     assert "--auto-approve-escalations" in cmd_str
     assert "--auto-allow" in cmd_str
     assert self_test(plugin_dir=inst_dir2) == 0
+
+    # Non-credential config-plane reads are auto-approved without popup; credential reads stay guarded
+    cfg_read = {
+        "toolCall": {
+            "id": "aae_cfg_r",
+            "name": "read_file",
+            "args": {"Path": "I:/github microbrains/.claude/skills/microbrains/install_hook.py"},
+        }
+    }
+    r_cfg = evaluate_hook_payload(
+        cfg_read,
+        host="antigravity",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_cfg["decision"] == "allow"
+    assert r_cfg["hookSpecificOutput"]["decision"] == "allow"
+
+    env_read = {"toolCall": {"id": "aae_env_r", "name": "read_file", "args": {"Path": ".env"}}}
+    r_env = evaluate_hook_payload(
+        env_read,
+        host="antigravity",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_env["decision"] == "escalate"
+    assert r_env["hookSpecificOutput"]["decision"] == "force_ask"
+
+    cfg_write = {
+        "toolCall": {
+            "id": "aae_cfg_w",
+            "name": "edit_file",
+            "args": {
+                "Path": "I:/github microbrains/.claude/skills/microbrains/install_hook.py",
+                "Target": "x = 1",
+                "Replacement": "x = 2",
+            },
+        }
+    }
+    r_cfg_w = evaluate_hook_payload(
+        cfg_write,
+        host="antigravity",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_cfg_w["decision"] == "deny"
+    assert r_cfg_w["hookSpecificOutput"]["decision"] == "deny"
+
+    # Claude Code host also honors auto_approve_escalations=True without permissionDecision='ask'
+    claude_py = {"tool_name": "Bash", "tool_input": {"command": "python -c 'print(1)'"}}
+    r_claude = evaluate_hook_payload(
+        claude_py,
+        host="claude",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_claude["decision"] == "allow"
+    assert r_claude["permissionDecision"] == "allow"

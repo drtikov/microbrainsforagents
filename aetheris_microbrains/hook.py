@@ -89,12 +89,52 @@ def _approval_scope_key(tool_name: str, cmd: Optional[str] = None) -> Optional[s
     return None
 
 
+_AUTO_APPROVE_READ_BASENAMES = frozenset({
+    "claude.md",
+    "agents.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".gitlab-ci.yml",
+    ".pre-commit-config.yaml",
+    ".gitmodules",
+})
+
+
 def _is_approve_once_eligible(reason_code: Optional[str]) -> bool:
     """Return True if an escalation reason code may be remembered via `--approve-once`."""
     rc = str(reason_code or "").strip().lower()
     if not rc:
         return False
     return not rc.startswith(_APPROVE_ONCE_INELIGIBLE_PREFIXES)
+
+
+def _is_auto_approve_escalation_eligible(
+    reason_code: Optional[str], target_path: Optional[str] = None
+) -> bool:
+    """Return True if an escalation may be auto-approved under `--auto-approve-escalations`.
+
+    Allows all standard `--approve-once` escalations plus read-only access to
+    non-credential agent control-plane/workspace config paths (never credential stores).
+    """
+    if _is_approve_once_eligible(reason_code):
+        return True
+    rc = str(reason_code or "").strip().lower()
+    if rc == "layer0_protected_path_read_requires_confirmation" and target_path:
+        from .core.layered_decision_engine import (
+            _AGENT_CREDENTIAL_SEGMENTS,
+            _is_agent_control_plane_path,
+        )
+
+        raw = str(target_path)
+        if _is_agent_control_plane_path(raw):
+            return True
+        norm_low = raw.replace("\\", "/").strip().lower()
+        base = norm_low.rsplit("/", 1)[-1]
+        if base in _AUTO_APPROVE_READ_BASENAMES and not any(
+            cred in norm_low for cred in _AGENT_CREDENTIAL_SEGMENTS
+        ):
+            return True
+    return False
 
 
 def _load_approvals_store(path: Path, now: Optional[float] = None) -> Dict[str, Any]:
@@ -660,7 +700,7 @@ def evaluate_hook_payload(
         and verdict.get("decision_kind") != "routing_recommendation"
     ):
         rc_curr = str(verdict.get("reason_code") or "")
-        if _is_approve_once_eligible(rc_curr):
+        if _is_auto_approve_escalation_eligible(rc_curr, norm.get("path")):
             dec = "allow"
             verdict["decision"] = "allow"
             verdict["reason_code"] = "auto_approve_escalations"
@@ -735,10 +775,15 @@ def evaluate_hook_payload(
                 if wrapped_cmd:
                     hook_specific["overwrite"] = {"CommandLine": wrapped_cmd}
         else:
-            perm = "force_ask"
+            ag_ask_dec = (
+                "ask"
+                if _is_auto_approve_escalation_eligible(verdict.get("reason_code"), norm.get("path"))
+                else "force_ask"
+            )
+            perm = ag_ask_dec
             exit_code = 0
-            host_action = "force_ask"
-            hook_specific = {"decision": "force_ask", "reason": reason}
+            host_action = ag_ask_dec
+            hook_specific = {"decision": ag_ask_dec, "reason": reason}
     elif resolved_host == "hermes":
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
