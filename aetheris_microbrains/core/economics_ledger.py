@@ -80,6 +80,33 @@ def record_savings_event(
         return {"written": False, "path": str(target_path), "entry": entry, "error": f"{type(exc).__name__}:{exc}"}
 
 
+def record_accepted_change(
+    tokens_spent: int,
+    *,
+    files_changed: int = 1,
+    session_id: str = "",
+    usd_per_mtok: float = DEFAULT_USD_PER_MTOK,
+    ledger_path: Optional[Path | str] = None,
+) -> Dict[str, Any]:
+    """Record one test-validated accepted change for `Cost per Accepted Change` telemetry."""
+    tok_spent = max(0, int(tokens_spent))
+    est_usd = round((tok_spent / 1_000_000.0) * float(usd_per_mtok), 6)
+    entry: Dict[str, Any] = {
+        "timestamp": round(time.time(), 6),
+        "event_kind": "accepted_change",
+        "session_id": str(session_id or ""),
+        "tokens_spent": tok_spent,
+        "est_usd_spent": est_usd,
+        "files_changed": max(1, int(files_changed)),
+    }
+    target_path = _resolve_ledger_path(ledger_path)
+    try:
+        append_jsonl_bounded(target_path, json.dumps(entry, ensure_ascii=False))
+        return {"written": True, "path": str(target_path), "entry": entry, "error": None}
+    except Exception as exc:
+        return {"written": False, "path": str(target_path), "entry": entry, "error": f"{type(exc).__name__}:{exc}"}
+
+
 def read_savings_events(
     ledger_path: Optional[Path | str] = None,
     session_id: Optional[str] = None,
@@ -118,10 +145,21 @@ def summarize_savings(
     total_bytes = 0
     total_tokens = 0
     total_usd = 0.0
+    savings_events_count = 0
+    accepted_changes = 0
+    total_tokens_spent = 0
+    total_usd_spent = 0.0
     by_reason: Dict[str, Dict[str, int]] = {}
     by_tool: Dict[str, Dict[str, int]] = {}
 
     for ev in events:
+        if ev.get("event_kind") == "accepted_change":
+            accepted_changes += 1
+            total_tokens_spent += max(0, int(ev.get("tokens_spent") or 0))
+            total_usd_spent += float(ev.get("est_usd_spent") or 0.0)
+            continue
+
+        savings_events_count += 1
         b = max(0, int(ev.get("avoided_bytes") or 0))
         t = max(0, int(ev.get("avoided_tokens") or 0))
         u = float(ev.get("est_usd_saved") or 0.0)
@@ -141,13 +179,19 @@ def summarize_savings(
         tl_bucket["tokens"] += t
         tl_bucket["bytes"] += b
 
+    cpac_tok = round(total_tokens_spent / float(accepted_changes), 2) if accepted_changes > 0 else None
+    cpac_usd = round(total_usd_spent / float(accepted_changes), 6) if accepted_changes > 0 else None
     return {
-        "events": len(events),
+        "events": savings_events_count,
         "avoided_bytes": total_bytes,
         "tokens_preserved": total_tokens,
         "est_usd_saved": round(total_usd, 4),
         "by_reason": by_reason,
         "by_tool": by_tool,
+        "accepted_changes": accepted_changes,
+        "total_tokens_spent": total_tokens_spent,
+        "cost_per_accepted_change_tokens": cpac_tok,
+        "cost_per_accepted_change_usd": cpac_usd,
     }
 
 

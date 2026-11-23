@@ -693,9 +693,9 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--semantic-guard", action="store_true", help="Enable semantic prompt-injection classifier on post-tool")
     parser.add_argument(
         "--sandbox-wrap",
-        choices=["none", "bwrap", "seatbelt", "auto"],
+        choices=["none", "srt", "bwrap", "seatbelt", "auto"],
         default="none",
-        help="Optional OS sandbox wrapper (`bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+        help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
     )
     parser.add_argument("--context-guard", action="store_true", help="Enable context-hygiene gating passthrough")
     parser.add_argument(

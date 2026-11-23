@@ -405,6 +405,15 @@ def evaluate_session_start(
         token_budget=max(100, int(token_budget)),
     )
     ctx_text = str(boot.get("text") or "").strip()
+    if cwd and (bool(payload.get("include_repo_map")) or os.getenv("AETHERIS_REPO_MAP") == "1") and Path(cwd).is_dir():
+        from .repo_context import RepoContextResolver
+
+        card = RepoContextResolver(cwd, state_dir=base).build_orientation_card(
+            token_budget=max(200, int(token_budget) // 2)
+        )
+        repo_card_text = str(card.get("text") or "").strip()
+        if repo_card_text:
+            ctx_text = f"{ctx_text}\n\n{repo_card_text}".strip() if ctx_text else repo_card_text
     return {
         "event": "session-start",
         "decision": "allow",
@@ -575,6 +584,15 @@ def evaluate_post_tool_failure(
         warnings.append(
             f"Repeated identical failure detected ({identical_count}x, category={info['category']}). Change approach instead of retrying unchanged command."
         )
+    cwd_dir = str(payload.get("cwd") or "").strip()
+    sbfl_summary = ""
+    if cwd_dir and 'File "' in err_raw and ", line " in err_raw and Path(cwd_dir).is_dir():
+        from .repo_context import slice_traceback_context
+
+        sbfl = slice_traceback_context(err_raw, cwd_dir)
+        sbfl_summary = str(sbfl.get("summary") or "").strip()
+        if sbfl_summary:
+            warnings.append(sbfl_summary)
     warn_text = " ".join(warnings)
     if warn_text:
         warn_text = f"Aetheris Diagnostic Alert: {warn_text}"
@@ -588,6 +606,7 @@ def evaluate_post_tool_failure(
         "vitality_updated": vitality_updated,
         "secrets_found": bool(scrub["secrets_found"]),
         "identical_failure_count": identical_count,
+        "sbfl_summary": sbfl_summary or None,
         "additionalContext": warn_text or None,
         "hookSpecificOutput": _format_context_output("PostToolUseFailure", warn_text, host=host),
     }

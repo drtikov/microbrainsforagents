@@ -235,17 +235,21 @@ def _build_sandbox_wrapped_command(
     sandbox_mode: str = "none",
     project_dir: Optional[str] = None,
 ) -> Optional[str]:
-    """Wrap an allowed shell command with OS sandboxing (`bwrap` / `sandbox-exec`) when requested."""
+    """Wrap an allowed shell command with OS sandboxing (`srt`, `bwrap`, `sandbox-exec`) when requested."""
     mode = str(sandbox_mode or "none").strip().lower()
     if mode in {"", "none", "off", "false"}:
         return None
     if mode == "auto":
-        if sys.platform.startswith("linux") and shutil.which("bwrap"):
+        if shutil.which("srt"):
+            mode = "srt"
+        elif sys.platform.startswith("linux") and shutil.which("bwrap"):
             mode = "bwrap"
         elif sys.platform == "darwin" and shutil.which("sandbox-exec"):
             mode = "seatbelt"
         else:
             return None
+    if mode == "srt":
+        return f"srt -- /bin/sh -c {shlex.quote(raw_cmd)}"
     if mode in {"bwrap", "seatbelt"} and sys.platform == "win32":
         return None  # neither wrapper exists on Windows; emitting one would produce an unrunnable command
     proj = str(Path(project_dir or os.getcwd()).resolve())
@@ -261,7 +265,7 @@ def _build_sandbox_wrapped_command(
         profile = (
             '(version 1)(allow default)'
             f'(deny file-write* (subpath "/"))'
-            f'(allow file-write* (subpath "{sbpl_proj}") (subpath "/tmp") (subpath "/private/tmp"))'
+            f'(allow file-write* (subpath "{sbpl_proj}") (subpath "/tmp") (subpath "/private/tmp") (subpath "/private/var/folders"))'
         )
         return f"sandbox-exec -p {shlex.quote(profile)} /bin/sh -c {quoted_cmd}"
     return None
@@ -961,9 +965,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--sandbox-wrap",
-            choices=["none", "bwrap", "seatbelt", "auto"],
+            choices=["none", "srt", "bwrap", "seatbelt", "auto"],
             default=str(os.getenv("AETHERIS_SANDBOX_WRAP") or "none").strip().lower(),
-            help="Optional OS sandbox wrapper (`bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+            help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
         )
         parser.add_argument(
             "--context-guard",
