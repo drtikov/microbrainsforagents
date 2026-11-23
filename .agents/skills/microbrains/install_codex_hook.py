@@ -136,10 +136,15 @@ def _load_validated_hooks_json(target: Path) -> tuple[dict | None, int]:
     if not isinstance(data, dict):
         print(f"ERROR: {target} top-level JSON must be an object; refusing to overwrite.", file=sys.stderr)
         return None, 1
-    for ev in _ALL_MANAGED_EVENTS:
-        if ev in data and not isinstance(data[ev], list):
-            print(f"ERROR: {target} '{ev}' must be a list; refusing to overwrite.", file=sys.stderr)
+    if "hooks" in data:
+        hooks = data["hooks"]
+        if not isinstance(hooks, dict):
+            print(f"ERROR: {target} 'hooks' field must be an object; refusing to overwrite.", file=sys.stderr)
             return None, 1
+        for ev in _ALL_MANAGED_EVENTS:
+            if ev in hooks and not isinstance(hooks[ev], list):
+                print(f"ERROR: {target} 'hooks.{ev}' must be a list; refusing to overwrite.", file=sys.stderr)
+                return None, 1
     return data, 0
 
 
@@ -192,8 +197,9 @@ def install(
         pre_extra.extend(["--journal-path", journal_path])
         post_extra.extend(["--journal-path", journal_path])
 
-    pre = _strip_aetheris_from_event_list(data.get("PreToolUse", []))
-    post = _strip_aetheris_from_event_list(data.get("PostToolUse", []))
+    hooks = data.setdefault("hooks", {})
+    pre = _strip_aetheris_from_event_list(hooks.get("PreToolUse", []))
+    post = _strip_aetheris_from_event_list(hooks.get("PostToolUse", []))
 
     pre.append({
         "matcher": CODEX_PRE_MATCHER,
@@ -203,8 +209,8 @@ def install(
         "matcher": CODEX_POST_MATCHER,
         "hooks": [_hook_entry(_hook_cmd(shared, ["--event", "post-tool-use"], post_extra), timeout=10)],
     })
-    data["PreToolUse"] = pre
-    data["PostToolUse"] = post
+    hooks["PreToolUse"] = pre
+    hooks["PostToolUse"] = post
 
     if full_lifecycle:
         lc_extra = ["--log-decisions"]
@@ -215,12 +221,12 @@ def install(
         if journal_path:
             lc_extra.extend(["--journal-path", journal_path])
         for ev_name, ev_slug, ev_matcher in FULL_LIFECYCLE_SPECS:
-            ev_list = _strip_aetheris_from_event_list(data.get(ev_name, []))
+            ev_list = _strip_aetheris_from_event_list(hooks.get(ev_name, []))
             wrapper: dict = {"hooks": [_hook_entry(_hook_cmd(shared, ["--event", ev_slug], lc_extra), timeout=10)]}
             if ev_matcher is not None:
                 wrapper["matcher"] = ev_matcher
             ev_list.append(wrapper)
-            data[ev_name] = ev_list
+            hooks[ev_name] = ev_list
 
     if dry_run:
         print(f"DRY RUN - would write Codex hooks to {target}:")
@@ -248,9 +254,11 @@ def remove(
     data, rc = _load_validated_hooks_json(target)
     if rc != 0 or data is None:
         return rc
-    for ev in _ALL_MANAGED_EVENTS:
-        if ev in data:
-            data[ev] = _strip_aetheris_from_event_list(data[ev])
+    hooks = data.get("hooks", {})
+    if isinstance(hooks, dict):
+        for ev in _ALL_MANAGED_EVENTS:
+            if ev in hooks:
+                hooks[ev] = _strip_aetheris_from_event_list(hooks[ev])
     if dry_run:
         print(f"DRY RUN - would write to {target}:")
         print(json.dumps(data, indent=2))
@@ -312,8 +320,9 @@ def self_test(
         if rc != 0 or data is None:
             failures.append("invalid-json")
         else:
-            pre = [e for e in data.get("PreToolUse", []) if _is_aetheris_entry(e)]
-            post = [e for e in data.get("PostToolUse", []) if _is_aetheris_entry(e)]
+            hooks = data.get("hooks", {})
+            pre = [e for e in hooks.get("PreToolUse", []) if _is_aetheris_entry(e)]
+            post = [e for e in hooks.get("PostToolUse", []) if _is_aetheris_entry(e)]
             if len(pre) != 1 or len(post) != 1:
                 failures.append("hook-entries")
             elif pre[0].get("matcher") != CODEX_PRE_MATCHER or post[0].get("matcher") != CODEX_POST_MATCHER:

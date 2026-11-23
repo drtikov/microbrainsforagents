@@ -54,7 +54,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [1. Claude Code & Agent Harness PreToolUse Hook Integration](#1-claude-code--agent-harness-pretooluse-hook-integration)
   - [2. Allowlist-First Shell Gate & Dev Profile](#2-allowlist-first-shell-gate--dev-profile)
   - [3. Cache-Safe Sticky Session Tool Narrowing](#3-cache-safe-sticky-session-tool-narrowing)
-- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-550-passed-2-skipped)
+- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-551-passed-2-skipped)
   - [0. Micro-Benchmark: decide() Latency Distribution](#0-micro-benchmark-decide-real-world-latency-distribution)
   - [1. External Tool-Drop Rate & Live-LLM A/B](#1-external-tool-drop-rate-baseline-comparison--live-llm-ab-examples06_real_llm_ab_benchmarkpy)
   - [2. SWE-bench Lite Zero-LLM Gate Benchmark](#2-external-swe-bench-lite-300-real-github-issues-zero-llm-gate-benchmark-examples07_swebench_lite_gate_benchmarkpy)
@@ -211,7 +211,7 @@ OpenAI **Codex CLI** integrates cleanly via a native `--host codex` hook adapter
 ### How Escalations Behave in Codex
 
 Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecision` and exit code `2`) rather than Claude Code's `"ask"` dialog:
-- **Safe calls (`allow`):** Pass through with exit code `0`.
+- **Safe calls (`allow`):** Exit `0` with empty `stdout` (preserving Codex's normal approval policy unless `--auto-allow` is explicitly enabled).
 - **Dangerous / broken calls (`deny`):** Blocked immediately before execution (`exit 2` + `"permissionDecision": "deny"`).
 - **Ambiguous calls (`escalate`):** Defer cleanly to Codex's configured approval policy (`defer_to_host_policy`, exit `0` with no `"ask"` override). Pass `--codex-escalate-deny` to turn escalations into hard denials in strict CI/unattended environments.
 - **`PostToolUse` warnings:** Emits `additionalContext` (`SECURITY WARNING`) on secret leaks or prompt injections detected in `shell_command`, `apply_patch`, or `fwrite` outputs.
@@ -469,7 +469,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`550 Passed, 2 Skipped`)
+## 🧪 Testing & Reproducible Benchmarks (`551 Passed, 2 Skipped`)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import sys
 from pathlib import Path
 
 from aetheris_microbrains.core.layered_decision_engine import PolicyConfig
@@ -11,6 +13,7 @@ from aetheris_microbrains.hook import (
     _normalize_hook_payload,
     evaluate_hook_payload,
     evaluate_post_tool_use_payload,
+    main as hook_main,
 )
 
 
@@ -110,12 +113,34 @@ def test_codex_hook_contract_deny_allow_escalate_and_post_tool_alerts():
     assert "SECURITY WARNING" in post_alert["hookSpecificOutput"]["additionalContext"]
 
 
+def test_codex_cli_silent_allow_without_auto_allow(monkeypatch, capsys):
+    """CLI PreToolUse for Codex stays silent on safe calls unless --auto-allow is set."""
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"tool_name": "shell_command", "tool_input": {"command": "git status"}})),
+    )
+    rc = hook_main(["--host", "codex", "--session-state", ""])
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"tool_name": "shell_command", "tool_input": {"command": "git status"}})),
+    )
+    rc2 = hook_main(["--host", "codex", "--auto-allow", "--session-state", ""])
+    assert rc2 == 0
+    out2 = json.loads(capsys.readouterr().out)
+    assert out2["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
 def test_codex_installer_idempotent_remove_selftest_and_plugin_bundle(tmp_path):
     mod = _load_codex_installer()
     hooks_file = tmp_path / ".codex" / "hooks.json"
     hooks_file.parent.mkdir(parents=True)
     hooks_file.write_text(
-        json.dumps({"PreToolUse": [{"matcher": "CustomTool", "hooks": [{"type": "command", "command": "echo hi"}]}]}),
+        json.dumps({"hooks": {"PreToolUse": [{"matcher": "CustomTool", "hooks": [{"type": "command", "command": "echo hi"}]}]}}),
         encoding="utf-8",
     )
 
@@ -124,26 +149,31 @@ def test_codex_installer_idempotent_remove_selftest_and_plugin_bundle(tmp_path):
     assert mod.install(shadow=False, profile="dev", codex_escalate_deny=True, full_lifecycle=True, hooks_path=hooks_file) == 0
 
     cfg = json.loads(hooks_file.read_text(encoding="utf-8"))
-    assert "hooks" not in cfg  # Codex uses root-level PreToolUse/PostToolUse arrays
-    assert len(cfg["PreToolUse"]) == 2
-    assert len(cfg["PostToolUse"]) == 1
-    assert "SessionStart" in cfg and "UserPromptSubmit" in cfg and "Stop" in cfg
-    assert "--codex-escalate-deny" in cfg["PreToolUse"][1]["hooks"][0]["command"]
+    assert "hooks" in cfg  # Codex wraps event arrays under top-level "hooks"
+    hooks = cfg["hooks"]
+    assert len(hooks["PreToolUse"]) == 2
+    assert len(hooks["PostToolUse"]) == 1
+    assert "SessionStart" in hooks and "UserPromptSubmit" in hooks and "Stop" in hooks
+    assert "--codex-escalate-deny" in hooks["PreToolUse"][1]["hooks"][0]["command"]
 
     assert mod.self_test(hooks_path=hooks_file) == 0
 
     assert mod.remove(hooks_path=hooks_file) == 0
     cfg_after = json.loads(hooks_file.read_text(encoding="utf-8"))
-    assert len(cfg_after["PreToolUse"]) == 1
-    assert cfg_after["PreToolUse"][0]["matcher"] == "CustomTool"
-    assert cfg_after["PostToolUse"] == []
+    assert len(cfg_after["hooks"]["PreToolUse"]) == 1
+    assert cfg_after["hooks"]["PreToolUse"][0]["matcher"] == "CustomTool"
+    assert cfg_after["hooks"]["PostToolUse"] == []
 
-    # Validate .codex-plugin bundle & SKILL.md presence
+    # Validate .codex-plugin bundle stays strictly inside plugin root & SKILL.md exists
     repo_root = Path(__file__).resolve().parents[2]
     assert (repo_root / ".agents" / "skills" / "microbrains" / "SKILL.md").is_file()
+    assert (repo_root / ".codex-plugin" / "skills" / "microbrains" / "SKILL.md").is_file()
     plugin_json = json.loads((repo_root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert plugin_json["name"] == "aetheris-microbrains"
+    assert ".." not in json.dumps(plugin_json)
+    assert plugin_json["skills"] == "./skills/"
     plugin_hooks = json.loads((repo_root / ".codex-plugin" / "hooks.json").read_text(encoding="utf-8"))
-    assert "--host codex" in plugin_hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert "hooks" in plugin_hooks
+    assert "--host codex" in plugin_hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     plugin_mcp = json.loads((repo_root / ".codex-plugin" / ".mcp.json").read_text(encoding="utf-8"))
     assert "aetheris-microbrains" in plugin_mcp["mcpServers"]

@@ -32,8 +32,8 @@ Aetheris Microbrains runs a deterministic local pre-flight policy gate (`< 2 ms`
 
 Unlike Claude Code, Codex `PreToolUse` does **not** use `"permissionDecision": "ask"`:
 - **Deny (`decision == "deny"`):** Emits `permissionDecision: "deny"` JSON + `stderr` reason and exits `2` (always blocked before execution).
-- **Allow (`decision == "allow"`):** Exits `0` silently (or emits `"allow"` if `--auto-allow` is set).
-- **Escalate (`decision == "escalate"`):** Exits `0` with no `"permissionDecision"` field (`defer_to_host_policy`), handing control to Codex's configured approval policy. Pass `--codex-escalate-deny` if you want escalated commands treated as hard denials in automated pipelines.
+- **Allow (`decision == "allow"`):** Exits `0` silently from the CLI (keeping Codex's normal approval flow unless `--auto-allow` is explicitly enabled).
+- **Escalate (`decision == "escalate"`):** Exits `0` with empty `stdout` (`defer_to_host_policy`), handing control to Codex's configured approval policy. Pass `--codex-escalate-deny` if you want escalated commands treated as hard denials in automated pipelines.
 - **PostToolUse Alerts:** Emits `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "SECURITY WARNING ..."}}` when secrets or indirect prompt injections are found in tool output.
 
 ## 3. Explain Blocked Actions & Run Checks
