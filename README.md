@@ -41,6 +41,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [⚡ Performance Gains with Hermes](#-performance-gains-with-hermes)
   - [One-Command Setup for Hermes](#one-command-setup-for-hermes)
 - [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
+  - [📊 Measured Benchmarks with Codex](#-measured-benchmarks-with-codex)
   - [Setup: Automatic Gate + Optional MCP](#setup-automatic-gate--optional-mcp)
   - [How Escalations Behave in Codex](#how-escalations-behave-in-codex)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
@@ -186,6 +187,46 @@ Real measurements from live benchmark runs ([benchmark.py](benchmark.py) & [BENC
 ## 🤖 Codex CLI Integration (Hooks + Skill + Plugin)
 
 OpenAI **Codex CLI** integrates cleanly via a native `--host codex` hook adapter, dedicated `.codex/hooks.json` installer, `.agents/skills/microbrains/` skill, and optional `.codex-plugin/` bundle.
+
+### 📊 Measured Benchmarks with Codex
+
+> **Environment & Methodology (Windows / Python 3.10.6, 2026-11-23):** Timings below reflect a direct Codex benchmark run on Windows/Python 3.10.6 and therefore differ slightly from earlier Linux/CI baseline runs elsewhere in this README. The A/B test is a **deterministic synthetic 26-call scenario** (not a live Codex conversation); token, cost, and recovery-turn savings are modeled estimates under the benchmark's stated assumptions rather than observed Codex billing telemetry, and hook overheads measure direct command-hook subprocess invocations outside an interactive session.
+
+#### Local Pre-Flight Gate A/B Benchmark
+
+Deterministic 26-call coding-session scenario: 14 benign calls and 12 seeded hazards (`aetheris_microbrains/tests/test_skill_gain_ab.py`).
+
+| Metric | Without Microbrains | With Microbrains | Result |
+|---|---:|---:|---:|
+| Seeded hazards caught | 0 / 12 | 12 / 12 | 100% caught in this scenario |
+| Python syntax failures | 4 | 0 | 100% fewer |
+| Seeded unsafe actions allowed through | 8 / 8 | 0 / 8 | 100% blocked in this scenario |
+| Benign calls blocked | — | 0 / 14 | 0% false positives; 100% passed |
+| Modeled wasted recovery turns | 8 | 0 | 100% fewer (estimated) |
+| Error-feedback tokens | 146 | 37 | 74.7% fewer |
+| Modeled input tokens saved | — | ~37,055 | Estimated per scenario (no % reported) |
+| Modeled input-cost savings | — | ~$0.1112 | Estimate using benchmark pricing assumptions |
+| Gate evaluation time | 0 ms | 19.1 ms total | 0.73 ms mean / 1.27 ms p95 per check |
+
+#### Security & Anti-Evasion Benchmark
+
+Evaluated on the benchmark's 22 attack vectors and 12 benign control cases (`examples/10_agent_security_benchmark.py`).
+
+| Metric | Result |
+|---|---:|
+| Attack cases meeting expected `deny` / `escalate` response | 22 / 22 (100%) |
+| Benign cases incorrectly blocked | 0 / 12 (0%) |
+| Local decision latency | 0.412 ms p50 / 2.795 ms p95 |
+
+#### Codex Command-Hook Overhead (Measured Separately)
+
+The engine-only latency above excludes starting Python for Codex's command hooks. Across 10 direct process invocations on Windows / Python 3.10.6:
+
+| Hook Stage | Median (`p50`) | Tail (`p95`) | Scope & Notes |
+|---|---:|---:|---|
+| `PreToolUse` command hook | 405.7 ms | 434.0 ms | Direct Python subprocess cold-start (10 runs) |
+| `PostToolUse` command hook | 393.6 ms | 408.2 ms | Direct Python subprocess cold-start (10 runs) |
+| Combined per tool call (both hooks) | ~799 ms | — | Combined median when both run; mitigated via warm `aetheris-daemon` |
 
 ### Setup: Automatic Gate + Optional MCP
 
