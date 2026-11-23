@@ -481,7 +481,9 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 _EDIT_RECONSTRUCT_EXTS = {
     ".py", ".json", ".sh", ".bash", ".zsh", ".ksh",
-    ".js", ".ts", ".jsx", ".tsx", ".yaml", ".yml", ".toml",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".yaml", ".yml", ".toml", ".sql", ".go", ".rs",
+    ".tf", ".tfvars", ".hcl", ".pth", ".dockerfile",
 }
 _EDIT_RECONSTRUCT_NAMES = {"makefile", "dockerfile", "gnumakefile", "justfile"}
 
@@ -491,40 +493,10 @@ def _build_sandbox_wrapped_command(
     sandbox_mode: str = "none",
     project_dir: Optional[str] = None,
 ) -> Optional[str]:
-    """Wrap an allowed shell command with OS sandboxing (`srt`, `bwrap`, `sandbox-exec`) when requested."""
-    mode = str(sandbox_mode or "none").strip().lower()
-    if mode in {"", "none", "off", "false"}:
-        return None
-    if mode == "auto":
-        if shutil.which("srt"):
-            mode = "srt"
-        elif sys.platform.startswith("linux") and shutil.which("bwrap"):
-            mode = "bwrap"
-        elif sys.platform == "darwin" and shutil.which("sandbox-exec"):
-            mode = "seatbelt"
-        else:
-            return None
-    if mode == "srt":
-        return f"srt -- /bin/sh -c {shlex.quote(raw_cmd)}"
-    if mode in {"bwrap", "seatbelt"} and sys.platform == "win32":
-        return None  # neither wrapper exists on Windows; emitting one would produce an unrunnable command
-    proj = str(Path(project_dir or os.getcwd()).resolve())
-    quoted_cmd = shlex.quote(raw_cmd)
-    if mode == "bwrap":
-        return (
-            f"bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp "
-            f"--bind {shlex.quote(proj)} {shlex.quote(proj)} --chdir {shlex.quote(proj)} "
-            f"-- /bin/sh -c {quoted_cmd}"
-        )
-    if mode == "seatbelt":
-        sbpl_proj = proj.replace("\\", "\\\\").replace('"', '\\"')
-        profile = (
-            '(version 1)(allow default)'
-            f'(deny file-write* (subpath "/"))'
-            f'(allow file-write* (subpath "{sbpl_proj}") (subpath "/tmp") (subpath "/private/tmp") (subpath "/private/var/folders"))'
-        )
-        return f"sandbox-exec -p {shlex.quote(profile)} /bin/sh -c {quoted_cmd}"
-    return None
+    """Wrap an allowed shell command with OS sandboxing (`srt`, `bwrap`, `sandbox-exec`, `aetheris-gate`)."""
+    from .core.os_sandbox import build_os_sandbox_command
+
+    return build_os_sandbox_command(raw_cmd, sandbox_mode=sandbox_mode, project_dir=project_dir)
 
 
 def evaluate_hook_payload(
@@ -1385,9 +1357,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--sandbox-wrap",
-            choices=["none", "srt", "bwrap", "seatbelt", "auto"],
+            choices=["none", "srt", "bwrap", "seatbelt", "landlock", "job", "aetheris-gate", "auto"],
             default=str(os.getenv("AETHERIS_SANDBOX_WRAP") or "none").strip().lower(),
-            help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+            help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `landlock`, `job`, `aetheris-gate`, `auto`) emitted via updatedInput on allowed Bash calls",
+        )
+        parser.add_argument(
+            "--auto-daemon",
+            action="store_true",
+            help="Auto-spawn a warm idle-TTL hook daemon in the background on cold fallback",
         )
         parser.add_argument(
             "--context-guard",
@@ -1420,6 +1397,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         auto_approve_escalations = bool(
             args.auto_approve_escalations or os.getenv("AETHERIS_AUTO_APPROVE_ESCALATIONS") == "1"
         )
+        auto_daemon = bool(args.auto_daemon or os.getenv("AETHERIS_AUTO_DAEMON") == "1")
         approvals_path = str(args.approvals_path or os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None
         sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
@@ -1546,12 +1524,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if (
             os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1"
             and not os.getenv("AETHERIS_STATE_DIR")
-            and not approve_once
-            and not auto_approve_escalations
-            and not approvals_path
         ):
             try:
-                from .hook_daemon import query_daemon
+                from .hook_daemon import query_daemon, spawn_background_daemon
 
                 explicit_flags: list[str] = []
                 if args.strict_ast:
@@ -1560,6 +1535,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     explicit_flags.append("log_decisions")
                 if shadow_mode:
                     explicit_flags.append("shadow")
+                if auto_allow:
+                    explicit_flags.append("auto_allow")
                 if codex_escalate_deny:
                     explicit_flags.append("codex_escalate_deny")
                 if replace_tool_output:
@@ -1568,6 +1545,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     explicit_flags.append("semantic_guard")
                 if context_guard:
                     explicit_flags.append("context_guard")
+                if approve_once:
+                    explicit_flags.append("approve_once")
+                if auto_approve_escalations:
+                    explicit_flags.append("auto_approve_escalations")
                 if sandbox_wrap not in {"", "none"}:
                     explicit_flags.append("sandbox_wrap")
 
@@ -1581,6 +1562,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     req_flags["log_decisions"] = True
                 if shadow_mode:
                     req_flags["shadow"] = True
+                if auto_allow:
+                    req_flags["auto_allow"] = True
                 if codex_escalate_deny:
                     req_flags["codex_escalate_deny"] = True
                 if replace_tool_output:
@@ -1589,6 +1572,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     req_flags["semantic_guard"] = True
                 if context_guard:
                     req_flags["context_guard"] = True
+                if approve_once:
+                    req_flags["approve_once"] = True
+                if auto_approve_escalations:
+                    req_flags["auto_approve_escalations"] = True
+                if approvals_path:
+                    req_flags["approvals_path"] = approvals_path
                 if sandbox_wrap not in {"", "none"}:
                     req_flags["sandbox_wrap"] = sandbox_wrap
                 if journal_path:
@@ -1613,6 +1602,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "explicit_flags": explicit_flags,
                     }
                 )
+                if daemon_result is None and auto_daemon:
+                    spawn_background_daemon(flags=req_flags)
             except Exception:
                 daemon_result = None
         if daemon_result is not None:

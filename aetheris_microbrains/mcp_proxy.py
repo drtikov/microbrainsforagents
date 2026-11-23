@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .core.mcp_security import MCPManifestPinner, detect_prompt_injection
 from .core.runtime_paths import get_state_dir
+from .core.secret_broker import SecretBroker
 from .core.secrets import scrub_tool_output
 from .core.trajectory_engine import fold_untrusted_output
 
@@ -175,8 +178,68 @@ def _qual_key(server_name: str, tool_name: str) -> str:
     return f"{str(server_name or '').strip().lower()}::{str(tool_name or '').strip().lower()}"
 
 
+class StdioMCPDownstreamClient:
+    """Line-delimited JSON-RPC stdio client for a downstream MCP child server."""
+
+    def __init__(self, command: Sequence[str], *, cwd: Optional[Path | str] = None) -> None:
+        argv = [str(x) for x in command if str(x)]
+        if not argv:
+            raise ValueError("downstream stdio command must be non-empty")
+        self.command = argv
+        self.cwd = str(cwd) if cwd is not None else None
+        self._proc: Optional[subprocess.Popen[str]] = None
+
+    def start(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self._proc = subprocess.Popen(  # aetheris: allow subprocess_call:Popen -- spawn downstream stdio MCP server
+            self.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=self.cwd,
+        )
+
+    def send_rpc(self, req: Dict[str, Any]) -> Dict[str, Any]:
+        self.start()
+        assert self._proc is not None and self._proc.stdin is not None and self._proc.stdout is not None
+        self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+        self._proc.stdin.flush()
+        line = self._proc.stdout.readline()
+        if not line:
+            raise RuntimeError("Downstream MCP server closed stdout")
+        resp = json.loads(line)
+        if not isinstance(resp, dict):
+            raise RuntimeError("Downstream MCP server returned non-object JSON-RPC")
+        return resp
+
+    def fetch_tools(self) -> List[Dict[str, Any]]:
+        self.send_rpc({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": MCP_PROTOCOL_VERSION}})
+        res = self.send_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        tools = res.get("result", {}).get("tools", []) if isinstance(res.get("result"), dict) else []
+        return [t for t in tools if isinstance(t, dict)]
+
+    def close(self) -> None:
+        if self._proc is not None:
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+            except OSError:
+                pass
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+            self._proc = None
+
+
 class MCPProxyGateway:
-    """In-process MCP 2026-07-28 security gateway combining pinning, DLP, folding, and surface control."""
+    """In-process MCP 2026-07-28 security gateway combining pinning, secret vault, DLP, folding, and surface control."""
 
     def __init__(
         self,
@@ -185,6 +248,9 @@ class MCPProxyGateway:
         state_dir: Optional[Path | str] = None,
         fold_threshold_bytes: int = 8192,
         policy: Any = None,
+        secret_broker: Optional[SecretBroker] = None,
+        downstream_transports: Optional[Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]] = None,
+        block_response_injections: bool = False,
     ) -> None:
         base = Path(state_dir) if state_dir is not None else get_state_dir()
         resolved_pin = Path(pin_path) if pin_path is not None else (base / "mcp_manifest_pins.json")
@@ -192,6 +258,9 @@ class MCPProxyGateway:
         self.pinner = MCPManifestPinner(pin_path=resolved_pin)
         self.fold_threshold_bytes = max(128, int(fold_threshold_bytes))
         self.policy = policy
+        self.secret_broker = secret_broker
+        self._downstream_transports: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = dict(downstream_transports or {})
+        self.block_response_injections = bool(block_response_injections)
         self._quarantined: Set[str] = set()
         self._pinned_prefix: List[str] = []
         self._servers: Dict[str, List[Dict[str, Any]]] = {}
@@ -312,6 +381,14 @@ class MCPProxyGateway:
             },
         }
 
+    def handle_tools_list_changed(
+        self,
+        server_name: str,
+        updated_tools: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Re-verify an already-pinned server after `notifications/tools/list_changed`; never auto-pins."""
+        return self.register_or_verify_server(server_name, updated_tools, auto_pin_first_seen=False)
+
     def evaluate_tool_call(
         self,
         server_name: str,
@@ -320,7 +397,7 @@ class MCPProxyGateway:
         *,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """Enforce quarantine, header safety, outbound secret DLP, and `decide()` risk tiering."""
+        """Enforce quarantine, header safety, secret vault scope, outbound DLP, and `decide()` risk tiering."""
         srv = str(server_name or "").strip()
         tname = str(tool_name or "").strip()
         qk = _qual_key(srv, tname)
@@ -343,6 +420,16 @@ class MCPProxyGateway:
             }
 
         args_dict = arguments if isinstance(arguments, dict) else {}
+        if self.secret_broker is not None:
+            brok = self.secret_broker.resolve_for_call(srv, tname, args_dict, headers)
+            if not brok.get("ok"):
+                return {
+                    "decision": "deny",
+                    "reason_code": str(brok.get("reason_code") or "mcp_proxy_secret_scope_violation"),
+                    "label": str(brok.get("label") or "Secret broker scope violation"),
+                    "layer": 0,
+                }
+
         args_blob = json.dumps(args_dict, sort_keys=True, ensure_ascii=False, default=str)
         dlp = scrub_tool_output(args_blob)
         if dlp["secrets_found"]:
@@ -361,15 +448,95 @@ class MCPProxyGateway:
             policy=self.policy,
         )
 
+    def execute_proxied_tool_call(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+        req_id: Any = 1,
+    ) -> Dict[str, Any]:
+        """Gate, inject brokered secrets out-of-band, forward to downstream, and sanitize response."""
+        srv = str(server_name or "").strip()
+        verdict = self.evaluate_tool_call(srv, tool_name, arguments, headers=headers)
+        if verdict.get("decision") != "allow":
+            return {
+                "allowed": False,
+                "verdict": verdict,
+                "isError": True,
+                "content": [{"type": "text", "text": f"Blocked by Aetheris MCP Proxy: {verdict.get('reason_code')}: {verdict.get('label')}"}],
+            }
+
+        transport = self._downstream_transports.get(srv) or self._downstream_transports.get(srv.lower())
+        if transport is None:
+            return {
+                "allowed": False,
+                "verdict": verdict,
+                "isError": True,
+                "reason_code": "mcp_proxy_no_downstream_transport",
+                "content": [{"type": "text", "text": f"No downstream transport configured for MCP server '{srv}'"}],
+            }
+
+        args_dict = dict(arguments) if isinstance(arguments, dict) else {}
+        outbound_args = args_dict
+        outbound_headers = dict(headers) if headers is not None else None
+        resolved_handles: List[str] = []
+        if self.secret_broker is not None:
+            brok = self.secret_broker.resolve_for_call(srv, tool_name, args_dict, headers)
+            if not brok.get("ok"):
+                return {
+                    "allowed": False,
+                    "verdict": {
+                        "decision": "deny",
+                        "reason_code": brok.get("reason_code"),
+                        "label": brok.get("label"),
+                        "layer": 0,
+                    },
+                    "isError": True,
+                }
+            outbound_args = brok["arguments"]
+            outbound_headers = brok["headers"]
+            resolved_handles = list(brok.get("resolved_handles") or [])
+
+        rpc_req: Dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": outbound_args},
+        }
+        if outbound_headers is not None:
+            rpc_req["headers"] = outbound_headers
+
+        raw_resp = transport(rpc_req)
+        raw_payload = raw_resp.get("result", raw_resp) if isinstance(raw_resp, dict) else raw_resp
+        scanned = self.process_tool_response(srv, tool_name, raw_payload)
+        out: Dict[str, Any] = {
+            "allowed": True,
+            "verdict": verdict,
+            "resolved_handles": resolved_handles,
+            **scanned,
+        }
+        if self.block_response_injections and scanned.get("injection_detected"):
+            out["response_quarantined"] = True
+            out["isError"] = True
+            out["redacted_text"] = (
+                f"[QUARANTINED_MCP_RESPONSE: indirect prompt injection blocked ({', '.join(scanned.get('injection_findings', ()))})]"
+            )
+        return out
+
     def process_tool_response(
         self,
         server_name: str,
         tool_name: str,
         raw_output: Any,
     ) -> Dict[str, Any]:
-        """Scrub secrets, detect prompt injections, and fold oversized responses into scratchpad."""
+        """Scrub secrets (including brokered vault tokens), detect injections, and fold oversized responses."""
         del server_name, tool_name
         text = raw_output if isinstance(raw_output, str) else json.dumps(raw_output, ensure_ascii=False, default=str)
+        vault_hits = 0
+        if self.secret_broker is not None:
+            text, vault_hits = self.secret_broker.scrub_known_secrets(text)
         scrub = scrub_tool_output(text)
         inj = detect_prompt_injection(text)
         folded = fold_untrusted_output(
@@ -377,14 +544,17 @@ class MCPProxyGateway:
             state_dir=self.state_dir,
             threshold_bytes=self.fold_threshold_bytes,
         )
+        secret_types = list(scrub["secret_types"])
+        if vault_hits and "vault_brokered_secret" not in secret_types:
+            secret_types.append("vault_brokered_secret")
         return {
             "redacted_text": folded["preview"],
             "folded": folded["folded"],
             "artifact_path": folded["artifact_path"],
             "original_bytes": folded["original_bytes"],
-            "secrets_found": bool(scrub["secrets_found"]),
-            "secret_count": int(scrub["secret_count"]),
-            "secret_types": list(scrub["secret_types"]),
+            "secrets_found": bool(scrub["secrets_found"] or vault_hits > 0),
+            "secret_count": int(scrub["secret_count"]) + vault_hits,
+            "secret_types": sorted(secret_types),
             "injection_detected": bool(inj["injection_detected"]),
             "injection_findings": list(inj["findings"]),
         }
@@ -414,11 +584,17 @@ class MCPProxyGateway:
                 query=str(params.get("query") or ""),
             )
             return _ok({"tools": res["tools"], "_meta": res["_meta"]})
+        if method == "notifications/tools/list_changed":
+            srv = str(params.get("server") or "default")
+            upd = params.get("tools") if isinstance(params.get("tools"), list) else []
+            return _ok(self.handle_tools_list_changed(srv, upd))
         if method == "tools/call":
             srv = str(params.get("server") or "default")
             tname = str(params.get("name") or "")
             args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
             hdrs = params.get("headers") if isinstance(params.get("headers"), dict) else None
+            if srv in self._downstream_transports or srv.lower() in self._downstream_transports:
+                return _ok(self.execute_proxied_tool_call(srv, tname, args, headers=hdrs, req_id=req_id))
             verdict = self.evaluate_tool_call(srv, tname, args, headers=hdrs)
             return _ok(verdict)
         if method == "subscriptions/listen":
@@ -458,6 +634,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--check", action="store_true", help="Run gateway self-checks and exit")
     parser.add_argument("--stdio", action="store_true", help="Read JSON-RPC lines from stdin and write responses to stdout")
+    parser.add_argument(
+        "--downstream",
+        action="append",
+        default=[],
+        metavar="SERVER=CMD",
+        help="Register downstream stdio MCP server (`name=command args...`) for live proxying",
+    )
+    parser.add_argument("--block-injections", action="store_true", help="Quarantine downstream responses containing indirect prompt injections")
     args = parser.parse_args(argv)
 
     if args.check:
@@ -466,19 +650,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if rep.get("ok") else 1
 
     if args.stdio:
-        gw = MCPProxyGateway()
-        for line in sys.stdin:
-            raw = line.strip()
-            if not raw:
-                continue
+        clients: Dict[str, StdioMCPDownstreamClient] = {}
+        transports: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {}
+        for spec in args.downstream or ():
+            if "=" in str(spec):
+                sname, scmd = str(spec).split("=", 1)
+                cl = StdioMCPDownstreamClient(shlex.split(scmd))
+                clients[sname.strip()] = cl
+                transports[sname.strip()] = cl.send_rpc
+        gw = MCPProxyGateway(
+            secret_broker=SecretBroker(),
+            downstream_transports=transports,
+            block_response_injections=bool(args.block_injections),
+        )
+        for sname, cl in clients.items():
             try:
-                msg = json.loads(raw)
-                resp = gw.handle_jsonrpc_message(msg) if isinstance(msg, dict) else {
-                    "jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}
-                }
-            except json.JSONDecodeError:
-                resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
-            print(json.dumps(resp, ensure_ascii=False), flush=True)
+                gw.register_or_verify_server(sname, cl.fetch_tools(), auto_pin_first_seen=True)
+            except Exception:
+                pass
+        try:
+            for line in sys.stdin:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    msg = json.loads(raw)
+                    resp = gw.handle_jsonrpc_message(msg) if isinstance(msg, dict) else {
+                        "jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}
+                    }
+                except json.JSONDecodeError:
+                    resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+                print(json.dumps(resp, ensure_ascii=False), flush=True)
+        finally:
+            for cl in clients.values():
+                cl.close()
         return 0
 
     rep = run_proxy_self_check()

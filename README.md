@@ -104,7 +104,7 @@ python -m aetheris_microbrains.doctor                          # full installati
 python -m aetheris_microbrains.doctor --scan-mcp               # audit .mcp.json servers & tool manifests for poisoning/rug-pulls
 ```
 
-Installed console entrypoints: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`.
+Installed console entrypoints: `aetheris` (unified CLI), `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`, `aetheris-pr-gate`, `aetheris-install-antigravity`.
 
 By default, `install_hook.py` writes hooks relative to the repository root next to the script into `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection; pass `--project-dir /path/to/project` when installing from a wheel or shared environment into another repository. For active coding sessions, running the warm daemon is the recommended default—cold per-call CLI spawns spend ~94 ms on Python interpreter startup versus <1 ms warm evaluation—either via the TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765` paired with `install_hook.py --http-daemon http://127.0.0.1:8765`).
 
@@ -335,6 +335,40 @@ Measured on `2026-11-23` across two fresh, isolated subagent contexts on the sam
 - **[`aetheris_microbrains/install_antigravity.py`](aetheris_microbrains/install_antigravity.py):** One-command installer (`aetheris-install-antigravity` in `pyproject.toml`) writing `plugin.json`, top-level named `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, and `skills/aetheris-microbrains/SKILL.md` globally (`~/.gemini/config/plugins/aetheris-microbrains/`) or per-workspace (`--workspace`).
 - **[`.antigravity-plugin/`](.antigravity-plugin/):** Ready-to-use checked-in plugin bundle (`plugin.json`, `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, `skills/aetheris-microbrains/SKILL.md`).
 - **[`aetheris_microbrains/tests/test_antigravity_integration.py`](aetheris_microbrains/tests/test_antigravity_integration.py):** End-to-end contract, CLI mode, installer lifecycle, and bundle schema tests (**`554 passed, 2 skipped`** across the full test suite, plus `ANTIGRAVITY SELF-TEST PASSED` on `~/.gemini/config/plugins/aetheris-microbrains`).
+
+---
+
+## Native Rust Shim (`aetheris-gate`) and Auto-Spawning IPC Daemon
+
+Zero-dependency native Rust binary shim (`rust/aetheris-gate`) for sub-15ms cold invocations, auto-spawning background IPC daemon with idle TTL, and OS sandbox containment (Windows Job Objects / Linux Landlock).
+
+## Multi-Language AST Linter and Supply-Chain Deferred Exec Guard
+
+Polyglot pre-flight syntax and security scanner for JS/TS, Go, Rust, SQL, Terraform, and Dockerfiles (`core/multilang_ast.py`) alongside supply-chain deferred execution defense across package.json, tasks.json, Makefiles, conftest.py root hooks, site-packages .pth files, and CI workflows (`core/deferred_exec_guard.py`).
+
+## MCP Security Gateway and Out-of-Band Secret Broker
+
+Upgraded `aetheris-mcp-proxy` (`mcp_proxy.py`) with out-of-band secret brokering (`` handles via `core/secret_broker.py`), stdio downstream child proxying, dynamic rug-pull tool isolation, and indirect prompt injection response quarantining.
+
+## Policy-as-Code (Cedar and Rego) and OS Containment Sandboxing
+
+Compilers and evaluators for AWS Cedar (.cedar) and OPA Rego (.rego) policies (`core/policy_as_code.py`) with round-trip export support, paired with network domain allowlist loopback proxies and platform-native sandbox generators (`core/os_sandbox.py`).
+
+## OpenTelemetry GenAI Export and Real-Time Local Audit Web UI
+
+Export forensic decision events as OpenTelemetry GenAI semantic convention spans (`core/otel_exporter.py`) with file export (`--export-otel`) and direct OTLP HTTP push (`--push-otel`). An interactive zero-dependency local browser dashboard (`core/audit_ui.py` / `aetheris-audit --ui` / `aetheris audit --ui --port 8767`) provides real-time Server-Sent Events (SSE), search filters, and CSRF-protected pending rule approvals.
+
+---
+
+## Packaging and Pure-Stdlib Core Isolation (verify-core)
+
+Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`). 34 core security modules run on Python standard library only with zero third-party dependencies, guaranteeing sub-millisecond evaluation and complete air-gapped isolation. Run `aetheris verify-core` to verify that core security modules have zero third-party imports.
+
+---
+
+## CI/CD PR Gate and SARIF Reporting
+
+The standalone pull request scanner `aetheris-pr-gate` (`pr_gate.py`) inspects git diffs, changed files, and repository trees before merging. It outputs SARIF 2.1.0 security reports for GitHub Code Scanning and formatted Markdown summaries for automated pull request comments. Includes a ready-to-use GitHub Action workflow at `examples/github-action/action.yml`.
 
 ---
 

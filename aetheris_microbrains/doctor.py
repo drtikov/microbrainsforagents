@@ -381,6 +381,21 @@ def pin_command(server: str, unpin: bool, project_dir: Path, state_dir: Optional
     return 0
 
 
+def _check_rust_shim(rep: _Report) -> None:
+    import shutil
+
+    which_bin = shutil.which("aetheris-gate")
+    if which_bin:
+        rep.ok("rust-shim", which_bin)
+        return
+    exe_name = "aetheris-gate.exe" if os.name == "nt" else "aetheris-gate"
+    repo_bin = Path(__file__).resolve().parents[1] / "rust" / "aetheris-gate" / "target" / "release" / exe_name
+    if repo_bin.is_file():
+        rep.ok("rust-shim", str(repo_bin))
+    else:
+        rep.warn("rust-shim", f"not built ({repo_bin}); Python hook active")
+
+
 def run_doctor(
     project_dir: Optional[Path] = None,
     policy_path: Optional[str] = None,
@@ -395,6 +410,7 @@ def run_doctor(
     _check_journal(rep, state_dir=state_dir)
     _check_mcp_pins(rep, root, state_dir=state_dir)
     _check_daemon(rep, state_dir=state_dir)
+    _check_rust_shim(rep)
     return rep.to_dict()
 
 

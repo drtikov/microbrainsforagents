@@ -81,3 +81,5 @@ _rollback/
 
 # Claude Code local machine settings
 .claude/settings.local.json
+target/
+rust/aetheris-gate/target/

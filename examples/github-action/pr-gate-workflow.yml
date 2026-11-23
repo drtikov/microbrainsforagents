@@ -1,0 +1,36 @@
+name: Aetheris Microbrains Pre-Merge Security Gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  aetheris-pr-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Aetheris Microbrains
+        run: pip install .
+
+      - name: Scan PR diff and emit SARIF
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m aetheris_microbrains.pr_gate --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --sarif-out aetheris-pr-gate.sarif --format markdown
+
+      - name: Upload SARIF report to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: aetheris-pr-gate.sarif

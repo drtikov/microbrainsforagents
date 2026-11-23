@@ -63,9 +63,34 @@ def _quote_cmd_token(tok: str) -> str:
     return s
 
 
-def _hook_cmd(shared: bool, event_args: list[str], extra: list[str]) -> str:
-    py_tok = "python" if shared else _quote_cmd_token(_PY)
+def find_rust_gate_binary() -> Optional[Path]:
+    """Locate the native `aetheris-gate` Rust shim binary if installed or built locally."""
+    which_bin = shutil.which("aetheris-gate")
+    if which_bin:
+        p = Path(which_bin)
+        if p.is_file():
+            return p
+    exe_name = "aetheris-gate.exe" if os.name == "nt" else "aetheris-gate"
+    repo_bin = Path(__file__).resolve().parents[1] / "rust" / "aetheris-gate" / "target" / "release" / exe_name
+    if repo_bin.is_file():
+        return repo_bin
+    return None
+
+
+def _hook_cmd(
+    shared: bool,
+    event_args: list[str],
+    extra: list[str],
+    *,
+    use_rust_shim: bool = False,
+) -> str:
     quoted_extra = [_quote_cmd_token(x) if not x.startswith("--") else x for x in extra]
+    if use_rust_shim:
+        rust_bin = find_rust_gate_binary()
+        if rust_bin is not None:
+            parts = [_quote_cmd_token(str(rust_bin)), "--host", "antigravity", *event_args, *quoted_extra]
+            return " ".join(parts)
+    py_tok = "python" if shared else _quote_cmd_token(_PY)
     parts = [py_tok, "-m", "aetheris_microbrains.hook", "--host", "antigravity", *event_args, *quoted_extra]
     return " ".join(parts)
 
@@ -137,6 +162,7 @@ def _build_hooks_config(
     context_guard: bool = False,
     approve_once: bool = False,
     auto_approve_escalations: bool = False,
+    use_rust_shim: bool = False,
 ) -> Dict[str, Any]:
     pre_extra = ["--log-decisions"]
     post_extra = ["--log-decisions"]
@@ -178,7 +204,7 @@ def _build_hooks_config(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _hook_cmd(shared, [], pre_extra),
+                            "command": _hook_cmd(shared, [], pre_extra, use_rust_shim=use_rust_shim),
                             "timeout": 10,
                         }
                     ],
@@ -190,7 +216,7 @@ def _build_hooks_config(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _hook_cmd(shared, ["--event", "post-tool-use"], post_extra),
+                            "command": _hook_cmd(shared, ["--event", "post-tool-use"], post_extra, use_rust_shim=use_rust_shim),
                             "timeout": 10,
                         }
                     ],
@@ -284,6 +310,7 @@ def install(
     context_guard: bool = False,
     approve_once: bool = False,
     auto_approve_escalations: bool = False,
+    use_rust_shim: bool = False,
     no_mcp: bool = False,
     workspace: Optional[Path] = None,
     plugin_dir: Optional[Path] = None,
@@ -303,6 +330,7 @@ def install(
         context_guard=context_guard,
         approve_once=approve_once,
         auto_approve_escalations=auto_approve_escalations,
+        use_rust_shim=use_rust_shim,
     )
     mcp_cfg = None if no_mcp else _build_mcp_config(shared=shared)
 
@@ -491,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--journal-path", default=None, help="Override path for decision_journal.jsonl")
     ap.add_argument("--context-guard", action="store_true", help="Enable context-hygiene gating")
     ap.add_argument("--no-mcp", action="store_true", help="Omit mcp_config.json from the plugin bundle")
+    ap.add_argument("--use-rust-shim", action="store_true", help="Use native `aetheris-gate` Rust binary when built/on PATH")
     ap.add_argument("--shared", action="store_true", help="Use portable `python` executable instead of current interpreter path")
     ap.add_argument("--workspace", default=None, help="Install to `<workspace>/.agents/plugins/aetheris-microbrains/`")
     ap.add_argument("--plugin-dir", default=None, help="Explicit target directory for the Antigravity plugin bundle")
@@ -521,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         auto_allow=args.auto_allow,
         approve_once=args.approve_once,
         auto_approve_escalations=args.auto_approve_escalations,
+        use_rust_shim=args.use_rust_shim,
         profile=args.profile,
         policy=args.policy,
         session_state=sess_arg,

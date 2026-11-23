@@ -31,6 +31,7 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -182,6 +183,9 @@ def _merge_flags(daemon_flags: Dict[str, Any], req: Dict[str, Any]) -> Dict[str,
         "replace_tool_output",
         "semantic_guard",
         "context_guard",
+        "approve_once",
+        "auto_approve_escalations",
+        "auto_allow",
     }
     for k, v in req_flags.items():
         if v is None:
@@ -296,6 +300,8 @@ def evaluate_request(
         and not flags.get("session_state_path")
         and not flags.get("shadow")
         and not flags.get("context_guard")
+        and not flags.get("approve_once")
+        and not flags.get("auto_approve_escalations")
         and not _payload_is_editish(payload)
     )
     key = (
@@ -336,6 +342,9 @@ def evaluate_request(
             replace_tool_output=bool(flags.get("replace_tool_output")),
             semantic_guard=bool(flags.get("semantic_guard")),
             context_guard=bool(flags.get("context_guard")),
+            approve_once=bool(flags.get("approve_once")),
+            approvals_path=_resolve_under_cwd(flags.get("approvals_path"), caller_cwd),
+            auto_approve_escalations=bool(flags.get("auto_approve_escalations")),
         )
     else:
         verdict = evaluate_hook_payload(
@@ -351,10 +360,34 @@ def evaluate_request(
             policy_path=resolved_policy,
             sandbox_wrap=str(flags.get("sandbox_wrap") or "none"),
             context_guard=bool(flags.get("context_guard")),
+            approve_once=bool(flags.get("approve_once")),
+            approvals_path=_resolve_under_cwd(flags.get("approvals_path"), caller_cwd),
+            auto_approve_escalations=bool(flags.get("auto_approve_escalations")),
         )
     if key is not None:
         cache.put(key, verdict)
     return verdict, False
+
+
+def _connect_daemon_socket(
+    info: Dict[str, Any],
+    connect_timeout: float,
+) -> Optional[socket.socket]:
+    mode = str(info.get("mode") or "tcp").strip().lower()
+    if mode == "uds" and hasattr(socket, "AF_UNIX"):
+        sock_path = str(info.get("socket_path") or "").strip()
+        if not sock_path:
+            return None
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.settimeout(connect_timeout)
+        conn.connect(sock_path)
+        return conn
+    if mode == "http":
+        return None
+    port = int(info.get("port") or 0)
+    if not port:
+        return None
+    return socket.create_connection(("127.0.0.1", port), timeout=connect_timeout)
 
 
 def query_daemon(
@@ -370,16 +403,16 @@ def query_daemon(
         info = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(info, dict) or int(info.get("version") or 0) != DAEMON_VERSION:
             return None
-        if str(info.get("mode") or "tcp").strip().lower() == "http":
-            return None  # HTTP daemons are called by Claude Code directly; this TCP client must fall back in-process
-        port = int(info.get("port") or 0)
         auth_value = str(info.get("auth") or "")
-        if not port or not auth_value:
+        if not auth_value:
+            return None
+        conn = _connect_daemon_socket(info, connect_timeout)
+        if conn is None:
             return None
         req = dict(request)
         req["auth"] = auth_value
         req.setdefault("id", secrets.token_hex(8))
-        with socket.create_connection(("127.0.0.1", port), timeout=connect_timeout) as conn:
+        with conn:
             conn.settimeout(recv_timeout)
             conn.sendall((json.dumps(req) + "\n").encode("utf-8"))
             line = _read_line(conn)
@@ -403,23 +436,26 @@ def ping_daemon(
     state_path: Optional[Path] = None,
     timeout: float = 0.3,
 ) -> Optional[Dict[str, Any]]:
-    """Probe the running daemon cleanly (supports both TCP and HTTP modes)."""
+    """Probe the running daemon cleanly (supports TCP, Unix domain sockets, and HTTP modes)."""
     p = Path(state_path) if state_path else get_daemon_state_path()
     try:
         info = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(info, dict):
             return None
-        port = int(info.get("port") or 0)
-        if not port:
-            return None
         mode = str(info.get("mode") or "tcp").lower()
         if mode == "http":
             import urllib.request
 
+            port = int(info.get("port") or 0)
+            if not port:
+                return None
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         auth_value = str(info.get("auth") or "")
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
+        conn = _connect_daemon_socket(info, timeout)
+        if conn is None:
+            return None
+        with conn:
             conn.settimeout(timeout)
             req = {"action": "ping", "auth": auth_value, "id": secrets.token_hex(4)}
             conn.sendall((json.dumps(req) + "\n").encode("utf-8"))
@@ -429,42 +465,128 @@ def ping_daemon(
         return None
 
 
+def spawn_background_daemon(
+    state_path: Optional[Path] = None,
+    idle_timeout: float = 900.0,
+    flags: Optional[Dict[str, Any]] = None,
+    use_uds: bool = True,
+) -> bool:
+    """Ensure a warm detached hook daemon is running for `<state_dir>` with idle auto-shutdown."""
+    from .core.runtime_paths import file_lock
+
+    target = Path(state_path) if state_path else get_daemon_state_path()
+    if target.exists() and target.is_dir():
+        target = target / "hook_daemon.json"
+    with file_lock(target.with_name("hook_daemon.spawn")):
+        pong = ping_daemon(state_path=target, timeout=0.15)
+        if isinstance(pong, dict) and pong.get("ok"):
+            return True
+        try:
+            if target.is_file():
+                target.unlink()
+        except OSError:
+            pass
+        cmd = [
+            sys.executable,
+            "-m",
+            "aetheris_microbrains.hook_daemon",
+            "--idle-timeout",
+            str(max(1.0, float(idle_timeout))),
+            "--state-dir",
+            str(target.parent),
+        ]
+        if use_uds and hasattr(socket, "AF_UNIX"):
+            cmd.append("--uds")
+        fmap = flags or {}
+        if fmap.get("profile"):
+            cmd.extend(["--profile", str(fmap["profile"])])
+        if fmap.get("policy_path"):
+            cmd.extend(["--policy", str(fmap["policy_path"])])
+        spawn_kw: Dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            spawn_kw["creationflags"] = 0x08000000 | 0x00000008  # CREATE_NO_WINDOW | DETACHED_PROCESS
+        else:
+            spawn_kw["start_new_session"] = True
+        try:
+            subprocess.Popen(cmd, **spawn_kw)  # aetheris: allow subprocess_call:Popen -- spawn detached warm hook daemon
+            return True
+        except OSError:
+            return False
+
+
 def serve(
     host: str = "127.0.0.1",
     port: int = 0,
     state_path: Optional[Path] = None,
     flags: Optional[Dict[str, Any]] = None,
     max_requests: Optional[int] = None,
+    idle_timeout: float = 0.0,
+    socket_path: Optional[Path] = None,
 ) -> int:
-    """Run the daemon accept loop until Ctrl+C / max_requests; returns 0."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    _configure_loopback_socket(srv)
-    srv.bind((host, port))
-    srv.listen(4)
-    bound_port = int(srv.getsockname()[1])
+    """Run the daemon accept loop (TCP or Unix domain socket) with optional idle timeout."""
+    use_uds = bool(socket_path is not None and hasattr(socket, "AF_UNIX"))
+    sock_target = Path(socket_path) if use_uds and socket_path is not None else None
+    if use_uds and sock_target is not None:
+        sock_target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if sock_target.exists():
+                sock_target.unlink()
+        except OSError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock_target))
+        try:
+            os.chmod(sock_target, 0o600)
+        except OSError:
+            pass
+        bound_port = 0
+    else:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _configure_loopback_socket(srv)
+        srv.bind((host, port))
+        bound_port = int(srv.getsockname()[1])
+    srv.listen(8)
+    idle_sec = max(0.0, float(idle_timeout))
+    if idle_sec > 0:
+        srv.settimeout(min(0.25, max(0.02, idle_sec / 4.0)))
     auth_value = secrets.token_hex(16)
     target = Path(state_path) if state_path else get_daemon_state_path()
     if target.exists() and target.is_dir():
         target = target / "hook_daemon.json"
-    info = {
-        "mode": "tcp",
+    info: Dict[str, Any] = {
+        "mode": "uds" if use_uds else "tcp",
         "port": bound_port,
         "pid": os.getpid(),
         "auth": auth_value,
         "version": DAEMON_VERSION,
         "started_at": time.time(),
+        "idle_timeout": idle_sec,
     }
+    if use_uds and sock_target is not None:
+        info["socket_path"] = str(sock_target)
     _atomic_write_json(target, info)
     daemon_flags = dict(flags or {})
     cache = VerdictCache()
-    print(f"hook daemon listening on {host}:{bound_port} (state: {target}, version {DAEMON_VERSION})")
+    ep_desc = str(sock_target) if use_uds else f"{host}:{bound_port}"
+    print(f"hook daemon listening on {ep_desc} (state: {target}, version {DAEMON_VERSION})")
     served = 0
+    last_active = time.monotonic()
     try:
         while max_requests is None or served < max_requests:
             try:
                 conn, _addr = srv.accept()
+            except socket.timeout:
+                if idle_sec > 0 and (time.monotonic() - last_active) >= idle_sec:
+                    break
+                continue
             except OSError:
                 continue
+            last_active = time.monotonic()
             req_id: Any = None
             try:
                 conn.settimeout(_DEFAULT_RECV_TIMEOUT)
@@ -476,7 +598,7 @@ def serve(
                     served += 1
                     resp = {"id": req_id, "error": "auth"}
                 elif req.get("action") == "ping":
-                    resp = {"id": req_id, "ok": True, "version": DAEMON_VERSION, "mode": "tcp"}
+                    resp = {"id": req_id, "ok": True, "version": DAEMON_VERSION, "mode": "uds" if use_uds else "tcp"}
                 else:
                     served += 1
                     req.pop("auth", None)
@@ -499,6 +621,12 @@ def serve(
         print("hook daemon stopping (Ctrl+C)")
     finally:
         srv.close()
+        if sock_target is not None:
+            try:
+                if sock_target.exists():
+                    sock_target.unlink()
+            except OSError:
+                pass
         try:
             if target.exists() and json.loads(target.read_text(encoding="utf-8")).get("pid") == os.getpid():
                 target.unlink()
@@ -693,10 +821,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--semantic-guard", action="store_true", help="Enable semantic prompt-injection classifier on post-tool")
     parser.add_argument(
         "--sandbox-wrap",
-        choices=["none", "srt", "bwrap", "seatbelt", "auto"],
+        choices=["none", "srt", "bwrap", "seatbelt", "landlock", "job", "aetheris-gate", "auto"],
         default="none",
-        help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+        help="Optional OS sandbox wrapper (`srt`, `bwrap`, `seatbelt`, `landlock`, `job`, `aetheris-gate`, `auto`) emitted via updatedInput on allowed Bash calls",
     )
+    parser.add_argument("--idle-timeout", type=float, default=0.0, help="Auto-shutdown after N idle seconds (0 = unlimited)")
+    parser.add_argument("--uds", action="store_true", help="Bind Unix domain socket (<state_dir>/hook_daemon.sock) on POSIX hosts")
     parser.add_argument("--context-guard", action="store_true", help="Enable context-hygiene gating passthrough")
     parser.add_argument(
         "--no-session-state",
@@ -730,7 +860,15 @@ def main(argv: Optional[list] = None) -> int:
     if args.http:
         port_val = args.port if args.port else 8765
         return serve_http(port=port_val, state_path=state_path, flags=flags, max_requests=args.max_requests)
-    return serve(port=args.port, state_path=state_path, flags=flags, max_requests=args.max_requests)
+    sock_path = ((state_path.parent if state_path else get_daemon_state_path().parent) / "hook_daemon.sock") if args.uds else None
+    return serve(
+        port=args.port,
+        state_path=state_path,
+        flags=flags,
+        max_requests=args.max_requests,
+        idle_timeout=float(args.idle_timeout or 0.0),
+        socket_path=sock_path,
+    )
 
 
 if __name__ == "__main__":

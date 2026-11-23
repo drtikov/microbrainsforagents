@@ -616,6 +616,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--approve-rule", type=str, default="", help="Approve a staged pending rule by ID")
     parser.add_argument("--approver", type=str, default="operator", help="Approver identity recorded for --approve-rule")
     parser.add_argument("--policy-out", type=str, default="", help="Optional JSON policy file to write approved custom rule into")
+    parser.add_argument("--ui", action="store_true", help="Launch local interactive Audit Web Dashboard on loopback HTTP")
+    parser.add_argument("--port", type=int, default=8767, help="Port for --ui dashboard server (default: 8767)")
+    parser.add_argument("--export-otel", type=str, default="", help="Export journal entries as OpenTelemetry OTLP GenAI JSON (file path or '-' for stdout)")
+    parser.add_argument("--push-otel", type=str, default="", help="Push OTLP GenAI spans to HTTP collector URL (or 'env' for OTEL_EXPORTER_OTLP_ENDPOINT)")
 
     args = parser.parse_args(argv)
     # Windows consoles default to cp1252 and crash on box-drawing/bullet characters
@@ -625,6 +629,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+
+    if args.ui:
+        from .core.audit_ui import serve_audit_ui
+
+        return serve_audit_ui(
+            port=int(args.port),
+            journal_path=args.journal_path or None,
+            economics_path=args.economics_path or None,
+            policy_out_path=args.policy_out or None,
+        )
+
+    if args.export_otel:
+        from .core.otel_exporter import build_otlp_trace_payload, export_otlp_file
+
+        entries = get_journal_entries(journal_path=args.journal_path or None, limit=None)
+        if args.export_otel == "-":
+            print(json.dumps(build_otlp_trace_payload(entries), indent=2, ensure_ascii=False))
+            return 0
+        rep = export_otlp_file(entries, args.export_otel)
+        if args.json:
+            print(json.dumps(rep, ensure_ascii=False))
+        else:
+            print(f"Exported {rep['span_count']} OTel span(s) -> {rep['path']}")
+        return 0
+
+    if args.push_otel:
+        from .core.otel_exporter import push_otlp_http
+
+        entries = get_journal_entries(journal_path=args.journal_path or None, limit=None)
+        ep = None if args.push_otel.strip().lower() == "env" else args.push_otel.strip()
+        res = push_otlp_http(entries, endpoint=ep)
+        print(json.dumps(res, ensure_ascii=False))
+        return 0 if res.get("ok") else 1
 
     if args.eval_policy:
         from .core.layered_decision_engine import PolicyConfig

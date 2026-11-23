@@ -328,6 +328,14 @@ class PolicyConfig:
             raise FileNotFoundError(f"Policy file not found: {p}")
         raw = p.read_text(encoding="utf-8")
         suffix = p.suffix.lower()
+        if suffix == ".cedar":
+            from .policy_as_code import cedar_to_policy_config
+
+            return cedar_to_policy_config(raw)
+        if suffix == ".rego":
+            from .policy_as_code import rego_to_policy_config
+
+            return rego_to_policy_config(raw)
         if suffix == ".toml":
             try:
                 import tomllib  # Python 3.11+
@@ -1373,7 +1381,7 @@ _DEV_ESCALATE_ONLY_AST_FINDINGS: Set[str] = {
 }
 
 _INLINE_SUPPRESS_RE = re.compile(
-    r"#\s*aetheris:\s*allow\s+([A-Za-z0-9_.:-]+)\s+--\s+(.{3,}?)\s*$"
+    r"(?:#|//|--)\s*aetheris:\s*allow\s+([A-Za-z0-9_.:-]+)\s+--\s+(.{3,}?)\s*$"
 )
 _SUPPRESSIBLE_FINDING_PREFIXES: Tuple[str, ...] = (
     "subprocess_call:",
@@ -1897,9 +1905,12 @@ def analyze_code_diff(
             patched_json, edit_err = _apply_edit_ops_to_source(resolved_source, edit_ops)
             if patched_json is not None:
                 json_target_text = patched_json
+        from .deferred_exec_guard import analyze_deferred_execution
+
+        deferred_json = analyze_deferred_execution(path_str, json_target_text, policy=policy)
         if edit_err is not None:
             json_ok = False
-            findings = [edit_err] + secret_findings
+            findings = [edit_err] + secret_findings + deferred_json
         else:
             try:
                 json.loads(json_target_text)
@@ -1910,12 +1921,13 @@ def analyze_code_diff(
                     unreconstructed_hunk
                     and (('"' in dedented and ":" in dedented) or dedented.strip().startswith(("{", "[")))
                 )
-            findings = ([] if json_ok else ["malformed_json_hunk"]) + secret_findings
+            findings = ([] if json_ok else ["malformed_json_hunk"]) + secret_findings + deferred_json
         dedup_json_findings = list(dict.fromkeys(findings))
+        sec_clean_json = (len(secret_findings) == 0 and len(deferred_json) == 0)
         return {
             "language": "json",
             "syntax_valid": json_ok,
-            "security_clean": len(secret_findings) == 0,
+            "security_clean": sec_clean_json,
             "findings": dedup_json_findings,
             "finding_severities": {
                 f: ("medium" if f in _DEV_ESCALATE_ONLY_AST_FINDINGS else "critical")
@@ -1926,7 +1938,7 @@ def analyze_code_diff(
             "line_count": line_count,
             "ast_nodes": [],
             "cyclomatic_complexity": 0,
-            "is_static_data_or_doc": bool(json_ok and len(secret_findings) == 0),
+            "is_static_data_or_doc": bool(json_ok and sec_clean_json),
             "context_ast_parsed": bool(resolved_source is not None and edit_ops),
             "patched_file_ast_verified": bool(resolved_source is not None and edit_ops and edit_err is None),
         }
@@ -1934,32 +1946,44 @@ def analyze_code_diff(
     fname_lower = Path(path_str).name.lower() if path_str else ""
     is_shell_shebang = (not ext) and dedented.lstrip().startswith(("#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env bash", "#!/usr/bin/env zsh"))
     if (
-        ext in {".sh", ".bash", ".zsh", ".ksh", ".ps1"}
+        ext in {".sh", ".bash", ".zsh", ".ksh", ".ps1", ".dockerfile"}
         or is_shell_shebang
         or fname_lower in {"makefile", "dockerfile", "gnumakefile", "justfile"}
     ):
+        from .deferred_exec_guard import analyze_deferred_execution
+        from .multilang_ast import analyze_multilang_code
+
         sh_diff_findings: List[str] = list(secret_findings)
-        for ln in dedented.splitlines():
-            stripped = ln.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if fname_lower in {"makefile", "gnumakefile", "justfile"}:
-                if re.match(r"^[A-Za-z0-9_.\-/]+:\s*(?:[^=]|$)", stripped) and ";" not in stripped:
+        backend_name = "shell_parser"
+        if fname_lower == "dockerfile" or ext == ".dockerfile":
+            df_res = analyze_multilang_code(
+                ext,
+                fname_lower,
+                dedented,
+                policy=policy,
+                allow_suppression=allow_suppression,
+            )
+            sh_diff_findings.extend(df_res["findings"])
+            backend_name = df_res["ast_parser_backend"]
+            lang_name = "dockerfile"
+        else:
+            for ln in dedented.splitlines():
+                stripped = ln.strip()
+                if not stripped or stripped.startswith("#"):
                     continue
-                stripped = stripped.lstrip("@-+").strip()
-                if not stripped:
-                    continue
-            elif fname_lower == "dockerfile":
-                if stripped.upper().startswith("RUN "):
-                    stripped = stripped[4:].strip()
-                else:
-                    continue
-            sh_res = analyze_shell_command(stripped, policy=policy)
-            if not sh_res.get("is_safe", True):
-                for f_item in sh_res.get("findings", []):
-                    sh_diff_findings.append(f"shell_script_unsafe_cmd:{f_item}")
+                if fname_lower in {"makefile", "gnumakefile", "justfile"}:
+                    if re.match(r"^[A-Za-z0-9_.\-/]+:\s*(?:[^=]|$)", stripped) and ";" not in stripped:
+                        continue
+                    stripped = stripped.lstrip("@-+").strip()
+                    if not stripped:
+                        continue
+                sh_res = analyze_shell_command(stripped, policy=policy)
+                if not sh_res.get("is_safe", True):
+                    for f_item in sh_res.get("findings", []):
+                        sh_diff_findings.append(f"shell_script_unsafe_cmd:{f_item}")
+            sh_diff_findings.extend(analyze_deferred_execution(path_str, dedented, policy=policy))
+            lang_name = "shell" if (ext in {".sh", ".bash", ".zsh", ".ksh"} or is_shell_shebang) else (ext.lstrip(".") or fname_lower)
         sh_diff_findings = list(dict.fromkeys(sh_diff_findings))
-        lang_name = "shell" if (ext in {".sh", ".bash", ".zsh", ".ksh"} or is_shell_shebang) else (ext.lstrip(".") or fname_lower)
         return {
             "language": lang_name,
             "syntax_valid": True,
@@ -1976,47 +2000,47 @@ def analyze_code_diff(
             "cyclomatic_complexity": 0,
             "is_static_data_or_doc": False,
             "context_ast_parsed": False,
-            "ast_parser_backend": "shell_parser",
+            "ast_parser_backend": backend_name,
             "patched_file_ast_verified": False,
         }
 
     if (
         ext in {
-            ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".md", ".yaml", ".yml", ".toml", ".txt",
-            ".c", ".cpp", ".h", ".rs", ".go", ".sql", ".rb", ".java", ".php", ".ini", ".cfg",
-            ".xml", ".svg", ".lock",
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+            ".css", ".html", ".md", ".yaml", ".yml", ".toml", ".txt",
+            ".c", ".cpp", ".h", ".rs", ".go", ".sql", ".rb", ".java", ".php",
+            ".tf", ".tfvars", ".hcl", ".pth", ".ini", ".cfg", ".xml", ".svg", ".lock",
         }
         or fname_lower == "procfile"
     ):
-        non_py_findings: List[str] = list(secret_findings)
-        for ln in dedented.splitlines():
-            stripped = ln.strip()
-            if stripped.startswith(("//", "#", "/*", "*")):
-                continue
-            # Credentials split across adjacent literals: 'sk-proj-' + 'abc...'
-            collapsed = _LITERAL_CONCAT_RE.sub("", stripped)
-            if collapsed != stripped and any(p.search(collapsed) for p in _SECRET_TOKEN_REGEXES):
-                non_py_findings.append("obfuscated_secret_concatenation")
-            if ext in {".js", ".ts", ".jsx", ".tsx"}:
-                if re.search(r"\beval\s*\(", stripped) or re.search(r"""\[\s*['"]ev['"]\s*\+\s*['"]al['"]\s*\]""", stripped):
-                    non_py_findings.append("js_eval_call")
-                if re.search(r"\bnew\s+Function\s*\(|\bchild_process\b|\bexecSync\s*\(|\bspawnSync\s*\(", stripped):
-                    non_py_findings.append("js_dangerous_sink")
-                # Dynamic module loading (require(x) / import(x)) mirrors Python's dynamic_import veto
-                for m_req in _JS_REQUIRE_CALL_RE.finditer(stripped):
-                    req_arg = m_req.group(1).strip()
-                    if req_arg and not _JS_LITERAL_ARG_RE.fullmatch(req_arg):
-                        non_py_findings.append("js_dynamic_require")
-                        break
-            if ext in {".yaml", ".yml"}:
-                if re.search(r"!!python/(?:object|apply|module|name)\b", stripped):
-                    non_py_findings.append("yaml_unsafe_deserialization_tag")
+        from .deferred_exec_guard import analyze_deferred_execution
+        from .multilang_ast import analyze_multilang_code
 
-        # Optional real tree-sitter parse only when both tree_sitter and grammar package succeed
-        ts_parsed, ts_syntax_ok = _parse_with_tree_sitter(ext, dedented)
+        ml_res = analyze_multilang_code(
+            ext,
+            fname_lower,
+            dedented,
+            policy=policy,
+            allow_suppression=allow_suppression,
+        )
+        suppressed_findings.extend(ml_res.get("suppressed_findings", []))
+        deferred_non_py = analyze_deferred_execution(path_str, dedented, policy=policy)
+        non_py_findings: List[str] = list(secret_findings) + list(ml_res["findings"]) + list(deferred_non_py)
+
+        # Fallback literal-concat check for generic/markup/other extensions not handled specifically by multilang_ast
+        if ext not in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".rs", ".sql", ".tf", ".tfvars", ".hcl", ".yaml", ".yml"}:
+            for ln in dedented.splitlines():
+                stripped = ln.strip()
+                if stripped.startswith(("//", "#", "/*", "*")):
+                    continue
+                collapsed = _LITERAL_CONCAT_RE.sub("", stripped)
+                if collapsed != stripped and any(p.search(collapsed) for p in _SECRET_TOKEN_REGEXES):
+                    non_py_findings.append("obfuscated_secret_concatenation")
 
         non_py_findings = list(dict.fromkeys(non_py_findings))
         is_doc_or_cfg = ext in {".md", ".txt", ".yaml", ".yml", ".toml", ".css", ".html"} and len(non_py_findings) == 0
+        ts_parsed = bool(ml_res.get("tree_sitter_parsed", False))
+        ts_syntax_ok = ml_res.get("syntax_valid", True)
         syntax_valid = bool(ts_syntax_ok) if (ts_parsed and ts_syntax_ok is not None and not has_unified) else True
         return {
             "language": ext.lstrip(".") or "text",
@@ -2033,8 +2057,8 @@ def analyze_code_diff(
             "ast_nodes": [],
             "cyclomatic_complexity": 0,
             "is_static_data_or_doc": is_doc_or_cfg,
-            "context_ast_parsed": bool(ts_parsed),
-            "ast_parser_backend": "tree_sitter" if ts_parsed else "regex_heuristic",
+            "context_ast_parsed": ts_parsed,
+            "ast_parser_backend": ml_res.get("ast_parser_backend", "regex_heuristic"),
             "patched_file_ast_verified": False,
         }
 
@@ -2048,6 +2072,11 @@ def analyze_code_diff(
         if orig_tree is not None:
             seed_visitor = _SecurityASTVisitor(policy=policy)
             seed_visitor.visit(orig_tree)
+            if seed_visitor.has_network_sink and (
+                seed_visitor.has_env_secret_read
+                or any("ast_protected_file_access" in f for f in seed_visitor.findings)
+            ):
+                seed_visitor.findings.append("ast_secret_exfil_pattern")
             context_ast_parsed = True
 
     patched_source: Optional[str] = None
@@ -2238,6 +2267,13 @@ def analyze_code_diff(
             structural_findings.extend(patched_visitor.structural_findings)
     elif tree_supp:
         suppressed_findings.extend(tree_supp)
+
+    if fname_lower in {"conftest.py", "sitecustomize.py", "usercustomize.py"}:
+        from .deferred_exec_guard import analyze_deferred_execution
+
+        hunk_findings.extend(
+            analyze_deferred_execution(path_str, patched_source if patched_source is not None else dedented, policy=policy)
+        )
 
     all_findings = list(dict.fromkeys(hunk_findings + secret_findings))
     finding_severities = {

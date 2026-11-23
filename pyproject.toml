@@ -55,6 +55,11 @@ dev = [
 ast = [
     "tree-sitter>=0.23.0",
     "tree-sitter-bash>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+    "tree-sitter-yaml>=0.6.0",
 ]
 guard-ml = [
     "onnxruntime>=1.16.0",
@@ -63,8 +68,13 @@ guard-ml = [
 mcp = [
     "mcp>=1.0.0,<2.0.0",
 ]
+lab = [
+    "numpy>=1.22.0",
+]
+otel = []
 
 [project.scripts]
+aetheris = "aetheris_microbrains.cli:main"
 aetheris-hook = "aetheris_microbrains.hook:main"
 aetheris-doctor = "aetheris_microbrains.doctor:main"
 aetheris-audit = "aetheris_microbrains.audit:main"
@@ -72,6 +82,7 @@ aetheris-daemon = "aetheris_microbrains.hook_daemon:main"
 aetheris-verify = "aetheris_microbrains.verify:main"
 aetheris-mcp = "aetheris_microbrains.mcp_server:main"
 aetheris-mcp-proxy = "aetheris_microbrains.mcp_proxy:main"
+aetheris-pr-gate = "aetheris_microbrains.pr_gate:main"
 aetheris-install-antigravity = "aetheris_microbrains.install_antigravity:main"
 
 [project.urls]

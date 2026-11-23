@@ -468,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--strict-ast", action=argparse.BooleanOptionalAction, default=None, help="Enable strict AST import/dynamic-call allowlist (negate with --no-strict-ast)")
     ap.add_argument("--shadow", action=argparse.BooleanOptionalAction, default=None, help="Observe-only: log decisions, never block (negate with --no-shadow)")
-    ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=None, help="Emit permissionDecision='allow' on safe verdicts (negate with --no-auto-allow)")
+    ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=True, help="Emit permissionDecision='allow' on safe verdicts (default on; negate with --no-auto-allow)")
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")

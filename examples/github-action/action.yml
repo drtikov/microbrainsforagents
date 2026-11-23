@@ -1,0 +1,47 @@
+name: "Aetheris Microbrains PR Security Gate"
+description: "Deterministic pre-merge AST, secret, and supply-chain gate for AI-authored PRs with SARIF 2.1.0 output."
+
+inputs:
+  base-ref:
+    description: "Git base ref or SHA for PR diff comparison"
+    required: false
+    default: "origin/main"
+  head-ref:
+    description: "Git head ref or SHA"
+    required: false
+    default: "HEAD"
+  profile:
+    description: "Policy profile (`strict` or `dev`)"
+    required: false
+    default: "strict"
+  policy:
+    description: "Optional path to PolicyConfig (.json/.toml/.yaml/.cedar/.rego)"
+    required: false
+    default: ""
+  fail-on:
+    description: "Failure threshold (`any` or `deny`)"
+    required: false
+    default: "any"
+  sarif-file:
+    description: "Output path for SARIF 2.1.0 report"
+    required: false
+    default: "aetheris-pr-gate.sarif"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run Aetheris Microbrains PR Gate
+      shell: bash
+      env:
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        INPUT_HEAD_REF: ${{ inputs.head-ref }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_POLICY: ${{ inputs.policy }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+      run: |
+        ARGS=(--base "$INPUT_BASE_REF" --head "$INPUT_HEAD_REF" --profile "$INPUT_PROFILE" --fail-on "$INPUT_FAIL_ON" --sarif-out "$INPUT_SARIF_FILE" --format markdown)
+        if [ -n "$INPUT_POLICY" ]; then
+          ARGS+=(--policy "$INPUT_POLICY")
+        fi
+        python -m aetheris_microbrains.pr_gate "${ARGS[@]}"
