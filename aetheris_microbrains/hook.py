@@ -505,6 +505,7 @@ def evaluate_hook_payload(
     hygiene_ledger_path: Optional[str] = None,
     approve_once: bool = False,
     approvals_path: Optional[str] = None,
+    auto_approve_escalations: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
@@ -647,8 +648,24 @@ def evaluate_hook_payload(
 
     approved_via_approve_once = False
     original_reason_code: Optional[str] = None
+    use_auto_approve_escalations = bool(
+        auto_approve_escalations or os.getenv("AETHERIS_AUTO_APPROVE_ESCALATIONS") == "1"
+    )
     use_approve_once = bool(approve_once or os.getenv("AETHERIS_APPROVE_ONCE") == "1")
     if (
+        dec == "escalate"
+        and use_auto_approve_escalations
+        and not shadow_mode
+        and not codex_escalate_deny
+        and verdict.get("decision_kind") != "routing_recommendation"
+    ):
+        rc_curr = str(verdict.get("reason_code") or "")
+        if _is_approve_once_eligible(rc_curr):
+            dec = "allow"
+            verdict["decision"] = "allow"
+            verdict["reason_code"] = "auto_approve_escalations"
+            verdict["label"] = f"Auto-approved escalation: {rc_curr}"
+    elif (
         dec == "escalate"
         and use_approve_once
         and not shadow_mode
@@ -839,6 +856,7 @@ def evaluate_post_tool_use_payload(
     hygiene_ledger_path: Optional[str] = None,
     approve_once: bool = False,
     approvals_path: Optional[str] = None,
+    auto_approve_escalations: bool = False,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
     scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
@@ -1337,6 +1355,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             help="Remember eligible escalated actions after the user approves them once (verified via PostToolUse)",
         )
         parser.add_argument(
+            "--auto-approve-escalations",
+            action="store_true",
+            help="Automatically approve eligible escalated actions without prompting (maintains hard deny blocks)",
+        )
+        parser.add_argument(
             "--approvals-path",
             default=str(os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None,
             help="Override path for approved_escalations.json (or set AETHERIS_APPROVALS_PATH)",
@@ -1349,6 +1372,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         semantic_guard = bool(args.semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
         context_guard = bool(args.context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")
         approve_once = bool(args.approve_once or os.getenv("AETHERIS_APPROVE_ONCE") == "1")
+        auto_approve_escalations = bool(
+            args.auto_approve_escalations or os.getenv("AETHERIS_AUTO_APPROVE_ESCALATIONS") == "1"
+        )
         approvals_path = str(args.approvals_path or os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None
         sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
@@ -1476,6 +1502,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1"
             and not os.getenv("AETHERIS_STATE_DIR")
             and not approve_once
+            and not auto_approve_escalations
             and not approvals_path
         ):
             try:
@@ -1635,6 +1662,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 context_guard=context_guard,
                 approve_once=approve_once,
                 approvals_path=approvals_path,
+                auto_approve_escalations=auto_approve_escalations,
             )
         if shadow_mode:
             if result.get("journal_written") is False:

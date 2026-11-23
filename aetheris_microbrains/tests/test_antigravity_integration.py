@@ -411,3 +411,46 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
     assert "--approve-once" in hj_ao[PLUGIN_NAME]["PreToolUse"][0]["hooks"][0]["command"]
     assert "--approve-once" in hj_ao[PLUGIN_NAME]["PostToolUse"][0]["hooks"][0]["command"]
     assert self_test(plugin_dir=inst_dir) == 0
+
+
+def test_antigravity_auto_approve_escalations(tmp_path):
+    py_cmd = {
+        "toolCall": {"id": "aae_1", "name": "run_command", "args": {"CommandLine": "python -c 'print(1)'"}}
+    }
+    # Without auto_approve_escalations: returns force_ask
+    r_normal = evaluate_hook_payload(py_cmd, host="antigravity", profile="dev", log_decisions=False)
+    assert r_normal["decision"] == "escalate"
+    assert r_normal["hookSpecificOutput"]["decision"] == "force_ask"
+
+    # With auto_approve_escalations: returns allow directly without force_ask
+    r_auto = evaluate_hook_payload(
+        py_cmd,
+        host="antigravity",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_auto["decision"] == "allow"
+    assert r_auto["hookSpecificOutput"]["decision"] == "allow"
+    assert r_auto["reason_code"] == "auto_approve_escalations"
+
+    # Hard deny is STILL blocked with deny even when auto_approve_escalations=True
+    rm_bad = {"toolCall": {"id": "aae_bad", "name": "run_command", "args": {"CommandLine": "rm -rf /"}}}
+    r_bad = evaluate_hook_payload(
+        rm_bad,
+        host="antigravity",
+        profile="dev",
+        auto_approve_escalations=True,
+        log_decisions=False,
+    )
+    assert r_bad["decision"] == "deny"
+    assert r_bad["hookSpecificOutput"]["decision"] == "deny"
+
+    # Installer writes --auto-approve-escalations and --auto-allow
+    inst_dir2 = tmp_path / "inst2" / PLUGIN_NAME
+    assert install(profile="dev", auto_approve_escalations=True, plugin_dir=inst_dir2) == 0
+    hj_aae = json.loads((inst_dir2 / "hooks.json").read_text(encoding="utf-8"))
+    cmd_str = hj_aae[PLUGIN_NAME]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "--auto-approve-escalations" in cmd_str
+    assert "--auto-allow" in cmd_str
+    assert self_test(plugin_dir=inst_dir2) == 0
