@@ -45,6 +45,9 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [Setup: Automatic Gate + Optional MCP](#setup-automatic-gate--optional-mcp)
   - [How Escalations Behave in Codex](#how-escalations-behave-in-codex)
 - [🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)](#-google-antigravity-integration-native-plugin-hooks--mcp--skill--rules)
+  - [📊 Antigravity Benchmarks (Tokens, Safety & Speed)](#-antigravity-benchmarks-tokens-safety--speed)
+  - [One-Command Setup for Antigravity](#one-command-setup-for-antigravity)
+  - [Implementation & Test Suite](#implementation--test-suite)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -264,6 +267,21 @@ Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecis
 
 **Google Antigravity** (IDE, CLI, and 2.0) integrates via a native `--host antigravity` hook contract and a one-command plugin installer that bundles lifecycle hooks, on-demand MCP tools, always-on rules, and a troubleshooting skill into `~/.gemini/config/plugins/aetheris-microbrains/` (or `<workspace>/.agents/plugins/aetheris-microbrains/`).
 
+### 📊 Antigravity Benchmarks (Tokens, Safety & Speed)
+
+> **Windows / Python 3.10.6 (2026-11-23):** Live Antigravity host measurements and repo benchmarks; 26-step A/B token/cost savings (`~37,055` input tokens / `~$0.1112`) are modeled estimates from `test_skill_gain_ab.py` rather than live billing telemetry.
+
+| Category | Metric / Benchmark | Without Microbrains | With Microbrains | Net Effectiveness |
+|---|---|---:|---:|---:|
+| **Tokens** | Tool-schema tokens (cache-adjusted, 120 tasks) | 0.0% saved | **56.7% saved** (`0/120` dropped) | **−56.7% schema tokens** |
+| **Tokens** | SWE-bench Lite schema tokens (300 issues) | 0.0% saved | **36.7% saved** (`99.0%` core recall) | **−36.7% schema tokens** |
+| **Tokens** | Error-feedback tokens (26-step A/B session) | 146 tok (`8` wasted turns) | **37 tok** (`0` wasted turns) | **−74.7% error tokens** *(~37,055 modeled tok / ~$0.1112 saved)* |
+| **Safety** | Security attacks caught (22 vectors) | 0 / 22 (0.0%) | **22 / 22 (100.0%)**, `0/12` benign FP | **+100.0% catch, 0.0% FP** |
+| **Safety** | Coding-session hazards blocked (12 seeded) | 0 / 12 (0.0%) | **12 / 12 (100.0%)**, `0/14` benign FP | **+100.0% blocked, 0.0% FP** |
+| **Safety** | SWE-bench Lite AST syntax FP (300 real diffs) | — | **0 / 300 (0.0%)**, `60/60` mutations caught | **0.0% syntax FP** |
+| **Speed** | Antigravity in-process gate (120 calls) | 0 ms | **0.31 ms p50 / 0.59 ms p95** | **< 0.01% of LLM turn** |
+| **Speed** | Antigravity CLI hook cold-start (Windows, 10 runs) | 0 ms | **512.5 ms** (`Pre`) / **519.8 ms** (`Post`) p50 | **~1.03 s combined Python startup** *(mitigated via `aetheris-daemon` / MCP)* |
+
 ### One-Command Setup for Antigravity
 
 1. **Install & pilot in `--shadow` mode first** *(observe-only: logs every decision without blocking)*:
@@ -288,6 +306,13 @@ Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecis
   - **Escalated (`escalate`):** Emits `{"decision": "force_ask", "reason": "..."}` so Antigravity always confirms ambiguous operations regardless of cached approvals.
   - **Safe (`allow`):** Defaults to `{"decision": "ask"}` on stdout so Antigravity's own Always-Allow permissions remain authoritative (`--auto-allow` emits `{"decision": "allow"}`; `--sandbox-wrap srt|bwrap|seatbelt|auto` attaches `overwrite.CommandLine`).
   - **`PostToolUse` auditing:** Scans outputs for secrets and indirect prompt injection, updates session taint and audit logs, and returns `{}`.
+
+### Implementation & Test Suite
+
+- **[`aetheris_microbrains/hook.py`](aetheris_microbrains/hook.py):** `--host antigravity` (`antigravity_pretooluse_v1`) adapter normalizing camelCase `toolCall`, PascalCase arguments (`CommandLine`, `Path`, `TargetFile`, `Target`/`Replacement`, `TargetContent`/`ReplacementContent`, `ReplacementChunks`, `Content`, `CodeContent`), and `conversationId` session scoping with top-level JSON exit `0` responses.
+- **[`aetheris_microbrains/install_antigravity.py`](aetheris_microbrains/install_antigravity.py):** One-command installer (`aetheris-install-antigravity` in `pyproject.toml`) writing `plugin.json`, top-level named `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, and `skills/aetheris-microbrains/SKILL.md` globally (`~/.gemini/config/plugins/aetheris-microbrains/`) or per-workspace (`--workspace`).
+- **[`.antigravity-plugin/`](.antigravity-plugin/):** Ready-to-use checked-in plugin bundle (`plugin.json`, `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, `skills/aetheris-microbrains/SKILL.md`).
+- **[`aetheris_microbrains/tests/test_antigravity_integration.py`](aetheris_microbrains/tests/test_antigravity_integration.py):** End-to-end contract, CLI mode, installer lifecycle, and bundle schema tests (**`554 passed, 2 skipped`** across the full test suite, plus `ANTIGRAVITY SELF-TEST PASSED` on `~/.gemini/config/plugins/aetheris-microbrains`).
 
 ---
 
