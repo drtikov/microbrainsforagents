@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from aetheris_microbrains.hook import evaluate_hook_payload, evaluate_post_tool_use_payload
 
 
@@ -49,8 +51,11 @@ def test_hook_hermes_host_contract():
 
 def test_mcp_server_stdio_handshake_and_tools():
     """Real MCP stdio handshake (`initialize`, `list_tools`, `call_tool`) works end-to-end."""
-    from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
+    try:
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+    except ModuleNotFoundError:
+        pytest.skip("mcp package is not installed (optional extra `.[mcp]`)")
 
     repo_root = str(Path(__file__).resolve().parents[2])
     params = StdioServerParameters(
@@ -113,6 +118,7 @@ def test_mcp_server_stdio_handshake_and_tools():
 
 def test_mcp_server_check_flag(capsys):
     """`python -m aetheris_microbrains.mcp_server --check` verifies tools and probes."""
+    pytest.importorskip("mcp", reason="mcp package is not installed (optional extra `.[mcp]`)")
     from aetheris_microbrains.mcp_server import main as mcp_main
 
     rc = mcp_main(["--check"])
