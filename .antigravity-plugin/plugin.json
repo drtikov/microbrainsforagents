@@ -1,0 +1,16 @@
+{
+  "name": "aetheris-microbrains",
+  "displayName": "Aetheris Microbrains",
+  "version": "0.7.6",
+  "description": "Deterministic sub-2ms pre-flight AST linter, secret-egress gate, context-hygiene guard, and forensic audit journal for Google Antigravity.",
+  "author": {
+    "name": "Dmitry Tikov"
+  },
+  "homepage": "https://github.com/drtikov/microbrainsforagents",
+  "repository": "https://github.com/drtikov/microbrainsforagents",
+  "suggestedPrompts": [
+    "Audit recent Microbrains decisions with aetheris-audit --last and explain any blocks",
+    "Run Microbrains doctor and scan configured MCP tools for schema poisoning or rug pulls",
+    "Check a proposed shell command or Python edit through microbrain_preflight_check before running it"
+  ]
+}

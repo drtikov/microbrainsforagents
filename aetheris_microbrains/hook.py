@@ -89,12 +89,24 @@ def _load_decision_engine():
     return PolicyConfig, decide, is_protected_path
 
 
+def _extract_session_id(payload: Any) -> str:
+    """Extract host session/conversation identifier across Claude, Codex, Hermes, and Antigravity payloads."""
+    if not isinstance(payload, dict):
+        return ""
+    return str(
+        payload.get("session_id")
+        or payload.get("sessionId")
+        or payload.get("conversationId")
+        or ""
+    ).strip()
+
+
 def _scope_session_state_path(base_path: Optional[str], payload: Dict[str, Any]) -> Optional[str]:
-    """Scope SessionSecurityState file path by `session_id` when provided in hook payload."""
+    """Scope SessionSecurityState file path by `session_id` / `conversationId` when provided in hook payload."""
     explicit = str(base_path or "").strip()
     if not explicit:
         return None
-    sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+    sess_id = _extract_session_id(payload)
     if not sess_id:
         return explicit
     digest = hashlib.sha256(sess_id.encode("utf-8")).hexdigest()[:16]
@@ -134,28 +146,65 @@ _SHELL_CANONICAL_TOOLS = {"execute_shell", "run_command", "run_tests", "pytest_r
 _EDIT_WRITE_CANONICAL_TOOLS = {"write_file", "repo_write", "edit_file", "str_replace_editor", "apply_patch", "format_code"}
 
 
-def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize Claude Code / Codex / generic PreToolUse JSON into `decide()` input."""
+_PATH_KEYS = (
+    "file_path",
+    "notebook_path",
+    "path",
+    "Path",
+    "TargetFile",
+    "AbsolutePath",
+    "SearchPath",
+    "SearchDirectory",
+    "DirectoryPath",
+)
+_CMD_KEYS = ("command", "cmd", "CommandLine")
+
+
+def _extract_tool_and_input(payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """Extract raw tool name and normalized tool-input dict across host payload schemas."""
+    tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
         payload.get("tool_name")
         or payload.get("tool")
         or payload.get("name")
+        or (tool_call.get("name") if tool_call else "")
         or ""
     ).strip()
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        tool_input = payload.get("input") if isinstance(payload.get("input"), dict) else payload
+        if isinstance(payload.get("input"), dict):
+            tool_input = payload["input"]
+        elif tool_call and isinstance(tool_call.get("args"), dict):
+            tool_input = tool_call["args"]
+        else:
+            tool_input = payload
+    return tool_raw, tool_input
+
+
+def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Claude Code / Codex / Hermes / Antigravity / generic PreToolUse JSON into `decide()` input."""
+    tool_raw, tool_input = _extract_tool_and_input(payload)
 
     tool_lower = tool_raw.lower()
     if tool_lower in {"bash", "shell", "shell_command", "exec_command", "execute_shell", "run_command", "terminal"}:
         tool_name = "execute_shell"
-    elif tool_lower in {"edit", "str_replace_editor", "edit_file", "multiedit", "notebookedit", "patch", "apply_patch"}:
+    elif tool_lower in {
+        "edit",
+        "str_replace_editor",
+        "edit_file",
+        "multiedit",
+        "notebookedit",
+        "patch",
+        "apply_patch",
+        "replace_file_content",
+        "multi_replace_file_content",
+    }:
         tool_name = "edit_file"
-    elif tool_lower in {"write", "write_file", "repo_write", "fwrite"}:
+    elif tool_lower in {"write", "write_file", "repo_write", "fwrite", "write_to_file"}:
         tool_name = "write_file"
     elif tool_lower in {"read", "read_file", "repo_read", "view_file"}:
         tool_name = "read_file"
-    elif tool_lower in {"grep", "grep_search", "search_code"}:
+    elif tool_lower in {"grep", "grep_search", "search_code", "find_by_name"}:
         tool_name = "search_code"
     elif tool_lower in {"glob", "list_dir"}:
         tool_name = "list_dir"
@@ -166,16 +215,22 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized: Dict[str, Any] = {"tool": tool_name}
     if tool_raw and tool_raw.lower() != clean_name:
         normalized["raw_tool"] = tool_raw
-    if "file_path" in tool_input or "path" in tool_input or "notebook_path" in tool_input:
-        normalized["path"] = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
-    elif clean_name == "search_code" and tool_input.get("glob"):
-        normalized["path"] = tool_input.get("glob")
+    if any(k in tool_input for k in _PATH_KEYS):
+        normalized["path"] = next(
+            (tool_input[k] for k in _PATH_KEYS if tool_input.get(k)),
+            next((tool_input[k] for k in _PATH_KEYS if k in tool_input), None),
+        )
+    elif clean_name == "search_code" and (tool_input.get("glob") or tool_input.get("Pattern")):
+        normalized["path"] = tool_input.get("glob") or tool_input.get("Pattern")
     elif clean_name == "list_dir" and tool_input.get("pattern"):
         normalized["path"] = tool_input.get("pattern")
 
     # Only map shell command arguments to `cmd` when the tool itself is a known shell/exec tool
-    if clean_name in _SHELL_CANONICAL_TOOLS and ("command" in tool_input or "cmd" in tool_input):
-        normalized["cmd"] = tool_input.get("command") or tool_input.get("cmd")
+    if clean_name in _SHELL_CANONICAL_TOOLS and any(k in tool_input for k in _CMD_KEYS):
+        normalized["cmd"] = next(
+            (tool_input[k] for k in _CMD_KEYS if tool_input.get(k)),
+            next((tool_input[k] for k in _CMD_KEYS if k in tool_input), None),
+        )
 
     # Only extract diff/edit_ops for registered code/file modification tools
     if clean_name in _EDIT_WRITE_CANONICAL_TOOLS:
@@ -188,6 +243,14 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "new_string": str(item.get("new_string") or ""),
                         "replace_all": bool(item.get("replace_all", False)),
                     })
+        elif tool_lower == "multi_replace_file_content" and isinstance(tool_input.get("ReplacementChunks"), list):
+            for item in tool_input["ReplacementChunks"]:
+                if isinstance(item, dict) and "ReplacementContent" in item:
+                    edit_ops.append({
+                        "old_string": str(item.get("TargetContent") or ""),
+                        "new_string": str(item.get("ReplacementContent") or ""),
+                        "replace_all": bool(item.get("AllowMultiple", False)),
+                    })
         elif "old_string" in tool_input and "new_string" in tool_input:
             old_s = str(tool_input.get("old_string") or "")
             if old_s:
@@ -196,16 +259,49 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "new_string": str(tool_input.get("new_string") or ""),
                     "replace_all": bool(tool_input.get("replace_all", False)),
                 })
+        elif "Target" in tool_input and "Replacement" in tool_input:
+            old_s = str(tool_input.get("Target") or "")
+            if old_s:
+                edit_ops.append({
+                    "old_string": old_s,
+                    "new_string": str(tool_input.get("Replacement") or ""),
+                    "replace_all": True,
+                })
+        elif "TargetContent" in tool_input and "ReplacementContent" in tool_input:
+            old_s = str(tool_input.get("TargetContent") or "")
+            if old_s:
+                edit_ops.append({
+                    "old_string": old_s,
+                    "new_string": str(tool_input.get("ReplacementContent") or ""),
+                    "replace_all": bool(tool_input.get("AllowMultiple", False)),
+                })
         if edit_ops:
             normalized["edit_ops"] = edit_ops
 
         diff = tool_input.get("diff") or tool_input.get("payload_diff") or tool_input.get("patch")
-        if diff is None and edit_ops and tool_lower == "multiedit":
+        if diff is None and edit_ops and tool_lower in {"multiedit", "multi_replace_file_content"}:
             diff = "\n".join(op["new_string"] for op in edit_ops)
         elif diff is None and "new_string" in tool_input:
             diff = str(tool_input.get("new_string") or "")
-        elif diff is None and "content" in tool_input and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}:
-            diff = str(tool_input.get("content") or "")
+        elif diff is None and "Replacement" in tool_input:
+            diff = str(tool_input.get("Replacement") or "")
+        elif diff is None and "ReplacementContent" in tool_input:
+            diff = str(tool_input.get("ReplacementContent") or "")
+        elif (
+            diff is None
+            and ("content" in tool_input or "Content" in tool_input or "CodeContent" in tool_input)
+            and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}
+        ):
+            raw_c = (
+                tool_input.get("content")
+                if tool_input.get("content") is not None
+                else (
+                    tool_input.get("Content")
+                    if tool_input.get("Content") is not None
+                    else tool_input.get("CodeContent")
+                )
+            )
+            diff = str(raw_c or "")
         elif diff is None and tool_lower == "notebookedit" and "new_source" in tool_input:
             # Only Python-lint code cells; markdown/raw cells are not executable, and
             # linting their prose as Python would false-positive on syntax errors.
@@ -291,7 +387,7 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
@@ -335,7 +431,7 @@ def evaluate_hook_payload(
 
         ctx["vitality_ledger"] = RuleVitalityLedger()
     verdict = decide(norm, context=ctx or None, policy=policy)
-    raw_sid = str(payload.get("session_id") or payload.get("sessionId") or "").strip() if isinstance(payload, dict) else ""
+    raw_sid = _extract_session_id(payload)
     rc_str = str(verdict.get("reason_code") or "")
     if raw_sid and rc_str.startswith("layer0_custom_policy_rule:"):
         from .core.lifecycle_engine import LifecycleSessionStore
@@ -368,17 +464,10 @@ def evaluate_hook_payload(
         from .core.context_hygiene import ContextHygieneGate
         from .core.economics_ledger import record_savings_event
 
-        tool_raw = str(
-            payload.get("tool_name")
-            or payload.get("tool")
-            or payload.get("name")
-            or norm.get("tool")
-            or ""
-        ).strip()
-        raw_inp = payload.get("tool_input")
-        if not isinstance(raw_inp, dict):
-            raw_inp = payload.get("input") if isinstance(payload.get("input"), dict) else payload
-        sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        tool_raw, raw_inp = _extract_tool_and_input(payload)
+        if not tool_raw:
+            tool_raw = str(norm.get("tool") or "").strip()
+        sess_id = _extract_session_id(payload)
         hygiene_v = ContextHygieneGate().evaluate_pre_tool(
             tool_raw,
             raw_inp,
@@ -441,16 +530,47 @@ def evaluate_hook_payload(
         "claude": "claude_pretooluse_v1",
         "codex": "codex_pretooluse_no_ask_v1",
         "hermes": "hermes_shell_hook_v1",
+        "antigravity": "antigravity_pretooluse_v1",
         "generic": "generic_v1",
     }[resolved_host]
 
     perm: Optional[str]
     if shadow_mode:
-        # Strict passive shadow mode: never block or inject host allow/deny regardless of host
-        perm = None
-        exit_code = 0
-        host_action = "shadow_observe"
-        hook_specific = None
+        if resolved_host == "antigravity":
+            perm = "ask"
+            exit_code = 0
+            host_action = "shadow_observe"
+            hook_specific = {"decision": "ask"}
+        else:
+            # Strict passive shadow mode: never block or inject host allow/deny regardless of host
+            perm = None
+            exit_code = 0
+            host_action = "shadow_observe"
+            hook_specific = None
+    elif resolved_host == "antigravity":
+        if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
+            perm = "deny"
+            exit_code = 0
+            host_action = "deny"
+            hook_specific = {"decision": "deny", "reason": reason}
+        elif dec == "allow":
+            perm = "allow"
+            exit_code = 0
+            host_action = "allow"
+            hook_specific = {"decision": "allow", "reason": reason}
+            if norm.get("tool") == "execute_shell" and norm.get("cmd"):
+                wrapped_cmd = _build_sandbox_wrapped_command(
+                    str(norm["cmd"]),
+                    sandbox_mode=sandbox_wrap,
+                    project_dir=ctx.get("project_dir"),
+                )
+                if wrapped_cmd:
+                    hook_specific["overwrite"] = {"CommandLine": wrapped_cmd}
+        else:
+            perm = "force_ask"
+            exit_code = 0
+            host_action = "force_ask"
+            hook_specific = {"decision": "force_ask", "reason": reason}
     elif resolved_host == "hermes":
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
@@ -572,21 +692,37 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "generic"}:
         resolved_host = "claude"
 
+    tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
         payload.get("tool_name")
         or payload.get("tool")
         or payload.get("name")
+        or (tool_call.get("name") if tool_call else "")
         or ""
     ).strip()
-    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    tool_input = (
+        payload.get("tool_input")
+        if isinstance(payload.get("tool_input"), dict)
+        else (
+            tool_call.get("args")
+            if tool_call and isinstance(tool_call.get("args"), dict)
+            else {}
+        )
+    )
     target_path_str = str(
         tool_input.get("file_path")
         or tool_input.get("path")
+        or tool_input.get("Path")
+        or tool_input.get("TargetFile")
+        or tool_input.get("AbsolutePath")
         or payload.get("file_path")
         or payload.get("path")
+        or payload.get("Path")
+        or payload.get("TargetFile")
+        or payload.get("AbsolutePath")
         or ""
     ).strip()
     target_is_protected = bool(target_path_str and is_protected_path(target_path_str, policy))
@@ -603,6 +739,8 @@ def evaluate_post_tool_use_payload(
             raw_output = payload.get("stdout")
         elif "stderr" in payload:
             raw_output = payload.get("stderr")
+        elif payload.get("error"):
+            raw_output = payload.get("error")
 
     total_count = 0
     found_types: list[str] = []
@@ -699,15 +837,35 @@ def evaluate_post_tool_use_payload(
             injection_detected=injection_detected,
             is_protected_path=target_is_protected,
         )
-    sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip() if isinstance(payload, dict) else ""
+    sess_id = _extract_session_id(payload)
     if sess_id:
         tool_low = tool_raw.strip().lower()
-        if tool_low in {"edit", "edit_file", "write", "write_file", "multiedit", "notebookedit", "patch", "repo_write"} and target_path_str:
+        if tool_low in {
+            "edit",
+            "edit_file",
+            "write",
+            "write_file",
+            "multiedit",
+            "notebookedit",
+            "patch",
+            "repo_write",
+            "replace_file_content",
+            "multi_replace_file_content",
+            "write_to_file",
+        } and target_path_str:
             from .core.lifecycle_engine import LifecycleSessionStore
 
             LifecycleSessionStore(sess_id).record_edit(target_path_str)
         elif tool_low in {"bash", "shell", "execute_shell", "run_command", "terminal"}:
-            cmd_val = str(tool_input.get("command") or tool_input.get("cmd") or payload.get("command") or payload.get("cmd") or "")
+            cmd_val = str(
+                tool_input.get("command")
+                or tool_input.get("cmd")
+                or tool_input.get("CommandLine")
+                or payload.get("command")
+                or payload.get("cmd")
+                or payload.get("CommandLine")
+                or ""
+            )
             if cmd_val:
                 from .core.lifecycle_engine import LifecycleSessionStore, is_validation_command
 
@@ -726,7 +884,7 @@ def evaluate_post_tool_use_payload(
     if bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1"):
         from .core.context_hygiene import ContextHygieneGate
 
-        sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        sess_id = _extract_session_id(payload)
         cwd_dir = str(payload["cwd"]) if isinstance(payload, dict) and payload.get("cwd") else None
         ContextHygieneGate().notify_post_tool(
             tool_raw,
@@ -764,6 +922,12 @@ def evaluate_post_tool_use_payload(
     if shadow_mode:
         host_action = "shadow_observe"
         scrubbing_mode = "shadow_observe"
+        if resolved_host == "antigravity":
+            host_specific = {}
+    elif resolved_host == "antigravity":
+        host_specific = {}
+        host_action = "warn_logged" if any_alert else "clean_passthrough"
+        scrubbing_mode = "detect_and_log"
     elif resolved_host in {"claude", "codex"}:
         if any_alert:
             host_specific = {
@@ -884,10 +1048,24 @@ _LIFECYCLE_EVENTS = frozenset({
 })
 
 
+def _antigravity_cli_fallback_json(
+    event_kind: str,
+    *,
+    shadow_mode: bool = False,
+    err_msg: Optional[str] = None,
+) -> str:
+    """Build top-level JSON response for Antigravity on empty, shadow, or error CLI exits."""
+    if event_kind == "post-tool-use" or event_kind in _LIFECYCLE_EVENTS:
+        return "{}"
+    if shadow_mode or not err_msg:
+        return json.dumps({"decision": "ask"})
+    return json.dumps({"decision": "deny", "reason": err_msg}, ensure_ascii=False)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "hermes", "generic"}:
+    if host not in {"claude", "codex", "hermes", "antigravity", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
@@ -924,9 +1102,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "hermes", "generic"],
+            choices=["claude", "codex", "hermes", "antigravity", "generic"],
             default=host,
-            help="Host PreToolUse contract format (claude emits allow/ask/deny; codex omits unsupported 'ask'; hermes emits block/context)",
+            help="Host contract format (claude, codex, hermes, antigravity, generic)",
         )
         parser.add_argument(
             "--codex-escalate-deny",
@@ -992,10 +1170,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                     raw_payload="",
                 )
                 print("empty_hook_payload (shadow passthrough)", file=sys.stderr)
+                if host == "antigravity":
+                    print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
                 return 0
             if event_kind == "post-tool-use":
                 if host == "generic":
                     print(json.dumps({"decision": "allow", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
+                elif host == "antigravity":
+                    print("{}")
+                return 0
+            if host == "antigravity":
+                print(_antigravity_cli_fallback_json(event_kind))
                 return 0
             if host == "codex":
                 if codex_escalate_deny:
@@ -1041,6 +1226,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                         journal_path=journal_path,
                         raw_payload=raw,
                     )
+                    if host == "antigravity":
+                        print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
+                    return 0
+                if host == "antigravity":
+                    print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
                     return 0
                 if host == "generic":
                     print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
@@ -1064,6 +1254,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     journal_path=journal_path,
                     raw_payload=raw,
                 )
+                if host == "antigravity":
+                    print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
+                return 0
+            if host == "antigravity":
+                print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
                 return 0
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
@@ -1169,10 +1364,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if post_res.get("journal_written") is False:
                     j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
                     print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
+                if host == "antigravity":
+                    print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(post_res, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
+            if host == "antigravity":
+                hso = post_res.get("hookSpecificOutput")
+                print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
+                return 0
             if post_res.get("hookSpecificOutput") is not None:
                 if host == "hermes":
                     print(json.dumps(post_res["hookSpecificOutput"], ensure_ascii=False))
@@ -1195,11 +1396,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session_state_path=session_state_path,
                 )
             if shadow_mode:
+                if host == "antigravity":
+                    print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(lc_res, ensure_ascii=False))
                 return int(lc_res.get("exit_code", 0))
             hso = lc_res.get("hookSpecificOutput")
+            if host == "antigravity":
+                print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
+                return 0
             if hso is not None:
                 if host == "hermes" or (isinstance(hso, dict) and "hookEventName" not in hso):
                     print(json.dumps(hso, ensure_ascii=False))
@@ -1228,6 +1434,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             if result.get("journal_written") is False:
                 j_err = _redact_error_text(str(result.get("journal_error") or "unknown"))
                 print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
+            if host == "antigravity":
+                print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
         exit_code = int(result["exit_code"])
@@ -1257,6 +1465,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             return exit_code
 
         perm = result["permissionDecision"]
+        if host == "antigravity":
+            hso = result.get("hookSpecificOutput")
+            has_overwrite = isinstance(hso, dict) and "overwrite" in hso
+            if perm == "allow" and not auto_allow and not has_overwrite:
+                print(json.dumps({"decision": "ask"}))
+                return 0
+            print(json.dumps(hso if isinstance(hso, dict) else {"decision": "ask"}, ensure_ascii=False))
+            return 0
+
         if exit_code == 2:
             print(result["reason"], file=sys.stderr)
             if result["hookSpecificOutput"] is not None:
@@ -1288,6 +1505,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 journal_path=journal_path,
                 raw_payload=raw,
             )
+            if host == "antigravity":
+                print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
+            return 0
+        if host == "antigravity":
+            print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
             return 0
         if host == "generic":
             print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))

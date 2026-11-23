@@ -72,6 +72,7 @@ aetheris-daemon = "aetheris_microbrains.hook_daemon:main"
 aetheris-verify = "aetheris_microbrains.verify:main"
 aetheris-mcp = "aetheris_microbrains.mcp_server:main"
 aetheris-mcp-proxy = "aetheris_microbrains.mcp_proxy:main"
+aetheris-install-antigravity = "aetheris_microbrains.install_antigravity:main"
 
 [project.urls]
 Homepage = "https://github.com/drtikov/microbrainsforagents"

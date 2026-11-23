@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "aetheris-microbrains": {
+      "command": "python",
+      "args": [
+        "-m",
+        "aetheris_microbrains.mcp_server"
+      ]
+    }
+  }
+}

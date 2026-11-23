@@ -44,6 +44,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [📊 Measured Benchmarks with Codex](#-measured-benchmarks-with-codex)
   - [Setup: Automatic Gate + Optional MCP](#setup-automatic-gate--optional-mcp)
   - [How Escalations Behave in Codex](#how-escalations-behave-in-codex)
+- [🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)](#-google-antigravity-integration-native-plugin-hooks--mcp--skill--rules)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -259,6 +260,37 @@ Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecis
 
 ---
 
+## 🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)
+
+**Google Antigravity** (IDE, CLI, and 2.0) integrates via a native `--host antigravity` hook contract and a one-command plugin installer that bundles lifecycle hooks, on-demand MCP tools, always-on rules, and a troubleshooting skill into `~/.gemini/config/plugins/aetheris-microbrains/` (or `<workspace>/.agents/plugins/aetheris-microbrains/`).
+
+### One-Command Setup for Antigravity
+
+1. **Install & pilot in `--shadow` mode first** *(observe-only: logs every decision without blocking)*:
+   ```bash
+   pip install -e .
+   python -m aetheris_microbrains.install_antigravity --shadow --profile dev
+   ```
+2. **Switch to active enforcement & verify the contract:**
+   ```bash
+   python -m aetheris_microbrains.install_antigravity --profile dev
+   python -m aetheris_microbrains.install_antigravity --self-test
+   ```
+   *(Installed entrypoints also expose `aetheris-install-antigravity`. Pass `--workspace .` for project-local `.agents/plugins/aetheris-microbrains/`, `--no-mcp` to skip `mcp_config.json`, or `--shared` to write portable `python`. A checked-in template bundle lives in `.antigravity-plugin/`.)*
+
+### What the Native Plugin Bundles & Decision Mapping
+
+- **`hooks.json` (named-hook format):** Registers `PreToolUse` and `PostToolUse` under `"aetheris-microbrains"` covering `run_command`, `edit_file`, `write_file`, `replace_file_content`, `multi_replace_file_content`, `write_to_file`, `read_file`, `view_file`, `grep_search`, `find_by_name`, `list_dir`, and `mcp_.*` (normalizing Antigravity's camelCase `toolCall`, PascalCase args like `CommandLine`/`Path`/`Target`/`Content`, and `conversationId` scoping).
+- **`mcp_config.json`:** Exposes on-demand `aetheris-microbrains` MCP tools (`microbrain_preflight_check`, `microbrain_scrub_and_scan`, `microbrain_audit_explain`, `microbrain_scan_mcp_tools`, etc.).
+- **`rules/AGENTS.md` & `skills/aetheris-microbrains/SKILL.md`:** Plain-Markdown always-on guardrail context plus on-demand audit/doctor runbooks.
+- **Native Antigravity decision mapping (`PreToolUse` / `PostToolUse` exit `0` top-level JSON):**
+  - **Blocked (`deny`):** Emits `{"decision": "deny", "reason": "..."}` to stop unsafe commands, broken Python edits, or protected-path writes before execution.
+  - **Escalated (`escalate`):** Emits `{"decision": "force_ask", "reason": "..."}` so Antigravity always confirms ambiguous operations regardless of cached approvals.
+  - **Safe (`allow`):** Defaults to `{"decision": "ask"}` on stdout so Antigravity's own Always-Allow permissions remain authoritative (`--auto-allow` emits `{"decision": "allow"}`; `--sandbox-wrap srt|bwrap|seatbelt|auto` attaches `overwrite.CommandLine`).
+  - **`PostToolUse` auditing:** Scans outputs for secrets and indirect prompt injection, updates session taint and audit logs, and returns `{}`.
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -278,6 +310,7 @@ Microbrains works alongside any AI agent or framework:
 | Category | Agents & Frameworks | Integration Status | What Microbrains Does |
 | :--- | :--- | :--- | :--- |
 | **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook** (`python -m aetheris_microbrains.hook`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
+| **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Native Plugin + CLI** (`aetheris-install-antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
 | **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Adapter** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
 | **Personal & Desktop OS Assistants** | **OpenClaw**, **Hermes Agent**, **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Adapter** (`mb.narrow_tool_surface(...)`) | Prunes tool schemas per turn to cut token costs without starving agents of tools. |
