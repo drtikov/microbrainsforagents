@@ -30,15 +30,18 @@ def build_mcp_server(
     host: str = "127.0.0.1",
     port: int = 8080,
 ) -> Any:
-    """Construct and register tools on a FastMCP server instance (lazy mcp SDK import)."""
-    from mcp.server.fastmcp import FastMCP
-
-    server = FastMCP(
-        name,
-        host=host,
-        port=int(port),
-        streamable_http_path=streamable_http_path,
-    )
+    """Construct and register tools on an MCP server instance (supports FastMCP on mcp<2 and MCPServer on mcp>=2)."""
+    try:
+        from mcp.server.fastmcp import FastMCP
+        server = FastMCP(
+            name,
+            host=host,
+            port=int(port),
+            streamable_http_path=streamable_http_path,
+        )
+    except ModuleNotFoundError:
+        from mcp.server.mcpserver import MCPServer
+        server = MCPServer(name)
 
     @server.tool()
     def microbrain_health() -> str:
