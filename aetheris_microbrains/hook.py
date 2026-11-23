@@ -18,6 +18,7 @@ import os
 import shlex
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -26,10 +27,129 @@ from .core.runtime_paths import (
     append_jsonl_bounded,
     get_default_journal_path,
     get_default_session_state_path,
+    get_state_dir,
 )
 from .core.secrets import redact_secrets as _redact_error_text
 
 _DEFAULT_HOOK_JOURNAL_PATH = get_default_journal_path()
+_PENDING_APPROVAL_TTL_SEC = 600.0
+_APPROVE_ONCE_INELIGIBLE_PREFIXES = (
+    "layer0_protected_path",
+    "layer0_secret",
+    "layer1_ifc_taint",
+    "malformed_",
+)
+_APPROVE_ONCE_SHELL_TOOLS = frozenset({
+    "execute_shell",
+    "run_command",
+    "bash",
+    "shell",
+    "terminal",
+})
+
+
+def _resolve_approvals_path(approvals_path: Optional[str] = None) -> Path:
+    """Resolve explicit approvals store path, env `AETHERIS_APPROVALS_PATH`, or `<state_dir>/approved_escalations.json`."""
+    explicit = str(approvals_path or os.getenv("AETHERIS_APPROVALS_PATH") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return get_state_dir() / "approved_escalations.json"
+
+
+def _approval_scope_key(tool_name: str, cmd: Optional[str] = None) -> Optional[str]:
+    """Derive a stable approval scope key (`shell:<exe>` or `tool:<name>`) for `--approve-once`."""
+    clean_tool = str(tool_name or "").strip().lower()
+    if clean_tool in _APPROVE_ONCE_SHELL_TOOLS and cmd and str(cmd).strip():
+        cmd_str = str(cmd).strip()
+        try:
+            tokens = shlex.split(cmd_str, posix=(os.name != "nt"))
+        except Exception:
+            tokens = cmd_str.split()
+        exe_tok = ""
+        for tok in tokens:
+            t_clean = tok.strip().strip("\"'")
+            if not t_clean:
+                continue
+            if "=" in t_clean and "/" not in t_clean.split("=", 1)[0] and "\\" not in t_clean.split("=", 1)[0]:
+                k = t_clean.split("=", 1)[0]
+                if k.replace("_", "").isalnum():
+                    continue
+            exe_tok = t_clean
+            break
+        if exe_tok:
+            base = exe_tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+            for ext in (".exe", ".cmd", ".bat"):
+                if base.endswith(ext) and len(base) > len(ext):
+                    base = base[: -len(ext)]
+                    break
+            if base:
+                return f"shell:{base}"
+    if clean_tool:
+        return f"tool:{clean_tool}"
+    return None
+
+
+def _is_approve_once_eligible(reason_code: Optional[str]) -> bool:
+    """Return True if an escalation reason code may be remembered via `--approve-once`."""
+    rc = str(reason_code or "").strip().lower()
+    if not rc:
+        return False
+    return not rc.startswith(_APPROVE_ONCE_INELIGIBLE_PREFIXES)
+
+
+def _load_approvals_store(path: Path, now: Optional[float] = None) -> Dict[str, Any]:
+    """Load the approvals store JSON, pruning stale pending entries."""
+    now_ts = float(now if now is not None else time.time())
+    empty: Dict[str, Any] = {"version": 1, "pending": {}, "approved": {}}
+    if not path.is_file():
+        return empty
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return empty
+    except Exception:
+        return empty
+    raw_pending = data.get("pending") if isinstance(data.get("pending"), dict) else {}
+    pending: Dict[str, Any] = {}
+    for k, v in raw_pending.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            ts = v.get("ts")
+            if isinstance(ts, (int, float)) and (now_ts - float(ts)) <= _PENDING_APPROVAL_TTL_SEC:
+                pending[k] = v
+    raw_approved = data.get("approved") if isinstance(data.get("approved"), dict) else {}
+    approved = {k: v for k, v in raw_approved.items() if isinstance(k, str) and isinstance(v, dict)}
+    return {"version": 1, "pending": pending, "approved": approved}
+
+
+def _save_approvals_store(path: Path, store: Dict[str, Any]) -> None:
+    """Atomically persist the approvals store JSON via temp file + `os.replace`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(store, indent=2, ensure_ascii=False) + "\n")
+            fh.flush()
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def clear_approvals(approvals_path: Optional[str] = None) -> int:
+    """Clear all stored `--approve-once` pending/approved escalations. Returns count cleared."""
+    target = _resolve_approvals_path(approvals_path)
+    if not target.exists():
+        return 0
+    store = _load_approvals_store(target)
+    count = len(store.get("approved", {})) + len(store.get("pending", {}))
+    try:
+        target.unlink()
+    except OSError:
+        _save_approvals_store(target, {"version": 1, "pending": {}, "approved": {}})
+    return count
 
 
 def _resolve_journal_path(journal_path: Optional[str] = None) -> Path:
@@ -383,6 +503,8 @@ def evaluate_hook_payload(
     context_guard: bool = False,
     economics_ledger_path: Optional[str] = None,
     hygiene_ledger_path: Optional[str] = None,
+    approve_once: bool = False,
+    approvals_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
@@ -522,6 +644,35 @@ def evaluate_hook_payload(
     # Advisory tool-routing recommendations must never become execution authorization
     if verdict.get("decision_kind") == "routing_recommendation" and dec == "allow":
         dec = "escalate"
+
+    approved_via_approve_once = False
+    original_reason_code: Optional[str] = None
+    use_approve_once = bool(approve_once or os.getenv("AETHERIS_APPROVE_ONCE") == "1")
+    if (
+        dec == "escalate"
+        and use_approve_once
+        and not shadow_mode
+        and not codex_escalate_deny
+        and verdict.get("decision_kind") != "routing_recommendation"
+    ):
+        rc_curr = str(verdict.get("reason_code") or "")
+        scope_key = _approval_scope_key(str(norm.get("tool") or tool_raw), norm.get("cmd"))
+        if scope_key and _is_approve_once_eligible(rc_curr):
+            ap_path = _resolve_approvals_path(approvals_path)
+            ap_now = time.time()
+            ap_store = _load_approvals_store(ap_path, now=ap_now)
+            full_key = f"{scope_key}|{rc_curr}"
+            if full_key in ap_store["approved"]:
+                approved_via_approve_once = True
+                original_reason_code = rc_curr
+                dec = "allow"
+                verdict["decision"] = "allow"
+                verdict["reason_code"] = "approve_once_remembered"
+                verdict["label"] = f"Auto-approved (remembered once-approved escalation: {scope_key})"
+            else:
+                ap_store["pending"][scope_key] = {"reason_code": rc_curr, "ts": ap_now}
+                _save_approvals_store(ap_path, ap_store)
+
     if dec == "escalate" and verdict.get("risk_level"):
         reason = _redact_error_text(f"[{verdict['risk_level']}] {verdict['reason_code']}: {verdict['label']}")
     else:
@@ -664,6 +815,9 @@ def evaluate_hook_payload(
     if hygiene_blocked:
         out["hygiene_blocked"] = True
         out["avoided_tokens"] = avoided_tokens
+    if approved_via_approve_once:
+        out["approved_via_approve_once"] = True
+        out["original_reason_code"] = original_reason_code
     return out
 
 
@@ -683,6 +837,8 @@ def evaluate_post_tool_use_payload(
     semantic_guard: bool = False,
     context_guard: bool = False,
     hygiene_ledger_path: Optional[str] = None,
+    approve_once: bool = False,
+    approvals_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Audit/scrub secrets and detect indirect prompt injection in PostToolUse tool outputs."""
     scrub_tool_output, record_decision_journal, detect_prompt_injection, SessionSecurityState, is_protected_path = _load_post_tool_helpers()
@@ -958,6 +1114,36 @@ def evaluate_post_tool_use_payload(
         host_action = "scrubbed" if secrets_found else ("warn_injection" if injection_detected else "clean")
         scrubbing_mode = "redacted_output_returned"
 
+    approval_recorded: Optional[str] = None
+    use_approve_once = bool(approve_once or os.getenv("AETHERIS_APPROVE_ONCE") == "1")
+    if use_approve_once and not shadow_mode:
+        cmd_for_scope = str(
+            tool_input.get("command")
+            or tool_input.get("cmd")
+            or tool_input.get("CommandLine")
+            or payload.get("command")
+            or payload.get("cmd")
+            or payload.get("CommandLine")
+            or ""
+        ).strip()
+        scope_key = _approval_scope_key(tool_raw, cmd_for_scope or None)
+        if scope_key:
+            ap_path = _resolve_approvals_path(approvals_path)
+            ap_now = time.time()
+            ap_store = _load_approvals_store(ap_path, now=ap_now)
+            pend = ap_store["pending"].pop(scope_key, None)
+            if isinstance(pend, dict) and pend.get("reason_code"):
+                pend_rc = str(pend["reason_code"])
+                if _is_approve_once_eligible(pend_rc):
+                    full_key = f"{scope_key}|{pend_rc}"
+                    ap_store["approved"][full_key] = {
+                        "approved_at": ap_now,
+                        "scope": scope_key,
+                        "reason_code": pend_rc,
+                    }
+                    _save_approvals_store(ap_path, ap_store)
+                    approval_recorded = full_key
+
     out: Dict[str, Any] = {
         "event": "post-tool-use",
         "tool": tool_raw,
@@ -976,6 +1162,8 @@ def evaluate_post_tool_use_payload(
         "hookSpecificOutput": host_specific,
         "exit_code": 0,
     }
+    if approval_recorded:
+        out["approval_recorded"] = approval_recorded
     if semantic_errors:
         out["semantic_guard_errors"] = semantic_errors
 
@@ -1143,6 +1331,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             action="store_true",
             help="Enable context-hygiene gating (block redundant/oversized whole reads, hung stdin, root searches)",
         )
+        parser.add_argument(
+            "--approve-once",
+            action="store_true",
+            help="Remember eligible escalated actions after the user approves them once (verified via PostToolUse)",
+        )
+        parser.add_argument(
+            "--approvals-path",
+            default=str(os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None,
+            help="Override path for approved_escalations.json (or set AETHERIS_APPROVALS_PATH)",
+        )
         args = parser.parse_args(argv)
         log_decisions = bool(args.log_decisions or os.getenv("AETHERIS_LOG_DECISIONS") == "1")
         auto_allow = bool(args.auto_allow or os.getenv("AETHERIS_HOOK_AUTO_ALLOW") == "1")
@@ -1150,6 +1348,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         replace_tool_output = bool(args.replace_tool_output or os.getenv("AETHERIS_POST_REPLACE_OUTPUT") == "1")
         semantic_guard = bool(args.semantic_guard or os.getenv("AETHERIS_SEMANTIC_GUARD") == "1")
         context_guard = bool(args.context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")
+        approve_once = bool(args.approve_once or os.getenv("AETHERIS_APPROVE_ONCE") == "1")
+        approvals_path = str(args.approvals_path or os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None
         sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
         event_kind = str(args.event)
@@ -1275,6 +1475,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         if (
             os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1"
             and not os.getenv("AETHERIS_STATE_DIR")
+            and not approve_once
+            and not approvals_path
         ):
             try:
                 from .hook_daemon import query_daemon
@@ -1359,6 +1561,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     replace_tool_output=replace_tool_output,
                     semantic_guard=semantic_guard,
                     context_guard=context_guard,
+                    approve_once=approve_once,
+                    approvals_path=approvals_path,
                 )
             if shadow_mode:
                 if post_res.get("journal_written") is False:
@@ -1429,6 +1633,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 policy_path=policy_arg,
                 sandbox_wrap=sandbox_wrap,
                 context_guard=context_guard,
+                approve_once=approve_once,
+                approvals_path=approvals_path,
             )
         if shadow_mode:
             if result.get("journal_written") is False:

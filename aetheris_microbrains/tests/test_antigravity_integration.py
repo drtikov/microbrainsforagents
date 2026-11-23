@@ -287,3 +287,127 @@ def test_antigravity_installer_and_repo_plugin_bundle(tmp_path):
     assert PLUGIN_NAME in repo_mj["mcpServers"]
     assert not (repo_bundle / "rules" / "AGENTS.md").read_text(encoding="utf-8").lstrip().startswith("---")
     assert f"name: {PLUGIN_NAME}" in (repo_bundle / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_antigravity_approve_once_lifecycle(tmp_path):
+    ap_file = tmp_path / "approved_escalations.json"
+    py_ok = {
+        "conversationId": "conv-ag-approve-once",
+        "toolCall": {"id": "ao_1", "name": "run_command", "args": {"CommandLine": 'python -c "print(1)"'}},
+    }
+
+    # 1. First PreToolUse on an escalated command returns force_ask and records pending
+    r1 = evaluate_hook_payload(
+        py_ok,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r1["decision"] == "escalate"
+    assert r1["hookSpecificOutput"]["decision"] == "force_ask"
+    store1 = json.loads(ap_file.read_text(encoding="utf-8"))
+    assert "shell:python" in store1["pending"]
+
+    # 2. If PostToolUse never fires (user denied), second PreToolUse still returns force_ask
+    r2 = evaluate_hook_payload(
+        py_ok,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r2["decision"] == "escalate"
+    assert r2["hookSpecificOutput"]["decision"] == "force_ask"
+
+    # 3. Once PostToolUse fires (user approved & command ran), subsequent matching PreToolUse is auto-allowed
+    post_r = evaluate_post_tool_use_payload(
+        {**py_ok, "output": "1\n"},
+        host="antigravity",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert post_r.get("approval_recorded", "").startswith("shell:python|")
+
+    r3 = evaluate_hook_payload(
+        {"toolCall": {"id": "ao_2", "name": "run_command", "args": {"CommandLine": 'python -c "print(2)"'}}},
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r3["decision"] == "allow"
+    assert r3["hookSpecificOutput"]["decision"] == "allow"
+    assert r3["approved_via_approve_once"] is True
+    assert r3["reason_code"] == "approve_once_remembered"
+
+    # 4. Hard deny commands NEVER become allowed even after shell:python was approved once
+    py_bad = {
+        "toolCall": {
+            "id": "ao_bad",
+            "name": "run_command",
+            "args": {"CommandLine": 'python -c "import subprocess; subprocess.run([\'ls\'])"'},
+        }
+    }
+    r_bad = evaluate_hook_payload(
+        py_bad,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r_bad["decision"] == "deny"
+    assert r_bad["hookSpecificOutput"]["decision"] == "deny"
+
+    rm_bad = {"toolCall": {"id": "ao_rm", "name": "run_command", "args": {"CommandLine": "rm -rf /"}}}
+    r_rm = evaluate_hook_payload(
+        rm_bad,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r_rm["decision"] == "deny"
+
+    # 5. Protected-path escalations are NOT auto-approved by --approve-once
+    env_read = {"toolCall": {"id": "ao_env", "name": "read_file", "args": {"Path": ".env"}}}
+    r_env1 = evaluate_hook_payload(
+        env_read,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r_env1["decision"] == "escalate"
+    evaluate_post_tool_use_payload(
+        {**env_read, "output": "SECRET=1"},
+        host="antigravity",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    r_env2 = evaluate_hook_payload(
+        env_read,
+        host="antigravity",
+        profile="dev",
+        log_decisions=False,
+        approve_once=True,
+        approvals_path=str(ap_file),
+    )
+    assert r_env2["decision"] == "escalate"
+    assert r_env2["hookSpecificOutput"]["decision"] == "force_ask"
+
+    # 6. Installer with approve_once=True writes --approve-once to both PreToolUse and PostToolUse
+    inst_dir = tmp_path / "inst" / PLUGIN_NAME
+    assert install(profile="dev", approve_once=True, plugin_dir=inst_dir) == 0
+    hj_ao = json.loads((inst_dir / "hooks.json").read_text(encoding="utf-8"))
+    assert "--approve-once" in hj_ao[PLUGIN_NAME]["PreToolUse"][0]["hooks"][0]["command"]
+    assert "--approve-once" in hj_ao[PLUGIN_NAME]["PostToolUse"][0]["hooks"][0]["command"]
+    assert self_test(plugin_dir=inst_dir) == 0

@@ -135,6 +135,7 @@ def _build_hooks_config(
     session_state: Optional[str] = "auto",
     journal_path: Optional[str] = None,
     context_guard: bool = False,
+    approve_once: bool = False,
 ) -> Dict[str, Any]:
     pre_extra = ["--log-decisions"]
     post_extra = ["--log-decisions"]
@@ -145,6 +146,9 @@ def _build_hooks_config(
         post_extra.append("--shadow")
     if auto_allow:
         pre_extra.append("--auto-allow")
+    if approve_once:
+        pre_extra.append("--approve-once")
+        post_extra.append("--approve-once")
     if context_guard:
         pre_extra.append("--context-guard")
         post_extra.append("--context-guard")
@@ -273,6 +277,7 @@ def install(
     session_state: Optional[str] = "auto",
     journal_path: Optional[str] = None,
     context_guard: bool = False,
+    approve_once: bool = False,
     no_mcp: bool = False,
     workspace: Optional[Path] = None,
     plugin_dir: Optional[Path] = None,
@@ -290,6 +295,7 @@ def install(
         session_state=session_state,
         journal_path=journal_path,
         context_guard=context_guard,
+        approve_once=approve_once,
     )
     mcp_cfg = None if no_mcp else _build_mcp_config(shared=shared)
 
@@ -461,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
     ap.add_argument("--shadow", action="store_true", help="Observe-only pilot mode: log without blocking")
     ap.add_argument("--auto-allow", action="store_true", help="Emit explicit decision='allow' on safe verdicts")
+    ap.add_argument("--approve-once", action="store_true", help="Remember eligible escalated commands/tools after approving once")
+    ap.add_argument("--clear-approvals", action="store_true", help="Clear stored --approve-once escalations and exit")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")
     ap.add_argument("--session-state", default="auto", help="SessionSecurityState path or 'auto' (default: auto)")
@@ -481,6 +489,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_test:
         return self_test(workspace=ws, plugin_dir=pd)
+    if args.clear_approvals:
+        from .hook import clear_approvals
+
+        cleared = clear_approvals()
+        print(f"Cleared {cleared} stored escalation approval(s).")
+        return 0
     if args.remove:
         return remove(workspace=ws, plugin_dir=pd, dry_run=args.dry_run)
 
@@ -490,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         shadow=args.shadow,
         shared=args.shared,
         auto_allow=args.auto_allow,
+        approve_once=args.approve_once,
         profile=args.profile,
         policy=args.policy,
         session_state=sess_arg,
