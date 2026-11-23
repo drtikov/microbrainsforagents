@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Codex**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Hermes Agent**, **Codex**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing unified diffs via Python AST and shell commands via wrapper-aware tokenization before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -293,6 +293,17 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 
 ### Hermes Agent Integration (MCP + Shell Hooks)
 
+Hermes Agent connects seamlessly to Aetheris Microbrains via **FastMCP** (recommended `stdio` or HTTP) and automated tool execution lifecycle hooks.
+
+#### ⚡ Performance Gains with Hermes
+Real measurements from live benchmark runs (`benchmark.py` / `BENCHMARK_RESULTS.md`) using 80+ neuro-brains on a local server:
+- **77.4x faster intent classification**: **6.66 ms** average latency vs. **515.26 ms** direct LLM routing.
+- **176.1x faster agent loop step**: **14.28 ms** combined pre-flight routing & validation vs. **2,515.26 ms** with pure LLM turns.
+- **47.7% tool schema token reduction**: Reduces typical active tool definition payloads from **350 tokens down to 183 tokens** via top-4 candidate narrowing.
+- **~99.4% end-to-end loop acceleration**: A 10-step agent loop drops from **~25.2s down to ~0.14s** in pre-flight decision overhead.
+
+#### Setup Instructions
+
 1. **Install with MCP support:**
    ```bash
    pip install -e ".[mcp]"
@@ -308,7 +319,7 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
        timeout: 30
        connect_timeout: 30
    ```
-   *(Or use Streamable HTTP: start `python -m aetheris_microbrains.mcp_server --http --port 8080` and configure `type: http`, `url: http://127.0.0.1:8080/mcp`.)*
+   *(Or use Streamable HTTP: start `python -m aetheris_microbrains.mcp_server --http --port 8080` or `start_microbrain.bat`, and configure `type: http`, `url: http://127.0.0.1:8080/mcp`.)*
 3. **Optional automatic Pre/Post-Tool gating (`~/.hermes/config.yaml`):**
    ```yaml
    hooks:
@@ -321,7 +332,11 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
        command: "python -m aetheris_microbrains.hook --event post-tool-use --host hermes --session-state auto"
        timeout: 10
    ```
-4. **Reload & verify:** Run `/reload-mcp` in Hermes, or run `python -m aetheris_microbrains.mcp_server --check`.
+4. **Reload & verify:** Run `/reload-mcp` inside Hermes, or test your local setup with:
+   ```bash
+   python check_microbrain.py
+   python -m aetheris_microbrains.mcp_server --check
+   ```
 
 ---
 
@@ -461,6 +476,23 @@ python examples/10_agent_security_benchmark.py
 | Attack detection (TPR) | **22 / 22 (100.0%)** |
 | Benign false positives (FPR) | **0 / 12 (0.0%)** |
 | Latency (`p50` / `p95`) | **0.868 ms / 2.654 ms** |
+
+### 5. Hermes Agent Microbrains Performance Benchmark (`benchmark.py` & `BENCHMARK_RESULTS.md`)
+Live benchmark measuring actual latency and token savings on the resident server with 80+ neuro-brains loaded:
+
+```bash
+python benchmark.py
+```
+
+| Task / Operation | Microbrains Latency | Direct LLM Equivalent | Measured Speedup |
+| :--- | :--- | :--- | :--- |
+| **Intent Classification** (`/microbrain/intent`) | **6.66 ms** (median 5.83 ms) | 515.26 ms | **77.4x faster** |
+| **Code Validation** (`/microbrain/validate`) | **7.62 ms** (median 5.11 ms) | ~2,000 ms (LLM lint turn) | **>250x faster** |
+| **Candidate Prefiltering** (`/microbrain/prefilter`) | **11.33 ms** (median 4.96 ms) | N/A | Sub-15ms top-K selection |
+| **End-to-End Typical Agent Step** | **14.28 ms** | 2,515.26 ms | **176.1x faster** |
+
+- **Token Economy:** Pruning full tool catalogs to top-4 candidates drops active tool schema overhead from **350 tokens down to 183 tokens** (**47.7% token reduction** per step).
+- **Aggregate 10-Step Loop:** Reduces overall routing and validation overhead from **~25.2s down to ~0.14s** (**~99.4% faster** execution).
 
 ---
 
