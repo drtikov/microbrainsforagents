@@ -1,0 +1,26 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash|shell|shell_command|exec_command|apply_patch|Edit|Write|fwrite|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python -m aetheris_microbrains.hook --host codex --session-state auto --log-decisions",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Bash|shell|shell_command|exec_command|apply_patch|Edit|Write|fwrite|Read|Grep|WebFetch|WebSearch|mcp__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python -m aetheris_microbrains.hook --host codex --event post-tool-use --session-state auto --log-decisions",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

@@ -4553,9 +4553,9 @@ def _check_imported_project_modules(
 
 
 _TOOL_ALIAS_GROUPS: Tuple[frozenset[str], ...] = (
-    frozenset({"bash", "shell", "execute_shell", "run_command", "terminal"}),
-    frozenset({"edit", "edit_file", "str_replace_editor", "multiedit", "notebookedit", "patch"}),
-    frozenset({"write", "write_file", "repo_write"}),
+    frozenset({"bash", "shell", "shell_command", "exec_command", "execute_shell", "run_command", "terminal"}),
+    frozenset({"edit", "edit_file", "str_replace_editor", "multiedit", "notebookedit", "patch", "apply_patch"}),
+    frozenset({"write", "write_file", "repo_write", "fwrite"}),
     frozenset({"read", "read_file", "repo_read", "view_file"}),
     frozenset({"grep", "grep_search", "search_code"}),
     frozenset({"glob", "list_dir"}),

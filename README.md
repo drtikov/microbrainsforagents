@@ -40,6 +40,9 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
 - [🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)](#-hermes-agent-integration-fastmcp--lifecycle-hooks)
   - [⚡ Performance Gains with Hermes](#-performance-gains-with-hermes)
   - [One-Command Setup for Hermes](#one-command-setup-for-hermes)
+- [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
+  - [Setup: Automatic Gate + Optional MCP](#setup-automatic-gate--optional-mcp)
+  - [How Escalations Behave in Codex](#how-escalations-behave-in-codex)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -51,7 +54,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [1. Claude Code & Agent Harness PreToolUse Hook Integration](#1-claude-code--agent-harness-pretooluse-hook-integration)
   - [2. Allowlist-First Shell Gate & Dev Profile](#2-allowlist-first-shell-gate--dev-profile)
   - [3. Cache-Safe Sticky Session Tool Narrowing](#3-cache-safe-sticky-session-tool-narrowing)
-- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-547-passed-2-skipped)
+- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-550-passed-2-skipped)
   - [0. Micro-Benchmark: decide() Latency Distribution](#0-micro-benchmark-decide-real-world-latency-distribution)
   - [1. External Tool-Drop Rate & Live-LLM A/B](#1-external-tool-drop-rate-baseline-comparison--live-llm-ab-examples06_real_llm_ab_benchmarkpy)
   - [2. SWE-bench Lite Zero-LLM Gate Benchmark](#2-external-swe-bench-lite-300-real-github-issues-zero-llm-gate-benchmark-examples07_swebench_lite_gate_benchmarkpy)
@@ -177,6 +180,41 @@ Real measurements from live benchmark runs ([benchmark.py](benchmark.py) & [BENC
    python check_microbrain.py
    python -m aetheris_microbrains.mcp_server --check
    ```
+
+---
+
+## 🤖 Codex CLI Integration (Hooks + Skill + Plugin)
+
+OpenAI **Codex CLI** integrates cleanly via a native `--host codex` hook adapter, dedicated `.codex/hooks.json` installer, `.agents/skills/microbrains/` skill, and optional `.codex-plugin/` bundle.
+
+### Setup: Automatic Gate + Optional MCP
+
+1. **Install & pilot in `--shadow` mode first** *(recommended — logs verdicts without blocking)*:
+   ```bash
+   pip install -e .
+   python .agents/skills/microbrains/install_codex_hook.py --shadow --profile dev
+   ```
+2. **Switch to active enforcement & verify** *(project `.codex/hooks.json` or `--user` for `~/.codex/hooks.json`)*:
+   ```bash
+   python .agents/skills/microbrains/install_codex_hook.py --profile dev
+   python .agents/skills/microbrains/install_codex_hook.py --self-test
+   ```
+   *(On Windows, the installer automatically records forward-slashed quoted Python paths for compatibility; pass `--shared` to write portable `python`, or `--full-lifecycle` for `SessionStart`/`UserPromptSubmit`/`Stop`.)*
+3. **Optional MCP server tools in Codex (`config.toml` / `.codex-plugin/.mcp.json`):**
+   ```toml
+   [mcp_servers.aetheris-microbrains]
+   command = "python"
+   args = ["-m", "aetheris_microbrains.mcp_server"]
+   ```
+   *(Pre-packaged Codex plugin bundle is ready at `.codex-plugin/plugin.json` with skill instructions at `.agents/skills/microbrains/SKILL.md`.)*
+
+### How Escalations Behave in Codex
+
+Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecision` and exit code `2`) rather than Claude Code's `"ask"` dialog:
+- **Safe calls (`allow`):** Pass through with exit code `0`.
+- **Dangerous / broken calls (`deny`):** Blocked immediately before execution (`exit 2` + `"permissionDecision": "deny"`).
+- **Ambiguous calls (`escalate`):** Defer cleanly to Codex's configured approval policy (`defer_to_host_policy`, exit `0` with no `"ask"` override). Pass `--codex-escalate-deny` to turn escalations into hard denials in strict CI/unattended environments.
+- **`PostToolUse` warnings:** Emits `additionalContext` (`SECURITY WARNING`) on secret leaks or prompt injections detected in `shell_command`, `apply_patch`, or `fwrite` outputs.
 
 ---
 
@@ -431,7 +469,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`547 Passed, 2 Skipped`)
+## 🧪 Testing & Reproducible Benchmarks (`550 Passed, 2 Skipped`)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 
