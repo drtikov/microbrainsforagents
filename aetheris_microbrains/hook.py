@@ -331,6 +331,12 @@ def evaluate_hook_payload(
 
         ctx["vitality_ledger"] = RuleVitalityLedger()
     verdict = decide(norm, context=ctx or None, policy=policy)
+    raw_sid = str(payload.get("session_id") or payload.get("sessionId") or "").strip() if isinstance(payload, dict) else ""
+    rc_str = str(verdict.get("reason_code") or "")
+    if raw_sid and rc_str.startswith("layer0_custom_policy_rule:"):
+        from .core.lifecycle_engine import LifecycleSessionStore
+
+        LifecycleSessionStore(raw_sid).set_last_custom_rule(rc_str.split(":", 1)[1])
     dec = verdict["decision"]
     if dec == "escalate" and not shadow_mode and explicit_sess:
         from .core.mcp_security import SessionSecurityState
@@ -689,6 +695,30 @@ def evaluate_post_tool_use_payload(
             injection_detected=injection_detected,
             is_protected_path=target_is_protected,
         )
+    sess_id = str(payload.get("session_id") or payload.get("sessionId") or "").strip() if isinstance(payload, dict) else ""
+    if sess_id:
+        tool_low = tool_raw.strip().lower()
+        if tool_low in {"edit", "edit_file", "write", "write_file", "multiedit", "notebookedit", "patch", "repo_write"} and target_path_str:
+            from .core.lifecycle_engine import LifecycleSessionStore
+
+            LifecycleSessionStore(sess_id).record_edit(target_path_str)
+        elif tool_low in {"bash", "shell", "execute_shell", "run_command", "terminal"}:
+            cmd_val = str(tool_input.get("command") or tool_input.get("cmd") or payload.get("command") or payload.get("cmd") or "")
+            if cmd_val:
+                from .core.lifecycle_engine import LifecycleSessionStore, is_validation_command
+
+                if is_validation_command(cmd_val):
+                    LifecycleSessionStore(sess_id).record_validation_pass(cmd_val)
+        if os.getenv("AETHERIS_LIFECYCLE_ACI") == "1":
+            from .core.lifecycle_engine import LifecycleSessionStore, OnlineACICalibrator, _map_tool_domain
+            from .core.policy_governance import RuleVitalityLedger
+
+            OnlineACICalibrator().update(_map_tool_domain(tool_raw), had_error=False)
+            l_store = LifecycleSessionStore(sess_id)
+            last_rule = str(l_store.load().get("last_custom_rule_id") or "").strip()
+            if last_rule:
+                RuleVitalityLedger().record_outcome(last_rule, clean=True)
+                l_store.set_last_custom_rule("")
     if bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1"):
         from .core.context_hygiene import ContextHygieneGate
 
@@ -846,6 +876,19 @@ def _format_hook_error_stdout(event_kind: str, err_msg: str) -> str:
     )
 
 
+_LIFECYCLE_EVENTS = frozenset({
+    "post-tool-use-failure",
+    "post-tool-batch",
+    "session-start",
+    "instructions-loaded",
+    "user-prompt-submit",
+    "pre-compact",
+    "stop",
+    "subagent-stop",
+    "permission-denied",
+})
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
@@ -858,9 +901,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse/PostToolUse Hook")
         parser.add_argument(
             "--event",
-            choices=["pre-tool-use", "post-tool-use"],
+            choices=["pre-tool-use", "post-tool-use", *sorted(_LIFECYCLE_EVENTS)],
             default="pre-tool-use",
-            help="Hook lifecycle event (default: pre-tool-use; post-tool-use audits/scrubs tool outputs)",
+            help="Hook lifecycle event (default: pre-tool-use; supports post-tool-use and Phase 1 lifecycle events)",
         )
         parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
         parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
@@ -944,7 +987,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         session_state_path = _resolve_session_state_path(args.session_state)
 
         raw = sys.stdin.read().strip()
-        if not raw:
+        if not raw and event_kind not in _LIFECYCLE_EVENTS:
             if shadow_mode:
                 _append_shadow_error_journal(
                     reason_code="empty_hook_payload",
@@ -989,28 +1032,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             )
             return 0
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            err_msg = _redact_error_text(f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})")
-            print(err_msg, file=sys.stderr)
-            if shadow_mode:
-                _append_shadow_error_journal(
-                    reason_code="invalid_hook_json",
-                    error_detail=err_msg,
-                    host=host,
-                    journal_path=journal_path,
-                    raw_payload=raw,
-                )
-                return 0
-            if host == "generic":
-                print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+        if raw:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                err_msg = _redact_error_text(f"invalid_hook_json:{exc.msg} (line {exc.lineno}, col {exc.colno})")
+                print(err_msg, file=sys.stderr)
+                if shadow_mode:
+                    _append_shadow_error_journal(
+                        reason_code="invalid_hook_json",
+                        error_detail=err_msg,
+                        host=host,
+                        journal_path=journal_path,
+                        raw_payload=raw,
+                    )
+                    return 0
+                if host == "generic":
+                    print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+                    return 2
+                if host == "hermes":
+                    print(json.dumps({"decision": "block", "reason": err_msg}))
+                    return 2
+                print(_format_hook_error_stdout(event_kind, err_msg))
                 return 2
-            if host == "hermes":
-                print(json.dumps({"decision": "block", "reason": err_msg}))
-                return 2
-            print(_format_hook_error_stdout(event_kind, err_msg))
-            return 2
+        else:
+            payload = {}
 
         if not isinstance(payload, dict):
             err_msg = _redact_error_text("invalid_hook_payload:expected_json_object")
@@ -1090,9 +1136,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if policy_arg:
                     req_flags["policy_path"] = policy_arg
 
+                daemon_ev = (
+                    event_kind
+                    if event_kind in _LIFECYCLE_EVENTS
+                    else ("post" if event_kind == "post-tool-use" else "pre")
+                )
                 daemon_result = query_daemon(
                     {
-                        "event": "post" if event_kind == "post-tool-use" else "pre",
+                        "event": daemon_ev,
                         "payload": payload,
                         "flags": req_flags,
                         "explicit_flags": explicit_flags,
@@ -1133,6 +1184,33 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else:
                     print(_format_hook_stdout(post_res["hookSpecificOutput"]))
             return int(post_res.get("exit_code", 0))
+
+        if event_kind in _LIFECYCLE_EVENTS:
+            if daemon_result is not None:
+                lc_res = daemon_result
+            else:
+                from .core.lifecycle_engine import evaluate_lifecycle_event
+
+                lc_res = evaluate_lifecycle_event(
+                    event_kind,
+                    payload,
+                    host=host,
+                    log_decisions=log_decisions,
+                    journal_path=journal_path,
+                    session_state_path=session_state_path,
+                )
+            if shadow_mode:
+                return 0
+            if host == "generic":
+                print(json.dumps(lc_res, ensure_ascii=False))
+                return int(lc_res.get("exit_code", 0))
+            hso = lc_res.get("hookSpecificOutput")
+            if hso is not None:
+                if host == "hermes" or (isinstance(hso, dict) and "hookEventName" not in hso):
+                    print(json.dumps(hso, ensure_ascii=False))
+                else:
+                    print(_format_hook_stdout(hso))
+            return int(lc_res.get("exit_code", 0))
 
         if daemon_result is not None:
             result = daemon_result

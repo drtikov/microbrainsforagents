@@ -219,6 +219,24 @@ def _cache_key(
     return hashlib.sha256(canonical.encode("utf-8", "ignore")).hexdigest()
 
 
+_LIFECYCLE_EVENTS = frozenset({
+    "session-start",
+    "instructions-loaded",
+    "user-prompt-submit",
+    "post-tool-use-failure",
+    "posttoolusefailure",
+    "post-tool-batch",
+    "posttoolbatch",
+    "pre-compact",
+    "precompact",
+    "stop",
+    "subagent-stop",
+    "subagentstop",
+    "permission-denied",
+    "permissiondenied",
+})
+
+
 def evaluate_request(
     request: Dict[str, Any],
     cache: Optional[VerdictCache] = None,
@@ -293,6 +311,19 @@ def evaluate_request(
     from .hook import evaluate_hook_payload, evaluate_post_tool_use_payload
 
     host = str(flags.get("host") or "claude")
+    ev_norm = event.replace("_", "-")
+    if ev_norm in _LIFECYCLE_EVENTS:
+        from .core.lifecycle_engine import evaluate_lifecycle_event
+
+        verdict = evaluate_lifecycle_event(
+            ev_norm,
+            payload,
+            host=host,
+            log_decisions=bool(flags.get("log_decisions")),
+            journal_path=resolved_journal,
+            session_state_path=resolved_sess,
+        )
+        return verdict, False
     if event == "post":
         verdict = evaluate_post_tool_use_payload(
             payload,
@@ -550,7 +581,15 @@ def serve_http(
         def do_POST(self) -> None:
             nonlocal served_count
             path = self.path.split("?")[0]
-            if path not in {"/v1/hook/pre", "/v1/hook/post"}:
+            if path in {"/v1/hook/pre", "/v1/hook/post"}:
+                ev = "post" if path == "/v1/hook/post" else "pre"
+            elif path.startswith("/v1/hook/event/"):
+                cand_ev = path[len("/v1/hook/event/") :].strip("/").replace("_", "-").lower()
+                if cand_ev not in _LIFECYCLE_EVENTS:
+                    self._send_json(404, {"error": "unknown_lifecycle_event"})
+                    return
+                ev = cand_ev
+            else:
                 self._send_json(404, {"error": "not_found"})
                 return
             auth_hdr = self.headers.get("Authorization", "")
@@ -575,21 +614,23 @@ def serve_http(
             if not isinstance(payload, dict):
                 self._send_json(400, {"error": "expected_json_object"})
                 return
-            ev = "post" if path == "/v1/hook/post" else "pre"
             req = {"event": ev, "payload": payload, "flags": dict(daemon_flags)}
             verdict, _cached = evaluate_request(req, cache=cache)
             if daemon_flags.get("shadow"):
                 out_body: Dict[str, Any] = {}
             elif verdict.get("hookSpecificOutput") is not None:
+                hso = verdict["hookSpecificOutput"]
                 if (
                     ev == "pre"
                     and verdict.get("permissionDecision") == "allow"
                     and not daemon_flags.get("auto_allow")
-                    and "updatedInput" not in verdict["hookSpecificOutput"]
+                    and "updatedInput" not in hso
                 ):
                     out_body = {}
+                elif ev in _LIFECYCLE_EVENTS and isinstance(hso, dict) and "hookEventName" not in hso:
+                    out_body = hso
                 else:
-                    out_body = {"hookSpecificOutput": verdict["hookSpecificOutput"]}
+                    out_body = {"hookSpecificOutput": hso}
             else:
                 out_body = {}
             self._send_json(200, out_body)

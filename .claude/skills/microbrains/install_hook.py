@@ -36,6 +36,20 @@ SETTINGS_SHARED_PATH = PROJECT_DIR / ".claude" / "settings.json"
 
 PRE_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
 POST_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*"
+FULL_LIFECYCLE_SPECS: tuple[tuple[str, str, str | None], ...] = (
+    ("SessionStart", "session-start", "startup|resume|compact"),
+    ("InstructionsLoaded", "instructions-loaded", None),
+    ("UserPromptSubmit", "user-prompt-submit", None),
+    ("PostToolUseFailure", "post-tool-use-failure", "Bash|Edit|Write|MultiEdit|NotebookEdit|mcp__.*"),
+    ("PostToolBatch", "post-tool-batch", None),
+    ("PreCompact", "pre-compact", None),
+    ("SubagentStop", "subagent-stop", None),
+    ("Stop", "stop", None),
+    ("PermissionDenied", "permission-denied", None),
+)
+_ALL_MANAGED_HOOK_EVENTS: tuple[str, ...] = ("PreToolUse", "PostToolUse") + tuple(
+    ev for ev, _slug, _m in FULL_LIFECYCLE_SPECS
+)
 
 # Forward slashes + double quotes: hooks run through Git Bash on Windows or
 # sh / cmd.exe; single-quoted paths break under cmd.exe and unescaped backslashes
@@ -161,7 +175,7 @@ def _load_validated_settings(target: Path) -> tuple[dict | None, int]:
         if not isinstance(hooks, dict):
             print(f"ERROR: {target} 'hooks' field must be an object; refusing to overwrite.", file=sys.stderr)
             return None, 1
-        for ev in ("PreToolUse", "PostToolUse"):
+        for ev in _ALL_MANAGED_HOOK_EVENTS:
             if ev in hooks and not isinstance(hooks[ev], list):
                 print(f"ERROR: {target} 'hooks.{ev}' must be a list; refusing to overwrite.", file=sys.stderr)
                 return None, 1
@@ -183,6 +197,7 @@ def install(
     dry_run: bool = False,
     http_daemon: str | None = None,
     context_guard: bool = False,
+    full_lifecycle: bool = False,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -263,6 +278,28 @@ def install(
     hooks["PreToolUse"] = pre
     hooks["PostToolUse"] = post
 
+    if full_lifecycle:
+        lc_extra = ["--log-decisions"]
+        if shadow:
+            lc_extra.append("--shadow")
+        if session_state and str(session_state).lower() != "none":
+            lc_extra.extend(["--session-state", session_state])
+        if journal_path:
+            lc_extra.extend(["--journal-path", journal_path])
+        base_url = str(http_daemon).rstrip("/") if http_daemon else ""
+        for ev_name, ev_slug, ev_matcher in FULL_LIFECYCLE_SPECS:
+            ev_list = _strip_aetheris_from_event_list(hooks.get(ev_name, []))
+            inner_entry = (
+                _http_hook_entry(f"{base_url}/v1/hook/event/{ev_slug}", timeout=5)
+                if http_daemon
+                else _hook_entry(_hook_cmd(shared, ["--event", ev_slug], lc_extra), timeout=10)
+            )
+            wrapper: dict = {"hooks": [inner_entry]}
+            if ev_matcher is not None:
+                wrapper["matcher"] = ev_matcher
+            ev_list.append(wrapper)
+            hooks[ev_name] = ev_list
+
     if dry_run:
         print(f"DRY RUN - would write to {target}:")
         print(json.dumps(settings, indent=2))
@@ -298,7 +335,7 @@ def remove(
     if rc != 0 or settings is None:
         return rc
     hooks = settings.get("hooks", {})
-    for event in ("PreToolUse", "PostToolUse"):
+    for event in _ALL_MANAGED_HOOK_EVENTS:
         if event in hooks:
             hooks[event] = _strip_aetheris_from_event_list(hooks[event])
     if dry_run:
@@ -445,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="Print the settings that would be written; modify nothing")
     ap.add_argument("--preset", choices=["solo-dev", "ci", "paranoid"], default=None, help="Opinionated flag bundle (explicit flags still override)")
     ap.add_argument("--context-guard", action=argparse.BooleanOptionalAction, default=False, help="Enable deterministic context-hygiene gating for redundant/oversized reads (negate with --no-context-guard)")
+    ap.add_argument("--full-lifecycle", action="store_true", help="Also register Phase 1 lifecycle hooks (SessionStart, InstructionsLoaded, UserPromptSubmit, PostToolUseFailure, PostToolBatch, PreCompact, SubagentStop, Stop, PermissionDenied)")
     ap.add_argument("--self-test", action="store_true", help="In-process installation checks (imports, probe verdicts, installed settings)")
     args = ap.parse_args(argv)
     proj = Path(args.project_dir) if args.project_dir else None
@@ -470,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         http_daemon=args.http_daemon,
         context_guard=bool(args.context_guard),
+        full_lifecycle=bool(args.full_lifecycle),
     )
 
 
