@@ -35,7 +35,7 @@ python .claude/skills/microbrains/install_hook.py --dry-run    # preview the set
 python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end probe of the installed gate
 ```
 
-Console entrypoints installed by `pip install -e .`: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`.
+Console entrypoints installed by `pip install -e .`: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`.
 
 Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
 

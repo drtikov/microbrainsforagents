@@ -51,7 +51,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [1. Claude Code & Agent Harness PreToolUse Hook Integration](#1-claude-code--agent-harness-pretooluse-hook-integration)
   - [2. Allowlist-First Shell Gate & Dev Profile](#2-allowlist-first-shell-gate--dev-profile)
   - [3. Cache-Safe Sticky Session Tool Narrowing](#3-cache-safe-sticky-session-tool-narrowing)
-- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-525-passed-2-skipped)
+- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-547-passed-2-skipped)
   - [0. Micro-Benchmark: decide() Latency Distribution](#0-micro-benchmark-decide-real-world-latency-distribution)
   - [1. External Tool-Drop Rate & Live-LLM A/B](#1-external-tool-drop-rate-baseline-comparison--live-llm-ab-examples06_real_llm_ab_benchmarkpy)
   - [2. SWE-bench Lite Zero-LLM Gate Benchmark](#2-external-swe-bench-lite-300-real-github-issues-zero-llm-gate-benchmark-examples07_swebench_lite_gate_benchmarkpy)
@@ -95,7 +95,7 @@ python -m aetheris_microbrains.doctor                          # full installati
 python -m aetheris_microbrains.doctor --scan-mcp               # audit .mcp.json servers & tool manifests for poisoning/rug-pulls
 ```
 
-Installed console entrypoints: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`.
+Installed console entrypoints: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`.
 
 By default, `install_hook.py` writes hooks relative to the repository root next to the script into `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection; pass `--project-dir /path/to/project` when installing from a wheel or shared environment into another repository. For active coding sessions, running the warm daemon is the recommended default—cold per-call CLI spawns spend ~94 ms on Python interpreter startup versus <1 ms warm evaluation—either via the TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765` paired with `install_hook.py --http-daemon http://127.0.0.1:8765`).
 
@@ -431,7 +431,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`525 Passed, 2 Skipped`)
+## 🧪 Testing & Reproducible Benchmarks (`547 Passed, 2 Skipped`)
 
 Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
 
