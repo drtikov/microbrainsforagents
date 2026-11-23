@@ -33,6 +33,35 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
 
 ---
 
+## 📑 Table of Contents
+
+- [🎯 Primary Use Cases & Value Proposition](#-primary-use-cases--value-proposition)
+- [🧩 Built-in Claude Code Skill (`/microbrains`)](#-built-in-claude-code-skill-microbrains)
+- [🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)](#-hermes-agent-integration-fastmcp--lifecycle-hooks)
+  - [⚡ Performance Gains with Hermes](#-performance-gains-with-hermes)
+  - [One-Command Setup for Hermes](#one-command-setup-for-hermes)
+- [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
+- [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
+- [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
+- [🔒 Cybersecurity & Pre-Flight Policy Controls](#-cybersecurity--pre-flight-policy-controls)
+- [🏗️ 4-Layer Decision Architecture](#️-4-layer-decision-architecture)
+- [📦 Installation](#-installation)
+- [⚡ Quickstart & Python Examples](#-quickstart)
+  - [0. Unified 4-Layer Decision Contract](#0-unified-4-layer-decision-contract)
+  - [1. Claude Code & Agent Harness PreToolUse Hook Integration](#1-claude-code--agent-harness-pretooluse-hook-integration)
+  - [2. Allowlist-First Shell Gate & Dev Profile](#2-allowlist-first-shell-gate--dev-profile)
+  - [3. Cache-Safe Sticky Session Tool Narrowing](#3-cache-safe-sticky-session-tool-narrowing)
+- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-465-passed-2-skipped)
+  - [0. Micro-Benchmark: decide() Latency Distribution](#0-micro-benchmark-decide-real-world-latency-distribution)
+  - [1. External Tool-Drop Rate & Live-LLM A/B](#1-external-tool-drop-rate-baseline-comparison--live-llm-ab-examples06_real_llm_ab_benchmarkpy)
+  - [2. SWE-bench Lite Zero-LLM Gate Benchmark](#2-external-swe-bench-lite-300-real-github-issues-zero-llm-gate-benchmark-examples07_swebench_lite_gate_benchmarkpy)
+  - [3. Multi-Turn Session Prompt-Cache Benchmark](#3-multi-turn-session-prompt-cache-benchmark-examples08_frozen_advisor_benchmarkpy)
+  - [4. Agent Security & Anti-Evasion Benchmark](#4-agent-security--anti-evasion-benchmark-examples10_agent_security_benchmarkpy)
+  - [5. Hermes Agent Microbrains Performance Benchmark](#5-hermes-agent-microbrains-performance-benchmark-benchmarkpy--benchmark_resultsmd)
+- [📄 License & Commercial Support](#-license--commercial-support)
+
+---
+
 ## 🎯 Primary Use Cases & Value Proposition
 
 ### 1. Stopping Wasted Recovery Turns (Pre-Flight AST & Shell Linting)
@@ -93,6 +122,61 @@ In a reproducible 26-step coding session benchmark (14 normal steps + 12 hazards
 | Total gate time across session | 0.0 ms | **~11 ms** (~0.43 ms mean / ~0.77 ms p95) |
 
 > *Note:* Interception counts, false-positive counts, and gate latency are measured directly in the benchmark; token and turn savings are modeled estimates under documented Sonnet-class pricing constants in `test_skill_gain_ab.py`.
+
+---
+
+## 🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)
+
+Hermes Agent connects directly to Aetheris Microbrains via **FastMCP** (zero-port `stdio` or Streamable HTTP) and pre/post tool execution hooks.
+
+### ⚡ Performance Gains with Hermes
+Real measurements from live benchmark runs ([benchmark.py](benchmark.py) & [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)) using 80+ neuro-brains on a local server:
+
+| Task / Operation | Microbrains Latency | Direct LLM Equivalent | Measured Speedup |
+| :--- | :--- | :--- | :--- |
+| **Intent Classification** (`/microbrain/intent`) | **6.66 ms** (median 5.83 ms) | 515.26 ms | **77.4x faster** |
+| **Code Validation** (`/microbrain/validate`) | **7.62 ms** (median 5.11 ms) | ~2,000 ms (LLM turn) | **>250x faster** |
+| **Candidate Prefiltering** (`/microbrain/prefilter`) | **11.33 ms** (median 4.96 ms) | N/A | Sub-15ms top-K selection |
+| **End-to-End Typical Agent Step** | **14.28 ms** | 2,515.26 ms | **176.1x faster** |
+
+- **Token Economy:** Pruning full tool catalogs to top-4 candidates drops active tool schema overhead from **350 tokens down to 183 tokens** (**47.7% token reduction** per step).
+- **Aggregate 10-Step Loop:** Reduces overall routing and validation overhead from **~25.2s down to ~0.14s** (**~99.4% faster** execution).
+
+### One-Command Setup for Hermes
+
+1. **Install with MCP support:**
+   ```bash
+   pip install -e ".[mcp]"
+   ```
+2. **Configure Hermes MCP (`~/.hermes/config.yaml`) — Recommended `stdio` mode:**
+   ```yaml
+   mcp_discovery_timeout: 10.0
+   mcp_servers:
+     aetheris-microbrains:
+       command: "python"
+       args: ["-m", "aetheris_microbrains.mcp_server"]
+       enabled: true
+       timeout: 30
+       connect_timeout: 30
+   ```
+   *(Or use Streamable HTTP: start `python -m aetheris_microbrains.mcp_server --http --port 8080` or `start_microbrain.bat`, and configure `type: http`, `url: http://127.0.0.1:8080/mcp`.)*
+3. **Optional automatic Pre/Post-Tool gating (`~/.hermes/config.yaml`):**
+   ```yaml
+   hooks:
+     - event: pre_tool_call
+       command: "python -m aetheris_microbrains.hook --host hermes --session-state auto"
+       timeout: 10
+       fail_closed: true
+     - event: post_tool_call
+       matcher: "terminal|web_extract|web_search|mcp__.*"
+       command: "python -m aetheris_microbrains.hook --event post-tool-use --host hermes --session-state auto"
+       timeout: 10
+   ```
+4. **Reload & verify:** Run `/reload-mcp` inside Hermes, or test your local setup with:
+   ```bash
+   python check_microbrain.py
+   python -m aetheris_microbrains.mcp_server --check
+   ```
 
 ---
 
@@ -290,53 +374,6 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 * **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
 * **Fail-Closed on Exceptions & Import Errors (Non-Shadow):** Unexpected runtime or import errors return exit code `2` with redacted details in `stderr`, preventing unsafe actions from running if the hook fails.
-
-### Hermes Agent Integration (MCP + Shell Hooks)
-
-Hermes Agent connects seamlessly to Aetheris Microbrains via **FastMCP** (recommended `stdio` or HTTP) and automated tool execution lifecycle hooks.
-
-#### ⚡ Performance Gains with Hermes
-Real measurements from live benchmark runs (`benchmark.py` / `BENCHMARK_RESULTS.md`) using 80+ neuro-brains on a local server:
-- **77.4x faster intent classification**: **6.66 ms** average latency vs. **515.26 ms** direct LLM routing.
-- **176.1x faster agent loop step**: **14.28 ms** combined pre-flight routing & validation vs. **2,515.26 ms** with pure LLM turns.
-- **47.7% tool schema token reduction**: Reduces typical active tool definition payloads from **350 tokens down to 183 tokens** via top-4 candidate narrowing.
-- **~99.4% end-to-end loop acceleration**: A 10-step agent loop drops from **~25.2s down to ~0.14s** in pre-flight decision overhead.
-
-#### Setup Instructions
-
-1. **Install with MCP support:**
-   ```bash
-   pip install -e ".[mcp]"
-   ```
-2. **Configure Hermes MCP (`~/.hermes/config.yaml`) — Recommended `stdio` mode:**
-   ```yaml
-   mcp_discovery_timeout: 10.0
-   mcp_servers:
-     aetheris-microbrains:
-       command: "python"
-       args: ["-m", "aetheris_microbrains.mcp_server"]
-       enabled: true
-       timeout: 30
-       connect_timeout: 30
-   ```
-   *(Or use Streamable HTTP: start `python -m aetheris_microbrains.mcp_server --http --port 8080` or `start_microbrain.bat`, and configure `type: http`, `url: http://127.0.0.1:8080/mcp`.)*
-3. **Optional automatic Pre/Post-Tool gating (`~/.hermes/config.yaml`):**
-   ```yaml
-   hooks:
-     - event: pre_tool_call
-       command: "python -m aetheris_microbrains.hook --host hermes --session-state auto"
-       timeout: 10
-       fail_closed: true
-     - event: post_tool_call
-       matcher: "terminal|web_extract|web_search|mcp__.*"
-       command: "python -m aetheris_microbrains.hook --event post-tool-use --host hermes --session-state auto"
-       timeout: 10
-   ```
-4. **Reload & verify:** Run `/reload-mcp` inside Hermes, or test your local setup with:
-   ```bash
-   python check_microbrain.py
-   python -m aetheris_microbrains.mcp_server --check
-   ```
 
 ---
 
