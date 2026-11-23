@@ -291,6 +291,38 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
 * **Fail-Closed on Exceptions & Import Errors (Non-Shadow):** Unexpected runtime or import errors return exit code `2` with redacted details in `stderr`, preventing unsafe actions from running if the hook fails.
 
+### Hermes Agent Integration (MCP + Shell Hooks)
+
+1. **Install with MCP support:**
+   ```bash
+   pip install -e ".[mcp]"
+   ```
+2. **Configure Hermes MCP (`~/.hermes/config.yaml`) — Recommended `stdio` mode:**
+   ```yaml
+   mcp_discovery_timeout: 10.0
+   mcp_servers:
+     aetheris-microbrains:
+       command: "python"
+       args: ["-m", "aetheris_microbrains.mcp_server"]
+       enabled: true
+       timeout: 30
+       connect_timeout: 30
+   ```
+   *(Or use Streamable HTTP: start `python -m aetheris_microbrains.mcp_server --http --port 8080` and configure `type: http`, `url: http://127.0.0.1:8080/mcp`.)*
+3. **Optional automatic Pre/Post-Tool gating (`~/.hermes/config.yaml`):**
+   ```yaml
+   hooks:
+     - event: pre_tool_call
+       command: "python -m aetheris_microbrains.hook --host hermes --session-state auto"
+       timeout: 10
+       fail_closed: true
+     - event: post_tool_call
+       matcher: "terminal|web_extract|web_search|mcp__.*"
+       command: "python -m aetheris_microbrains.hook --event post-tool-use --host hermes --session-state auto"
+       timeout: 10
+   ```
+4. **Reload & verify:** Run `/reload-mcp` in Hermes, or run `python -m aetheris_microbrains.mcp_server --check`.
+
 ---
 
 ### 2. Allowlist-First Shell Gate & Dev Profile

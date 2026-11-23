@@ -60,6 +60,9 @@ guard-ml = [
     "onnxruntime>=1.16.0",
     "tokenizers>=0.19.0",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 
 [project.scripts]
 aetheris-hook = "aetheris_microbrains.hook:main"
@@ -67,6 +70,7 @@ aetheris-doctor = "aetheris_microbrains.doctor:main"
 aetheris-audit = "aetheris_microbrains.audit:main"
 aetheris-daemon = "aetheris_microbrains.hook_daemon:main"
 aetheris-verify = "aetheris_microbrains.verify:main"
+aetheris-mcp = "aetheris_microbrains.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/drtikov/microbrainsforagents"

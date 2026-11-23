@@ -149,7 +149,7 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tool_lower = tool_raw.lower()
     if tool_lower in {"bash", "shell", "execute_shell", "run_command", "terminal"}:
         tool_name = "execute_shell"
-    elif tool_lower in {"edit", "str_replace_editor", "edit_file", "multiedit", "notebookedit"}:
+    elif tool_lower in {"edit", "str_replace_editor", "edit_file", "multiedit", "notebookedit", "patch"}:
         tool_name = "edit_file"
     elif tool_lower in {"write", "write_file", "repo_write"}:
         tool_name = "write_file"
@@ -284,7 +284,7 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
@@ -417,6 +417,7 @@ def evaluate_hook_payload(
     host_contract = {
         "claude": "claude_pretooluse_v1",
         "codex": "codex_pretooluse_no_ask_v1",
+        "hermes": "hermes_shell_hook_v1",
         "generic": "generic_v1",
     }[resolved_host]
 
@@ -427,6 +428,22 @@ def evaluate_hook_payload(
         exit_code = 0
         host_action = "shadow_observe"
         hook_specific = None
+    elif resolved_host == "hermes":
+        if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
+            perm = "deny"
+            exit_code = 2
+            host_action = "block"
+            hook_specific = {"decision": "block", "reason": reason}
+        elif dec == "allow":
+            perm = "allow"
+            exit_code = 0
+            host_action = "allow"
+            hook_specific = None
+        else:
+            perm = "ask"
+            exit_code = 0
+            host_action = "context"
+            hook_specific = {"context": f"[Aetheris Microbrains Escalation] {reason}"}
     elif resolved_host == "codex":
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
@@ -532,7 +549,7 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "generic"}:
         resolved_host = "claude"
 
     tool_raw = str(
@@ -718,6 +735,23 @@ def evaluate_post_tool_use_payload(
     elif resolved_host == "codex":
         host_action = "warn_observed" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_warn"
+    elif resolved_host == "hermes":
+        if any_alert:
+            warnings = []
+            if secrets_found:
+                warnings.append(
+                    f"Potential raw secret material detected in tool output ({', '.join(secret_types)}; count={total_count})."
+                )
+            if injection_detected:
+                warnings.append(
+                    f"Potential indirect prompt injection detected ({', '.join(injection_findings)}; severity={injection_severity})."
+                )
+            host_specific = {"context": "SECURITY WARNING (Aetheris Microbrains): " + " ".join(warnings)}
+            host_action = "warn_context"
+            scrubbing_mode = "detect_and_warn"
+        else:
+            host_action = "clean_passthrough"
+            scrubbing_mode = "detect_and_warn"
     else:
         host_action = "scrubbed" if secrets_found else ("warn_injection" if injection_detected else "clean")
         scrubbing_mode = "redacted_output_returned"
@@ -839,9 +873,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "generic"],
+            choices=["claude", "codex", "hermes", "generic"],
             default=host,
-            help="Host PreToolUse contract format (claude emits allow/ask/deny; codex omits unsupported 'ask')",
+            help="Host PreToolUse contract format (claude emits allow/ask/deny; codex omits unsupported 'ask'; hermes emits block/context)",
         )
         parser.add_argument(
             "--codex-escalate-deny",
@@ -929,6 +963,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             if host == "generic":
                 print(json.dumps({"decision": "escalate", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
                 return 0
+            if host == "hermes":
+                print(json.dumps({"context": "[Aetheris Microbrains] empty_hook_payload"}))
+                return 0
             print(
                 _format_hook_stdout(
                     {
@@ -956,6 +993,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
                 return 2
+            if host == "hermes":
+                print(json.dumps({"decision": "block", "reason": err_msg}))
+                return 2
             print(_format_hook_error_stdout(event_kind, err_msg))
             return 2
 
@@ -973,6 +1013,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 0
             if host == "generic":
                 print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+                return 2
+            if host == "hermes":
+                print(json.dumps({"decision": "block", "reason": err_msg}))
                 return 2
             print(_format_hook_error_stdout(event_kind, err_msg))
             return 2
@@ -1066,7 +1109,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(json.dumps(post_res, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
             if post_res.get("hookSpecificOutput") is not None:
-                print(_format_hook_stdout(post_res["hookSpecificOutput"]))
+                if host == "hermes":
+                    print(json.dumps(post_res["hookSpecificOutput"], ensure_ascii=False))
+                else:
+                    print(_format_hook_stdout(post_res["hookSpecificOutput"]))
             return int(post_res.get("exit_code", 0))
 
         if daemon_result is not None:
@@ -1122,7 +1168,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         if exit_code == 2:
             print(result["reason"], file=sys.stderr)
             if result["hookSpecificOutput"] is not None:
-                print(_format_hook_stdout(result["hookSpecificOutput"]))
+                if host == "hermes":
+                    print(json.dumps(result["hookSpecificOutput"], ensure_ascii=False))
+                else:
+                    print(_format_hook_stdout(result["hookSpecificOutput"]))
             return 2
         if host == "codex" and result.get("host_action") == "defer_to_host_policy":
             return 0
@@ -1131,7 +1180,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             # Silent pass-through: let host apply normal user permission rules
             return 0
         if result["hookSpecificOutput"] is not None:
-            print(_format_hook_stdout(result["hookSpecificOutput"]))
+            if host == "hermes":
+                print(json.dumps(result["hookSpecificOutput"], ensure_ascii=False))
+            else:
+                print(_format_hook_stdout(result["hookSpecificOutput"]))
         return exit_code
     except Exception as exc:
         err_msg = _redact_error_text(f"hook_internal_error:{type(exc).__name__}:{exc}")
@@ -1147,6 +1199,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
         if host == "generic":
             print(json.dumps({"decision": "deny", "reason_code": err_msg, "host": "generic", "exit_code": 2}))
+            return 2
+        if host == "hermes":
+            print(json.dumps({"decision": "block", "reason": err_msg}))
             return 2
         print(_format_hook_error_stdout(event_kind, err_msg))
         return 2
