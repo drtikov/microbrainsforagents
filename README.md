@@ -282,6 +282,25 @@ Because Codex `PreToolUse` supports `"allow"` and `"deny"` (via `permissionDecis
 | **Speed** | Antigravity in-process gate (120 calls) | 0 ms | **0.31 ms p50 / 0.59 ms p95** | **< 0.01% of LLM turn** |
 | **Speed** | Antigravity CLI hook cold-start (Windows, 10 runs) | 0 ms | **512.5 ms** (`Pre`) / **519.8 ms** (`Post`) p50 | **~1.03 s combined Python startup** *(mitigated via `aetheris-daemon` / MCP)* |
 
+#### Live Isolated Antigravity Repo-Audit A/B (WITH vs. WITHOUT Microbrains)
+
+Measured on `2026-11-23` across two fresh, isolated subagent contexts on the same model auditing `aetheris_microbrains` (excluding `tests/`) for mocks, stubs, and weaknesses:
+
+| Metric | WITHOUT Microbrains | WITH Microbrains | Delta (% WITH vs. WITHOUT) |
+|---|---:|---:|---:|
+| Uncached input tokens | 431,979 | **98,221** | **−77.3%** (4.4× fewer) |
+| Cache-read tokens | 1,547,323 | **470,846** | **−69.6%** (3.3× fewer) |
+| Total context tokens (`input + cache_read`) | 1,979,302 | **569,067** | **−71.2%** (3.5× fewer) |
+| Output tokens | 21,385 | **17,439** | **−18.5%** |
+| Cache-adjusted billed equiv. (`uncached + out + 0.1×cache`) | 608,096 | **162,745** | **−73.2%** (3.7× cheaper) |
+| LLM turns / tool calls | 16 turns / 61 calls | **11 turns / 40 calls** | **−31.3% turns / −34.4% calls** |
+| Shell hook vetoes / retries | 4 | **0** | **−100.0%** |
+| Active execution time *(excl. >60s wait pauses)* | 396.0 s | **310.0 s** | **−21.7% faster** |
+| Proposal quality (0–100 rubric, 0% FP both runs) | 90 / 100 (`23` findings) | 85 / 100 (`11` findings + live ops diagnostics) | **−5.6%** |
+| Quality-per-token ROI (pts / 100k billed-equiv. tok) | 14.8 | **52.2** | **+252.7%** (3.5× higher) |
+
+> **Summary:** WITH Microbrains delivered **94% of the audit quality at 27% of the token cost** (`−73.2%` billed-equivalent tokens, `−21.7%` active execution time, plus live `doctor`/`verify`/daemon diagnostics), while WITHOUT Microbrains achieved slightly broader static leaf-module coverage (`+5` quality points) at 3.7× the token spend.
+
 ### One-Command Setup for Antigravity
 
 1. **Install & pilot in `--shadow` mode first** *(observe-only: logs every decision without blocking)*:
