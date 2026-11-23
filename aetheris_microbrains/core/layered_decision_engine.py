@@ -391,10 +391,55 @@ class PolicyConfig:
         return s
 
     @classmethod
+    def _parse_yaml_scalar(cls, v_stripped: str) -> Any:
+        if v_stripped.startswith(("&", "*", "|", ">", "{", "[")):
+            raise ValueError(
+                "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+            )
+        v = cls._unquote_yaml_scalar(v_stripped)
+        is_unquoted = v_stripped == v
+        if is_unquoted and v.lower() == "true":
+            return True
+        if is_unquoted and v.lower() == "false":
+            return False
+        if is_unquoted and v.isdigit():
+            return int(v)
+        return v
+
+    @staticmethod
+    def _split_yaml_mapping(text: str) -> Optional[Tuple[str, str]]:
+        """Split a `key: value` string outside quotes where `:` ends the key."""
+        in_single = False
+        in_double = False
+        escaped = False
+        for idx, ch in enumerate(text):
+            if escaped:
+                escaped = False
+                continue
+            if in_double:
+                if ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_double = False
+                continue
+            if in_single:
+                if ch == "'":
+                    in_single = False
+                continue
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == ":" and (idx + 1 == len(text) or text[idx + 1] in (" ", "\t")):
+                return text[:idx], text[idx + 1 :]
+        return None
+
+    @classmethod
     def _parse_simple_yaml(cls, raw: str) -> Dict[str, Any]:
-        """Minimal quote-aware YAML parser fallback for flat scalar/list configs when PyYAML is absent."""
+        """Minimal quote-aware YAML parser fallback for flat scalar/list configs and list-of-dicts when PyYAML is absent."""
         res: Dict[str, Any] = {}
         curr_list_key: Optional[str] = None
+        curr_item_indent: Optional[int] = None
         for line in raw.splitlines():
             line_str = cls._strip_yaml_comment(line).rstrip()
             if not line_str.strip():
@@ -411,10 +456,42 @@ class PolicyConfig:
                     raise ValueError(
                         "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
                     )
-                res[curr_list_key].append(cls._unquote_yaml_scalar(item_raw))
+                kv = cls._split_yaml_mapping(item_raw)
+                if kv is not None:
+                    k_raw, v_raw = kv
+                    k = cls._unquote_yaml_scalar(k_raw)
+                    v_stripped = v_raw.strip()
+                    if not v_stripped:
+                        raise ValueError(
+                            "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+                        )
+                    res[curr_list_key].append({k: cls._parse_yaml_scalar(v_stripped)})
+                    curr_item_indent = indent
+                else:
+                    curr_item_indent = None
+                    res[curr_list_key].append(cls._unquote_yaml_scalar(item_raw))
+                continue
+            if (
+                curr_item_indent is not None
+                and indent > curr_item_indent
+                and curr_list_key
+                and isinstance(res.get(curr_list_key), list)
+                and res[curr_list_key]
+                and isinstance(res[curr_list_key][-1], dict)
+                and ":" in stripped
+            ):
+                k_raw, v_raw = stripped.split(":", 1)
+                k = cls._unquote_yaml_scalar(k_raw)
+                v_stripped = v_raw.strip()
+                if not v_stripped:
+                    raise ValueError(
+                        "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
+                    )
+                res[curr_list_key][-1][k] = cls._parse_yaml_scalar(v_stripped)
                 continue
             if ":" in stripped:
                 curr_list_key = None
+                curr_item_indent = None
                 k_raw, v_raw = stripped.split(":", 1)
                 k = cls._unquote_yaml_scalar(k_raw)
                 v_stripped = v_raw.strip()
@@ -422,20 +499,7 @@ class PolicyConfig:
                     curr_list_key = k
                     res[k] = []
                     continue
-                if v_stripped.startswith(("&", "*", "|", ">", "{", "[")):
-                    raise ValueError(
-                        "Unsupported YAML feature in fallback parser; install PyYAML or use JSON/TOML policy files."
-                    )
-                v = cls._unquote_yaml_scalar(v_stripped)
-                is_unquoted = v_stripped == v
-                if is_unquoted and v.lower() == "true":
-                    res[k] = True
-                elif is_unquoted and v.lower() == "false":
-                    res[k] = False
-                elif is_unquoted and v.isdigit():
-                    res[k] = int(v)
-                else:
-                    res[k] = v
+                res[k] = cls._parse_yaml_scalar(v_stripped)
                 continue
             raise ValueError(
                 "Unsupported YAML syntax in fallback parser; install PyYAML or use JSON/TOML policy files."
@@ -3561,7 +3625,7 @@ def _inspect_ps_script(
                 toks = [toks[0][1:]] + toks[1:]
 
         first_tok = toks[0].lstrip("(")
-        first_raw = re.split(r"[\s({]", first_tok, 1)[0].strip().strip("'\"").lower()
+        first_raw = re.split(r"[\s({]", first_tok, maxsplit=1)[0].strip().strip("'\"").lower()
         first = os.path.basename(first_raw).removesuffix(".exe").removesuffix(".com")
         stmt_args = toks[1:]
         if not first:
@@ -4488,6 +4552,25 @@ def _check_imported_project_modules(
     return flagged
 
 
+_TOOL_ALIAS_GROUPS: Tuple[frozenset[str], ...] = (
+    frozenset({"bash", "shell", "execute_shell", "run_command", "terminal"}),
+    frozenset({"edit", "edit_file", "str_replace_editor", "multiedit", "notebookedit", "patch"}),
+    frozenset({"write", "write_file", "repo_write"}),
+    frozenset({"read", "read_file", "repo_read", "view_file"}),
+    frozenset({"grep", "grep_search", "search_code"}),
+    frozenset({"glob", "list_dir"}),
+)
+
+
+def _expand_tool_aliases(clean_tool: str, raw_tool: Optional[str] = None) -> frozenset[str]:
+    candidates = {tok for tok in (clean_tool, str(raw_tool or "").strip().lower()) if tok}
+    expanded = set(candidates)
+    for grp in _TOOL_ALIAS_GROUPS:
+        if candidates & grp:
+            expanded.update(grp)
+    return frozenset(expanded)
+
+
 def _evaluate_custom_rules(
     cfg: PolicyConfig,
     clean_tool: str,
@@ -4497,11 +4580,13 @@ def _evaluate_custom_rules(
     vitality_ledger: Any = None,
     now: Optional[float] = None,
     return_rule: bool = False,
+    raw_tool: Optional[str] = None,
 ) -> Optional[Any]:
     """Evaluate AgentSpec-style declarative `PolicyConfig.custom_rules`."""
     rules = getattr(cfg, "custom_rules", ()) or ()
     if not rules:
         return None
+    tool_candidates = _expand_tool_aliases(clean_tool, raw_tool)
     norm_path = str(target_path or "").replace("\\", "/").strip()
     norm_cmd = str(cmd_str or "")
     for r in rules:
@@ -4514,7 +4599,8 @@ def _evaluate_custom_rules(
             continue
         tool_pat = r.get("tool")
         if tool_pat is not None:
-            if not clean_tool or not re.fullmatch(str(tool_pat), clean_tool, re.IGNORECASE):
+            pat_str = str(tool_pat)
+            if not tool_candidates or not any(re.fullmatch(pat_str, cand, re.IGNORECASE) for cand in tool_candidates):
                 continue
         path_glob = r.get("path_glob")
         if path_glob is not None:
@@ -4566,6 +4652,7 @@ def decide(
 
     if isinstance(input_data, dict):
         tool_name = str(input_data.get("tool") or input_data.get("action") or input_data.get("tool_name") or "")
+        raw_tool = str(input_data.get("raw_tool") or "").strip().lower()
         target_path = input_data.get("path") or input_data.get("file_path")
         diff_text = None
         for _dk in ("diff", "payload_diff", "new_string", "content"):
@@ -4584,6 +4671,7 @@ def decide(
             }]
     else:
         tool_name = str(ctx.get("tool") or "")
+        raw_tool = str(ctx.get("raw_tool") or "").strip().lower()
         target_path = ctx.get("path")
         diff_text = None
         for _dk in ("diff", "new_string", "content"):
@@ -4675,6 +4763,7 @@ def decide(
                 vitality_ledger=ctx.get("vitality_ledger"),
                 now=ctx.get("now"),
                 return_rule=True,
+                raw_tool=raw_tool,
             )
             if custom_allow is not None:
                 (c_act, c_lbl, c_code, c_layer), c_rule, c_vcheck = custom_allow
@@ -4733,6 +4822,7 @@ def decide(
         out: Dict[str, Any] = {
             "decision": decision,
             "decision_kind": resolved_kind,
+            "tool": clean_tool or (str(tool_name).strip() if tool_name else None),
             "authorizes_execution": False,
             "label": redact_secrets(label),
             "payload_preview": payload_preview,
@@ -4845,7 +4935,14 @@ def decide(
             ):
                 return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
 
-        custom_deny = _evaluate_custom_rules(cfg, clean_tool, target_path, cmd_str, action_filter="deny")
+        custom_deny = _evaluate_custom_rules(
+            cfg,
+            clean_tool,
+            target_path,
+            cmd_str,
+            action_filter="deny",
+            raw_tool=raw_tool,
+        )
         if custom_deny is not None:
             c_act, c_lbl, c_code, c_layer = custom_deny
             return _finish(c_act, c_lbl, ["deny"], c_code, c_layer)

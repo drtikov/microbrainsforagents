@@ -39,7 +39,7 @@ from .core.secrets import redact_secrets
 _SETTINGS_LOCAL = Path(".claude") / "settings.local.json"
 _SETTINGS_SHARED = Path(".claude") / "settings.json"
 _EXPECTED_PRE_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
-_EXPECTED_POST_MATCHER = "Bash|Read|Grep|WebFetch|WebSearch|mcp__.*"
+_EXPECTED_POST_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*"
 
 
 class _Report:

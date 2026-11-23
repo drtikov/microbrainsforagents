@@ -98,12 +98,13 @@ def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
 
 
 class VerdictCache:
-    """Tiny TTL + LRU cache for daemon verdicts."""
+    """Tiny TTL + LRU cache for daemon verdicts (thread-safe for HTTP server workers)."""
 
     def __init__(self, max_entries: int = _CACHE_MAX_ENTRIES, ttl_sec: float = _CACHE_TTL_SEC) -> None:
         self._max = max(1, int(max_entries))
         self._ttl = float(ttl_sec)
         self._store: "OrderedDict[str, tuple]" = OrderedDict()
+        self._lock = threading.Lock()
 
     def _purge_expired(self, now: float) -> None:
         expired = [k for k, (ts, _v) in self._store.items() if now - ts > self._ttl]
@@ -112,21 +113,23 @@ class VerdictCache:
 
     def get(self, key: str) -> Optional[Dict[str, Any]]:
         now = time.monotonic()
-        self._purge_expired(now)
-        item = self._store.get(key)
-        if item is None:
-            return None
-        _ts, verdict = item
-        self._store.move_to_end(key)
-        return verdict
+        with self._lock:
+            self._purge_expired(now)
+            item = self._store.get(key)
+            if item is None:
+                return None
+            _ts, verdict = item
+            self._store.move_to_end(key)
+            return verdict
 
     def put(self, key: str, verdict: Dict[str, Any]) -> None:
         now = time.monotonic()
-        self._purge_expired(now)
-        self._store[key] = (now, verdict)
-        self._store.move_to_end(key)
-        while len(self._store) > self._max:
-            self._store.popitem(last=False)
+        with self._lock:
+            self._purge_expired(now)
+            self._store[key] = (now, verdict)
+            self._store.move_to_end(key)
+            while len(self._store) > self._max:
+                self._store.popitem(last=False)
 
 
 def _payload_is_editish(payload: Any) -> bool:
@@ -171,7 +174,15 @@ def _merge_flags(daemon_flags: Dict[str, Any], req: Dict[str, Any]) -> Dict[str,
     merged = dict(daemon_flags or {})
     req_flags = req.get("flags") if isinstance(req.get("flags"), dict) else {}
     explicit = set(req.get("explicit_flags") or ())
-    bool_keys = {"strict_ast", "log_decisions", "shadow", "codex_escalate_deny", "replace_tool_output", "semantic_guard"}
+    bool_keys = {
+        "strict_ast",
+        "log_decisions",
+        "shadow",
+        "codex_escalate_deny",
+        "replace_tool_output",
+        "semantic_guard",
+        "context_guard",
+    }
     for k, v in req_flags.items():
         if v is None:
             continue
@@ -266,6 +277,7 @@ def evaluate_request(
         and not flags.get("log_decisions")
         and not flags.get("session_state_path")
         and not flags.get("shadow")
+        and not flags.get("context_guard")
         and not _payload_is_editish(payload)
     )
     key = (
@@ -292,6 +304,7 @@ def evaluate_request(
             policy_path=resolved_policy,
             replace_tool_output=bool(flags.get("replace_tool_output")),
             semantic_guard=bool(flags.get("semantic_guard")),
+            context_guard=bool(flags.get("context_guard")),
         )
     else:
         verdict = evaluate_hook_payload(
@@ -305,6 +318,8 @@ def evaluate_request(
             session_state_path=resolved_sess,
             profile=flags.get("profile"),
             policy_path=resolved_policy,
+            sandbox_wrap=str(flags.get("sandbox_wrap") or "none"),
+            context_guard=bool(flags.get("context_guard")),
         )
     if key is not None:
         cache.put(key, verdict)
@@ -633,6 +648,15 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--policy", default=None, help="Policy file passthrough")
     parser.add_argument("--journal-path", default=None, help="Journal path passthrough")
     parser.add_argument("--session-state", default=None, help="Session state path (or 'auto') passthrough")
+    parser.add_argument("--replace-tool-output", action="store_true", help="Emit updatedToolOutput on post-tool redaction")
+    parser.add_argument("--semantic-guard", action="store_true", help="Enable semantic prompt-injection classifier on post-tool")
+    parser.add_argument(
+        "--sandbox-wrap",
+        choices=["none", "bwrap", "seatbelt", "auto"],
+        default="none",
+        help="Optional OS sandbox wrapper (`bwrap`, `seatbelt`, `auto`) emitted via updatedInput on allowed Bash calls",
+    )
+    parser.add_argument("--context-guard", action="store_true", help="Enable context-hygiene gating passthrough")
     parser.add_argument(
         "--no-session-state",
         dest="no_session_state",
@@ -652,6 +676,10 @@ def main(argv: Optional[list] = None) -> int:
         "shadow": bool(args.shadow),
         "strict_ast": bool(args.strict_ast),
         "auto_allow": bool(args.auto_allow),
+        "replace_tool_output": bool(args.replace_tool_output),
+        "semantic_guard": bool(args.semantic_guard),
+        "sandbox_wrap": str(args.sandbox_wrap or "none"),
+        "context_guard": bool(args.context_guard),
         "profile": args.profile,
         "policy_path": args.policy,
         "journal_path": args.journal_path,

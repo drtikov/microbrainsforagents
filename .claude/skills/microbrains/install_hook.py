@@ -35,7 +35,7 @@ SETTINGS_LOCAL_PATH = PROJECT_DIR / ".claude" / "settings.local.json"
 SETTINGS_SHARED_PATH = PROJECT_DIR / ".claude" / "settings.json"
 
 PRE_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
-POST_TOOL_MATCHER = "Bash|Read|Grep|WebFetch|WebSearch|mcp__.*"
+POST_TOOL_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*"
 
 # Forward slashes + double quotes: hooks run through Git Bash on Windows or
 # sh / cmd.exe; single-quoted paths break under cmd.exe and unescaped backslashes
@@ -223,6 +223,25 @@ def install(
     pre = _strip_aetheris_from_event_list(hooks.get("PreToolUse", []))
     post = _strip_aetheris_from_event_list(hooks.get("PostToolUse", []))
     if http_daemon:
+        ignored_flags: list[str] = []
+        if strict_ast:
+            ignored_flags.append("--strict-ast")
+        if auto_allow:
+            ignored_flags.append("--auto-allow")
+        if profile:
+            ignored_flags.append(f"--profile {profile}")
+        if policy:
+            ignored_flags.append(f"--policy {policy}")
+        if context_guard:
+            ignored_flags.append("--context-guard")
+        if journal_path:
+            ignored_flags.append(f"--journal-path {journal_path}")
+        if ignored_flags:
+            print(
+                f"WARNING: --http-daemon ignores CLI policy flags ({', '.join(ignored_flags)}); "
+                "pass those flags to `python -m aetheris_microbrains.hook_daemon --http ...` instead.",
+                file=sys.stderr,
+            )
         base_url = str(http_daemon).rstrip("/")
         pre.append({
             "matcher": PRE_TOOL_MATCHER,

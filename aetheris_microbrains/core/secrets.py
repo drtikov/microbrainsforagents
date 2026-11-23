@@ -94,9 +94,9 @@ _REDACT_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = tuple(
 )
 
 
-_BASE64_BLOB_RE = re.compile(r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_=-])")
+_BASE64_BLOB_RE = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{24,}={0,2}(?![A-Za-z0-9+/_=-])")
 _WRAPPED_B64_BLOCK_RE = re.compile(r"(?m)(?:^[ \t]*[A-Za-z0-9+/_-]{16,80}[ \t]*\r?\n){1,80}[ \t]*[A-Za-z0-9+/_-]{8,80}={0,2}[ \t]*$")
-_HEX_BLOB_RE = re.compile(r"\b[0-9a-fA-F]{64,}\b")
+_HEX_BLOB_RE = re.compile(r"\b[0-9a-fA-F]{40,}\b")
 _ENCODED_SCAN_MAX_BLOBS = 200
 _ENCODED_BLOB_MAX_CHARS = 8192
 

@@ -82,12 +82,8 @@ def _leading_tool_verb(tool_segment: str) -> str:
 
 def is_writeish_mcp_tool(tool_segment: str) -> bool:
     """True when the tool name fragment suggests a state-changing or non-read-only operation."""
-    low = str(tool_segment or "").strip().lower()
     norm_tokens = [tok for tok in re.split(r"[^a-z0-9]+", _CAMEL_BOUNDARY_RE.sub(r"\1_\2", str(tool_segment or "")).lower()) if tok]
-    # Substring match catches compound names like CreateIssue / dropTable; token match catches short verbs like `set`
-    return any(marker in low for marker in _MCP_WRITEISH_MARKERS if len(marker) >= 4) or any(
-        tok in _MCP_WRITEISH_MARKERS for tok in norm_tokens
-    )
+    return any(tok in _MCP_WRITEISH_MARKERS for tok in norm_tokens)
 
 
 def is_readonly_mcp_tool(tool_segment: str) -> bool:

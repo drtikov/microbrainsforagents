@@ -164,6 +164,8 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     clean_name = tool_name.strip().lower()
     normalized: Dict[str, Any] = {"tool": tool_name}
+    if tool_raw and tool_raw.lower() != clean_name:
+        normalized["raw_tool"] = tool_raw
     if "file_path" in tool_input or "path" in tool_input or "notebook_path" in tool_input:
         normalized["path"] = tool_input.get("file_path") or tool_input.get("notebook_path") or tool_input.get("path")
     elif clean_name == "search_code" and tool_input.get("glob"):
@@ -255,10 +257,11 @@ def _build_sandbox_wrapped_command(
             f"-- /bin/sh -c {quoted_cmd}"
         )
     if mode == "seatbelt":
+        sbpl_proj = proj.replace("\\", "\\\\").replace('"', '\\"')
         profile = (
             '(version 1)(allow default)'
             f'(deny file-write* (subpath "/"))'
-            f'(allow file-write* (subpath "{proj}") (subpath "/tmp"))'
+            f'(allow file-write* (subpath "{sbpl_proj}") (subpath "/tmp") (subpath "/private/tmp"))'
         )
         return f"sandbox-exec -p {shlex.quote(profile)} /bin/sh -c {quoted_cmd}"
     return None
@@ -322,6 +325,11 @@ def evaluate_hook_payload(
     explicit_sess = _scope_session_state_path(raw_sess, payload)
     if explicit_sess:
         ctx["session_state_path"] = explicit_sess
+    custom_rules = getattr(policy, "custom_rules", ()) or ()
+    if any(isinstance(r, dict) and str(r.get("action") or "").strip().lower() == "allow" for r in custom_rules):
+        from .core.policy_governance import RuleVitalityLedger
+
+        ctx["vitality_ledger"] = RuleVitalityLedger()
     verdict = decide(norm, context=ctx or None, policy=policy)
     dec = verdict["decision"]
     if dec == "escalate" and not shadow_mode and explicit_sess:
@@ -345,7 +353,8 @@ def evaluate_hook_payload(
     hygiene_blocked = False
     avoided_tokens = 0
     use_context_guard = bool(context_guard or os.getenv("AETHERIS_CONTEXT_GUARD") == "1")
-    if use_context_guard and dec == "allow":
+    effective_allow = (verdict.get("shadow_decision") == "allow") if shadow_mode else (dec == "allow")
+    if use_context_guard and effective_allow:
         from .core.context_hygiene import ContextHygieneGate
         from .core.economics_ledger import record_savings_event
 
@@ -370,20 +379,24 @@ def evaluate_hook_payload(
         if not hygiene_v.allowed:
             hygiene_blocked = True
             avoided_tokens = int(hygiene_v.avoided_tokens)
-            record_savings_event(
-                "context_hygiene_block",
-                hygiene_v.avoided_bytes,
-                tool=tool_raw or str(norm.get("tool") or ""),
-                reason_code=hygiene_v.reason_code,
-                target=hygiene_v.target_path,
-                session_id=sess_id,
-                ledger_path=economics_ledger_path,
-            )
-            dec = "deny"
-            verdict["decision"] = "deny"
-            verdict["reason_code"] = hygiene_v.reason_code
             verdict["label"] = hygiene_v.reason
             verdict["layer"] = "hygiene"
+            if shadow_mode:
+                verdict["shadow_decision"] = "deny"
+                verdict["shadow_reason_code"] = hygiene_v.reason_code
+            else:
+                record_savings_event(
+                    "context_hygiene_block",
+                    hygiene_v.avoided_bytes,
+                    tool=tool_raw or str(norm.get("tool") or ""),
+                    reason_code=hygiene_v.reason_code,
+                    target=hygiene_v.target_path,
+                    session_id=sess_id,
+                    ledger_path=economics_ledger_path,
+                )
+                dec = "deny"
+                verdict["decision"] = "deny"
+                verdict["reason_code"] = hygiene_v.reason_code
             if log_decisions or shadow_mode:
                 from .core.layered_decision_engine import record_decision_journal
 
@@ -836,7 +849,7 @@ def _format_hook_error_stdout(event_kind: str, err_msg: str) -> str:
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "generic"}:
+    if host not in {"claude", "codex", "hermes", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
@@ -1026,8 +1039,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         if (
             os.getenv("AETHERIS_ALLOW_POLICY_EDIT") != "1"
             and not os.getenv("AETHERIS_STATE_DIR")
-            and sandbox_wrap in {"", "none"}
-            and not context_guard
         ):
             try:
                 from .hook_daemon import query_daemon
@@ -1045,6 +1056,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     explicit_flags.append("replace_tool_output")
                 if semantic_guard:
                     explicit_flags.append("semantic_guard")
+                if context_guard:
+                    explicit_flags.append("context_guard")
+                if sandbox_wrap not in {"", "none"}:
+                    explicit_flags.append("sandbox_wrap")
 
                 req_flags: Dict[str, Any] = {
                     "host": host,
@@ -1062,6 +1077,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     req_flags["replace_tool_output"] = True
                 if semantic_guard:
                     req_flags["semantic_guard"] = True
+                if context_guard:
+                    req_flags["context_guard"] = True
+                if sandbox_wrap not in {"", "none"}:
+                    req_flags["sandbox_wrap"] = sandbox_wrap
                 if journal_path:
                     req_flags["journal_path"] = journal_path
                 if session_state_path:

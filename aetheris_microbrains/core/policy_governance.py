@@ -572,6 +572,25 @@ class PendingRuleQueue:
         rid = str(rule_id or "").strip()
         if not rid:
             raise ValueError("rule_id must be non-empty")
+        p_out: Optional[Path] = None
+        out_ext = ""
+        yaml_mod: Any = None
+        if policy_out_path is not None:
+            p_out = Path(policy_out_path)
+            out_ext = p_out.suffix.lower()
+            if out_ext == ".toml":
+                raise ValueError(
+                    "Writing TOML policy files is not supported automatically (stdlib tomllib is read-only); "
+                    "use a .json policy_out_path or merge the returned rule into your TOML file."
+                )
+            if out_ext in {".yaml", ".yml"}:
+                try:
+                    import yaml as yaml_mod  # type: ignore
+                except ImportError as exc:
+                    raise ValueError(
+                        "Writing YAML policy files requires PyYAML; use a .json policy_out_path or install PyYAML."
+                    ) from exc
+
         ts = time.time() if now is None else float(now)
         with file_lock(self.path):
             pending = self._load_unlocked()
@@ -615,20 +634,34 @@ class PendingRuleQueue:
         )
         RuleVitalityLedger(path=vitality_path).register(rid, now=ts)
 
-        if policy_out_path is not None:
-            p_out = Path(policy_out_path)
+        if p_out is not None:
             with file_lock(p_out):
                 if p_out.is_file():
-                    raw_pol = json.loads(p_out.read_text(encoding="utf-8"))
-                    if not isinstance(raw_pol, dict):
-                        raw_pol = {}
+                    raw_text = p_out.read_text(encoding="utf-8")
+                    loaded = yaml_mod.safe_load(raw_text) if out_ext in {".yaml", ".yml"} else json.loads(raw_text)
+                    raw_pol = loaded if isinstance(loaded, dict) else {}
                 else:
                     raw_pol = {}
                 cur_rules = [dict(r) for r in (raw_pol.get("custom_rules") or []) if isinstance(r, dict)]
                 cur_rules = [r for r in cur_rules if str(r.get("id") or "") != rid]
                 cur_rules.append(rule_record)
                 raw_pol["custom_rules"] = cur_rules
-                _atomic_write_json(p_out, raw_pol)
+                if out_ext in {".yaml", ".yml"}:
+                    p_out.parent.mkdir(parents=True, exist_ok=True)
+                    fd, tmp_name = tempfile.mkstemp(prefix=f".{p_out.name}.", suffix=".tmp", dir=str(p_out.parent))
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            yaml_mod.safe_dump(raw_pol, fh, sort_keys=False, allow_unicode=True)
+                            fh.flush()
+                        os.replace(tmp_name, p_out)
+                    except Exception:
+                        try:
+                            os.unlink(tmp_name)
+                        except OSError:
+                            pass
+                        raise
+                else:
+                    _atomic_write_json(p_out, raw_pol)
 
         return rule_record
 

@@ -14,7 +14,7 @@ and fail-closed escalation. It is a static-analysis layer, NOT an OS sandbox.
 
 ### 1. Install the hooks into `.claude/settings.local.json`
 
-Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable with forward slashes), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"` and `--session-state auto`), and registers synchronous `PostToolUse` (`Bash|Read|Grep|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts apply before context ingestion. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
+Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable with forward slashes), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"` and `--session-state auto`), and registers synchronous `PostToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts and snapshot evictions apply properly. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
 
 ```bash
 python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny) + --session-state auto
@@ -35,7 +35,7 @@ python .claude/skills/microbrains/install_hook.py --dry-run    # preview the set
 python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end probe of the installed gate
 ```
 
-Console entrypoints installed by `pip install -e .`: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`.
+Console entrypoints installed by `pip install -e .`: `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`.
 
 Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
 
