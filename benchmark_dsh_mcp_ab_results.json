@@ -1,0 +1,61 @@
+{
+  "protocol": "deterministic 26-step A/B session; zero LLM calls",
+  "endpoint": "http://127.0.0.1:8766/mcp",
+  "without_gate": {
+    "hazard_intercepts": "0/12",
+    "runtime_syntax_failures": 4,
+    "wasted_recovery_turns": 8,
+    "security_incidents_executed": 8,
+    "error_feedback_tokens": 146,
+    "gate_overhead_ms": 0.0
+  },
+  "with_gate_inprocess": {
+    "hazard_intercepts": "12/12",
+    "runtime_syntax_failures": 0,
+    "wasted_recovery_turns": 0,
+    "security_incidents_executed": 0,
+    "benign_false_positives": "0/14",
+    "error_feedback_tokens": 37,
+    "timing": {
+      "samples": 26,
+      "mean_ms": 0.5668692353468102,
+      "median_ms": 0.4587999719660729,
+      "p95_ms": 1.06519996188581,
+      "min_ms": 0.1441999920643866,
+      "max_ms": 1.3748000492341816,
+      "total_ms": 14.738600119017065
+    }
+  },
+  "with_gate_dsh_mcp": {
+    "hazard_intercepts": "12/12",
+    "runtime_syntax_failures": 0,
+    "wasted_recovery_turns": 0,
+    "security_incidents_executed": 0,
+    "benign_false_positives": "0/14",
+    "error_feedback_label_tokens": 12,
+    "timing": {
+      "samples": 26,
+      "mean_ms": 16.64318846619258,
+      "median_ms": 15.640950005035847,
+      "p95_ms": 29.794499976560473,
+      "min_ms": 3.5392999998293817,
+      "max_ms": 33.720600011292845,
+      "total_ms": 432.7229001210071
+    }
+  },
+  "comparison": {
+    "turns_saved": 8,
+    "turns_saved_pct": 100.0,
+    "hazard_interception_pct": 100.0,
+    "incident_reduction_pct": 100.0,
+    "input_tokens_saved_estimate": 37055,
+    "error_feedback_token_reduction_pct": 74.7,
+    "mcp_label_token_reduction_vs_without_pct": 91.8,
+    "mcp_label_token_reduction_vs_inprocess_pct": 67.6,
+    "estimated_cost_saved_usd": 0.11116499999999999,
+    "mcp_transport_added_ms": 417.98430000199005,
+    "mcp_transport_added_pct_of_mcp_total": 96.6,
+    "mcp_vs_inprocess_latency_ratio": 29.36,
+    "mcp_vs_inprocess_total_ratio": 29.36
+  }
+}

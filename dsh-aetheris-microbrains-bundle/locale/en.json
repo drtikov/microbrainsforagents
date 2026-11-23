@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Aetheris Microbrains",
+    "description": "Adds eight on-demand pre-flight safety, AST validation, secret scrubbing, tool-routing, audit, and health tools through this repository's MCP server at http://127.0.0.1:8766/mcp. Requires Python 3.10+ with aetheris-microbrains[mcp] running on port 8766. Start a session and invoke mcp__microbrains__microbrain_health to verify. On-demand checks only: this does not automatically intercept DSH tool calls and is not an OS sandbox.",
+    "detail": "docs/DETAIL.md"
+  }
+}

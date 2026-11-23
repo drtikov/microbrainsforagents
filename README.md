@@ -48,6 +48,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [📊 Antigravity Benchmarks (Tokens, Safety & Speed)](#-antigravity-benchmarks-tokens-safety--speed)
   - [One-Command Setup for Antigravity](#one-command-setup-for-antigravity)
   - [Implementation & Test Suite](#implementation--test-suite)
+- [DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)](#deepseek-harness-dsh-integration-cordis-mcp-bundle)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -334,6 +335,29 @@ Measured on `2026-11-23` across two fresh, isolated subagent contexts on the sam
 - **[`aetheris_microbrains/install_antigravity.py`](aetheris_microbrains/install_antigravity.py):** One-command installer (`aetheris-install-antigravity` in `pyproject.toml`) writing `plugin.json`, top-level named `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, and `skills/aetheris-microbrains/SKILL.md` globally (`~/.gemini/config/plugins/aetheris-microbrains/`) or per-workspace (`--workspace`).
 - **[`.antigravity-plugin/`](.antigravity-plugin/):** Ready-to-use checked-in plugin bundle (`plugin.json`, `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, `skills/aetheris-microbrains/SKILL.md`).
 - **[`aetheris_microbrains/tests/test_antigravity_integration.py`](aetheris_microbrains/tests/test_antigravity_integration.py):** End-to-end contract, CLI mode, installer lifecycle, and bundle schema tests (**`554 passed, 2 skipped`** across the full test suite, plus `ANTIGRAVITY SELF-TEST PASSED` on `~/.gemini/config/plugins/aetheris-microbrains`).
+
+---
+
+## DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)
+
+DeepSeek Harness connects directly to `aetheris_microbrains.mcp_server` via the bundled Cordis package in [`dsh-aetheris-microbrains-bundle/`](dsh-aetheris-microbrains-bundle/) (`@local/aetheris-microbrains-mcp`), using `@deepseek-ai/dsh-mcp-client` over Streamable HTTP (`http://127.0.0.1:8766/mcp`).
+
+### Quick Setup for DeepSeek Harness
+
+1. **Install MCP dependencies & verify bundle:**
+   ```bash
+   pip install -e ".[mcp]"
+   python -m aetheris_microbrains.install_dsh --self-test
+   ```
+2. **Start the local MCP HTTP server** from the repository root:
+   ```bash
+   python -m aetheris_microbrains.mcp_server --http --port 8766
+   ```
+3. **Register `./dsh-aetheris-microbrains-bundle` in DeepSeek Harness:**
+   Load or install the bundle (`@local/aetheris-microbrains-mcp`) in DSH, start a new session, and verify with `mcp__microbrains__microbrain_health`.
+   - `failOnStartupError: false` in `cordis.patch.yml` ensures DSH starts cleanly even if the local port `8766` server isn't started yet.
+   - **Port note:** The MCP bundle uses port `8766` (`/mcp`), while the optional REST worker client ([`dsh_microbrain_client.py`](aetheris_microbrains/evolution/dsh_microbrain_client.py)) defaults to port `8080`.
+   - **Benchmark:** See [Section 6 (DeepSeek Harness On/Off A/B Benchmark)](#6-deepseek-harness-onoff-ab-benchmark-benchmark_dsh_mcp_abpy) (`python benchmark_dsh_mcp_ab.py`).
 
 ---
 

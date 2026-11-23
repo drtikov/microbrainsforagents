@@ -1,0 +1,9 @@
+- insert:
+    - id: aetheris-microbrains
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: microbrains
+        transport: streamable-http
+        url: http://127.0.0.1:8766/mcp
+        startupTimeoutMs: 30000
+        failOnStartupError: false
