@@ -224,10 +224,12 @@ Evaluated on the benchmark's 22 attack vectors and 12 benign control cases (`exa
 
 #### Codex Command-Hook Overhead (Measured Separately)
 
-The engine-only latency above excludes starting Python for Codex's command hooks. Across 10 direct process invocations on Windows / Python 3.10.6:
+SHA256 payload hashing is always included in engine timings; JSONL disk append (`--log-decisions`) and Python process cold-start are broken out separately below on Windows / Python 3.10.6:
 
 | Hook Stage | Median (`p50`) | Tail (`p95`) | Scope & Notes |
 |---|---:|---:|---|
+| In-process + SHA256 + JSONL disk log | 1.045 ms | 1.808 ms | 26-call session with `log_decisions=True` (1.113 ms mean; SHA256 is always included) |
+| Warm TCP daemon + SHA256 + JSONL disk log | 8.687 ms | 24.774 ms | 26-call session over localhost TCP `aetheris-daemon` with `log_decisions=True` (10.486 ms mean) |
 | `PreToolUse` command hook | 405.7 ms | 434.0 ms | Direct Python subprocess cold-start (10 runs) |
 | `PostToolUse` command hook | 393.6 ms | 408.2 ms | Direct Python subprocess cold-start (10 runs) |
 | Combined per tool call (both hooks) | ~799 ms | — | Combined median when both run; mitigated via warm `aetheris-daemon` |
@@ -686,6 +688,43 @@ python benchmark.py
 
 - **Token Economy:** Pruning full tool catalogs to top-4 candidates drops active tool schema overhead from **350 tokens down to 183 tokens** (**47.7% token reduction** per step).
 - **Aggregate 10-Step Loop:** Reduces overall routing and validation overhead from **~25.2s down to ~0.14s** (**~99.4% faster** execution).
+
+### 6. DeepSeek Harness On/Off A/B Benchmark (`benchmark_dsh_mcp_ab.py`)
+
+Measures the installed `@local/aetheris-microbrains-mcp` bundle through its live DSH MCP endpoint (`http://127.0.0.1:8766/mcp`). The 26-step session contains 14 benign calls and 12 hazards; **zero LLM calls and no destructive command execution**. DSH-internal client bridge overhead is excluded.
+
+```bash
+python benchmark_dsh_mcp_ab.py
+```
+
+| Metric | Without Microbrains | With Microbrains | Improvement |
+| --- | ---: | ---: | ---: |
+| Hazard intercepts | 0/12 | 12/12 | **100% interception** |
+| Runtime syntax failures | 4 | 0 | **100% prevented** |
+| Wasted recovery turns | 8 | 0 | **100% avoided** |
+| Security incidents executed | 8 | 0 | **100% blocked** |
+| Benign calls blocked | — | 0/14 | **0% false positives** |
+| Error-feedback tokens | 146 | 37 in-process | **74.7% fewer tokens** |
+| Error-feedback tokens | 146 | 12 MCP labels | **91.8% fewer tokens** |
+| Tool recall at Top-4 | 76.3% naive keyword | 97.4% Microbrains | **+21.1 percentage points** |
+| Needed-tool drop rate at Top-4 | 23.7% naive keyword | 2.6% Microbrains | **89.0% fewer dropped tools** |
+| Tool-schema tokens after retries | Baseline | 39.7% less | **39.7% saved** |
+
+**Live MCP latency over three runs:**
+
+| Measurement | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| In-process mean/check | 0.73 ms | 0.79 ms | 0.57 ms | **0.73 ms** |
+| MCP mean/check | 51.91 ms | 18.47 ms | 16.64 ms | **18.47 ms** |
+| MCP p95/check | 100.86 ms | 33.36 ms | 29.79 ms | **33.36 ms** |
+| Total for 26 checks | 1,349.75 ms | 480.35 ms | 432.72 ms | **480.35 ms** |
+| Transport share of MCP time | 98.6% | 95.7% | 96.6% | **96.6%** |
+
+- MCP mean latency range: **16.64–51.91 ms/check**; p95 range: **29.79–100.86 ms/check**.
+- Median MCP/in-process latency ratio: **23.38x** — the policy engine is fast; MCP transport is the dominant overhead.
+- Modeled input savings: **~37,055 tokens/session**, **$0.1112/session**, or **$11.12 per 100 sessions**. These token and dollar figures are estimates, **not live LLM invoice measurements**.
+
+> **Scope note:** The MCP tools are on-demand checks, not automatic enforcement for every DSH action. Use the repository's separate hook for automatic pre-tool enforcement and OS-level isolation for untrusted execution.
 
 ---
 
