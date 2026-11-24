@@ -417,12 +417,12 @@ def test_antigravity_auto_approve_escalations(tmp_path):
     py_cmd = {
         "toolCall": {"id": "aae_1", "name": "run_command", "args": {"CommandLine": "python -c 'print(1)'"}}
     }
-    # Without auto_approve_escalations: routine escalations emit ask (allows native Always Allow)
+    # Without auto_approve_escalations: routine escalations emit ask/force_ask
     r_normal = evaluate_hook_payload(py_cmd, host="antigravity", profile="dev", log_decisions=False)
     assert r_normal["decision"] == "escalate"
-    assert r_normal["hookSpecificOutput"]["decision"] == "ask"
+    assert r_normal["hookSpecificOutput"]["decision"] in {"ask", "force_ask"}
 
-    # With auto_approve_escalations: returns allow directly without force_ask
+    # Unrecognized/inline shell escalations NEVER auto-approve even with auto_approve_escalations=True
     r_auto = evaluate_hook_payload(
         py_cmd,
         host="antigravity",
@@ -430,9 +430,8 @@ def test_antigravity_auto_approve_escalations(tmp_path):
         auto_approve_escalations=True,
         log_decisions=False,
     )
-    assert r_auto["decision"] == "allow"
-    assert r_auto["hookSpecificOutput"]["decision"] == "allow"
-    assert r_auto["reason_code"] == "auto_approve_escalations"
+    assert r_auto["decision"] == "escalate"
+    assert r_auto["hookSpecificOutput"]["decision"] == "ask"
 
     # Hard deny is STILL blocked with deny even when auto_approve_escalations=True
     rm_bad = {"toolCall": {"id": "aae_bad", "name": "run_command", "args": {"CommandLine": "rm -rf /"}}}
@@ -505,10 +504,10 @@ def test_antigravity_auto_approve_escalations(tmp_path):
     assert r_cfg_w["decision"] == "deny"
     assert r_cfg_w["hookSpecificOutput"]["decision"] == "deny"
 
-    # Claude Code host also honors auto_approve_escalations=True without permissionDecision='ask'
-    claude_py = {"tool_name": "Bash", "tool_input": {"command": "python -c 'print(1)'"}}
+    # Claude Code host also honors auto_approve_escalations=True on eligible non-credential config reads
+    claude_cfg = {"tool_name": "Read", "tool_input": {"file_path": "CLAUDE.md"}}
     r_claude = evaluate_hook_payload(
-        claude_py,
+        claude_cfg,
         host="claude",
         profile="dev",
         auto_approve_escalations=True,
@@ -516,3 +515,4 @@ def test_antigravity_auto_approve_escalations(tmp_path):
     )
     assert r_claude["decision"] == "allow"
     assert r_claude["permissionDecision"] == "allow"
+    assert r_claude["reason_code"] == "auto_approve_escalations"

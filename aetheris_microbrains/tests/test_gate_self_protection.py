@@ -143,3 +143,55 @@ def test_ordinary_command_still_auto_allows_end_to_end():
         session_state_path=None,
     )
     assert v["decision"] == "allow"
+
+
+# ---------- fix 3: .env.<suffix> glob bypass closure ----------
+
+def test_env_suffix_glob_variants_escalate():
+    for cmd in (
+        "cat .[e]nv.local",
+        "cat .e??.local",
+        "cat .en?.local",
+        "cat .[e]nv.*",
+        "cat config/.[e]nv.local",
+    ):
+        v = lde.decide({"tool": "execute_shell", "cmd": cmd}, context=None, policy=DEV_POLICY)
+        assert v["decision"] == "escalate", f"Expected escalate for {cmd}, got {v}"
+
+
+def test_benign_dot_globs_stay_allowed():
+    for cmd in ("ls *", "ls *.local", "ls .*.local", "ls .git*.local"):
+        v = lde.decide({"tool": "execute_shell", "cmd": cmd}, context=None, policy=DEV_POLICY)
+        assert v["decision"] == "allow", f"Expected allow for {cmd}, got {v}"
+
+
+# ---------- fix 4: --auto-approve-escalations strict allowlist ----------
+
+def test_auto_approve_refuses_unrecognized_and_sensitive_escalations():
+    for rc in (
+        "layer1_unrecognized_shell_command_escalate",
+        "layer1_uninspected_tool_escalate",
+        "layer1_sensitive_env_access_escalate",
+        "layer1_shell_redirection_escalate",
+        "layer1_ast_dev_escalate",
+        "layer1_mcp_write_tool_escalate",
+        "layer1_strict_ast_allowlist",
+    ):
+        assert _is_auto_approve_escalation_eligible(rc, None) is False
+
+    for cmd in (
+        "custom_deploy_binary --prod",
+        "some_unknown_tool --flag",
+        "curl https://api.github.com",
+        "git clean -fdx",
+    ):
+        v = evaluate_hook_payload(
+            {"tool_name": "Bash", "tool_input": {"command": cmd}},
+            host="antigravity",
+            profile="dev",
+            auto_approve_escalations=True,
+            session_state_path=None,
+            log_decisions=False,
+        )
+        assert v["decision"] == "escalate", f"Expected escalate for {cmd}, got {v}"
+        assert v["hookSpecificOutput"]["decision"] in {"ask", "force_ask"}

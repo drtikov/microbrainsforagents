@@ -85,17 +85,27 @@ def test_daemon_idle_timeout_and_escalation_flag_forwarding(tmp_path):
     pong = ping_daemon(state_path=state_file, timeout=0.5)
     assert isinstance(pong, dict) and pong.get("ok") is True
 
-    # Forwarding auto_approve_escalations permits non-credential escalation in daemon mode
+    # Forwarding auto_approve_escalations permits non-credential config reads in daemon mode,
+    # while unrecognized shell commands remain escalated
     verdict, cached = evaluate_request(
         {
             "event": "pre",
-            "payload": {"toolCall": {"name": "run_command", "args": {"CommandLine": "custom_readonly_probe --version"}}},
+            "payload": {"toolCall": {"name": "read_file", "args": {"Path": "CLAUDE.md"}}},
             "flags": {"host": "antigravity", "auto_approve_escalations": True, "auto_allow": True},
         }
     )
     assert cached is False
     assert verdict["decision"] == "allow"
     assert verdict["reason_code"] == "auto_approve_escalations"
+
+    verdict_cmd, _ = evaluate_request(
+        {
+            "event": "pre",
+            "payload": {"toolCall": {"name": "run_command", "args": {"CommandLine": "custom_readonly_probe --version"}}},
+            "flags": {"host": "antigravity", "auto_approve_escalations": True, "auto_allow": True},
+        }
+    )
+    assert verdict_cmd["decision"] == "escalate"
 
     # Wait past idle_timeout: daemon exits cleanly and cleans up state file
     srv_thread.join(timeout=3.0)

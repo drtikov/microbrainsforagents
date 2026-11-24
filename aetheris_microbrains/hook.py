@@ -105,6 +105,11 @@ _AUTO_APPROVE_READ_BASENAMES = frozenset({
 })
 
 
+_AUTO_APPROVE_ELIGIBLE_REASON_CODES = frozenset({
+    "layer2_verification_escalation",
+})
+
+
 def _is_approve_once_eligible(reason_code: Optional[str]) -> bool:
     """Return True if an escalation reason code may be remembered via `--approve-once`."""
     rc = str(reason_code or "").strip().lower()
@@ -118,12 +123,14 @@ def _is_auto_approve_escalation_eligible(
 ) -> bool:
     """Return True if an escalation may be auto-approved under `--auto-approve-escalations`.
 
-    Allows all standard `--approve-once` escalations plus read-only access to
+    Uses a strict allowlist of benign escalation reason codes plus read-only access to
     non-credential agent control-plane/workspace config paths (never credential stores).
     """
-    if _is_approve_once_eligible(reason_code):
-        return True
     rc = str(reason_code or "").strip().lower()
+    if not rc:
+        return False
+    if rc in _AUTO_APPROVE_ELIGIBLE_REASON_CODES:
+        return True
     if rc == "layer0_protected_path_read_requires_confirmation" and target_path:
         from .core.layered_decision_engine import (
             _AGENT_CREDENTIAL_SEGMENTS,
@@ -817,7 +824,10 @@ def evaluate_hook_payload(
         else:
             ag_ask_dec = (
                 "ask"
-                if _is_auto_approve_escalation_eligible(verdict.get("reason_code"), norm.get("path"))
+                if (
+                    _is_approve_once_eligible(verdict.get("reason_code"))
+                    or _is_auto_approve_escalation_eligible(verdict.get("reason_code"), norm.get("path"))
+                )
                 else "force_ask"
             )
             perm = ag_ask_dec

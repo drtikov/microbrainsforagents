@@ -547,13 +547,22 @@ def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
     # Glob and wildcard pattern matching (supporting wildcards anywhere in the path, e.g. .e?, .ss*, .s?h)
     if any(ch in normalized for ch in "*?["):
         normalized_stripped = normalized.lstrip("/")
-        path_is_targeted_dotglob = normalized_stripped.startswith(".") or normalized_stripped.startswith("~/.")
+        path_is_targeted_dotglob = (
+            normalized_stripped.startswith(".")
+            or normalized_stripped.startswith("~/.")
+            or basename.startswith(".")
+        )
         normalized_is_pure_wildcard = normalized and all(ch in "*?[/" for ch in normalized)
 
         if path_is_targeted_dotglob and not normalized_is_pure_wildcard:
             # Match against exact basenames (user's path is a targeted wildcard matching a protected name)
             if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
                 return True
+            # Match `.env.<suffix>` glob variants that obscure the `.env` prefix (e.g. `.[e]nv.local`, `.e??.local`, `.[e]nv.*`)
+            if basename.startswith(".") and "." in basename[1:]:
+                env_head = "." + basename[1:].split(".", 1)[0]
+                if any(ch not in "*?[]" for ch in env_head[1:]) and fnmatch.fnmatch(".env", env_head):
+                    return True
             # Match against all protected patterns and directories
             for pat in all_patterns:
                 cpat = pat.strip("/").lower()
