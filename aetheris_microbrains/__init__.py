@@ -39,6 +39,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "record_decision_journal": (".core.layered_decision_engine", "record_decision_journal"),
     "redact_secrets": (".core.layered_decision_engine", "redact_secrets"),
     "scrub_tool_output": (".core.secrets", "scrub_tool_output"),
+    "scrub_secrets": (".core.secrets", "scrub_tool_output"),
     # Audit & inspection
     "get_journal_entries": (".audit", "get_journal_entries"),
     "format_entry": (".audit", "format_entry"),

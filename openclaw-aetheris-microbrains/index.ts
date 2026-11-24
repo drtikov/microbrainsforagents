@@ -345,6 +345,67 @@ const plugin = {
         // Best-effort post observation
       }
     });
+
+    api.on("session_start", async (_event: Record<string, unknown>, ctx?: OpenClawHookContext) => {
+      const cfg = resolveConfig(api, ctx);
+      const payload = {
+        context: ctx ? { sessionKey: ctx.sessionKey, sessionId: ctx.sessionId, trigger: ctx.trigger } : {},
+      };
+      try {
+        await postDaemon(`${cfg.daemonUrl}/v1/hook/event/session-start`, sessionToken, payload, cfg.timeoutMs);
+      } catch {
+        // Best-effort lifecycle notification
+      }
+    });
+
+    api.on("session_end", async (_event: Record<string, unknown>, ctx?: OpenClawHookContext) => {
+      const cfg = resolveConfig(api, ctx);
+      const payload = {
+        context: ctx ? { sessionKey: ctx.sessionKey, sessionId: ctx.sessionId, trigger: ctx.trigger } : {},
+      };
+      try {
+        await postDaemon(`${cfg.daemonUrl}/v1/hook/event/stop`, sessionToken, payload, cfg.timeoutMs);
+      } catch {
+        // Best-effort lifecycle notification
+      }
+    });
+
+    api.on("mcp_tool_registered", async (event: Record<string, unknown>, ctx?: OpenClawHookContext) => {
+      const cfg = resolveConfig(api, ctx);
+      const tool =
+        event?.tool && typeof event.tool === "object"
+          ? (event.tool as Record<string, unknown>)
+          : event || {};
+      const payload = {
+        tool_name: String(tool?.name || event?.toolName || ""),
+        description: String(tool?.description || ""),
+        inputSchema: tool?.inputSchema || tool?.parameters || event?.schema || {},
+        server: String(event?.serverId || event?.server || ""),
+      };
+      try {
+        const verdict = await postDaemon(
+          `${cfg.daemonUrl}/v1/mcp/validate`,
+          sessionToken,
+          payload,
+          Math.min(cfg.timeoutMs, 1500),
+        );
+        if (!cfg.shadow && verdict && verdict.block === true) {
+          return {
+            block: true,
+            blockReason: String(verdict.blockReason || "MCP tool rejected by Aetheris"),
+          };
+        }
+        return undefined;
+      } catch {
+        if (!cfg.shadow && cfg.failClosed) {
+          return {
+            block: true,
+            blockReason: "Aetheris MCP validation unavailable (fail-closed)",
+          };
+        }
+        return undefined;
+      }
+    });
   },
 };
 

@@ -689,6 +689,8 @@ def serve_http(
     served_count = 0
 
     class _HookHTTPHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, format: str, *args: Any) -> None:  # silence stderr noise
             return
 
@@ -701,8 +703,28 @@ def serve_http(
             self.wfile.write(raw)
 
         def do_GET(self) -> None:
-            if self.path.split("?")[0] == "/health":
+            path = self.path.split("?")[0]
+            if path == "/health":
                 self._send_json(200, {"ok": True, "version": DAEMON_VERSION, "mode": "http"})
+            elif path == "/v1/audit/summary":
+                auth_hdr = self.headers.get("Authorization", "")
+                supplied = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+                if not hmac.compare_digest(supplied, auth_value):
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                from .core.audit_ui import build_dashboard_snapshot
+
+                jpath = daemon_flags.get("journal_path")
+                snap = build_dashboard_snapshot(journal_path=jpath, limit=200)
+                self._send_json(
+                    200,
+                    {
+                        "total_events": snap["total_events"],
+                        "decisions": snap["decisions"],
+                        "avg_latency_ms": snap["avg_latency_ms"],
+                        "generated_at": snap["generated_at"],
+                    },
+                )
             else:
                 self._send_json(404, {"error": "not_found"})
 
@@ -717,6 +739,66 @@ def serve_http(
                     return
                 self._send_json(200, {"ok": True, "stopping": True})
                 threading.Thread(target=httpd.shutdown, daemon=True).start()
+                return
+            if path == "/v1/mcp/validate":
+                auth_hdr = self.headers.get("Authorization", "")
+                supplied = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+                if not hmac.compare_digest(supplied, auth_value):
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                try:
+                    cl = int(self.headers.get("Content-Length") or "0")
+                except ValueError:
+                    self._send_json(400, {"error": "invalid_content_length"})
+                    return
+                if cl < 0 or cl > _MAX_REQUEST_BYTES:
+                    self._send_json(413, {"error": "payload_too_large"})
+                    return
+                raw_body = self.rfile.read(cl)
+                try:
+                    payload = json.loads(raw_body.decode("utf-8"))
+                except Exception as exc:
+                    self._send_json(400, {"error": f"invalid_json:{exc}"})
+                    return
+                if not isinstance(payload, dict):
+                    self._send_json(400, {"error": "expected_json_object"})
+                    return
+                if isinstance(payload.get("tools"), list):
+                    tools = payload["tools"]
+                elif isinstance(payload.get("tool"), dict):
+                    tools = [payload["tool"]]
+                else:
+                    tools = [
+                        {
+                            "name": payload.get("tool_name") or payload.get("name") or "",
+                            "description": payload.get("description") or "",
+                            "inputSchema": (
+                                payload.get("inputSchema")
+                                if "inputSchema" in payload
+                                else (payload.get("schema") if "schema" in payload else payload.get("parameters", {}))
+                            ),
+                        }
+                    ]
+                from .core.mcp_security import scan_mcp_tools
+
+                res = scan_mcp_tools(tools)
+                is_safe = bool(res["safe"])
+                self._send_json(
+                    200,
+                    {
+                        "safe": is_safe,
+                        "block": not is_safe,
+                        "blockReason": (
+                            f"MCP tool schema rejected: {', '.join(res['findings'])}"
+                            if not is_safe
+                            else None
+                        ),
+                        "findings": res["findings"],
+                        "flagged_tools": res["flagged_tools"],
+                        "shadowed_tools": res["shadowed_tools"],
+                        "tool_hashes": res["tool_hashes"],
+                    },
+                )
                 return
             if path in {"/v1/hook/pre", "/v1/hook/post"}:
                 ev = "post" if path == "/v1/hook/post" else "pre"
