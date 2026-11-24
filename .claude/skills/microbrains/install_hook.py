@@ -201,6 +201,7 @@ def install(
     http_daemon: str | None = None,
     context_guard: bool = False,
     full_lifecycle: bool = False,
+    auto_daemon: bool = False,
 ) -> int:
     if settings_path is not None:
         target = settings_path
@@ -227,6 +228,10 @@ def install(
     if context_guard:
         pre_extra.append("--context-guard")
         post_extra.append("--context-guard")
+    if auto_daemon:
+        # Warm TCP daemon on cold fallback: kills the per-call interpreter-spawn
+        # tax on the sync pre path. Post stays async and off the critical path.
+        pre_extra.append("--auto-daemon")
     if profile:
         pre_extra.extend(["--profile", profile])
     if policy:
@@ -493,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--strict-ast", action=argparse.BooleanOptionalAction, default=None, help="Enable strict AST import/dynamic-call allowlist (negate with --no-strict-ast)")
     ap.add_argument("--shadow", action=argparse.BooleanOptionalAction, default=None, help="Observe-only: log decisions, never block (negate with --no-shadow)")
     ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=None, help="Emit permissionDecision='allow' on safe verdicts (default on for bare/solo-dev installs; off for ci/paranoid; negate with --no-auto-allow)")
-    ap.add_argument("--auto-approve-escalations", action=argparse.BooleanOptionalAction, default=None, help="Auto-approve eligible escalations instead of prompting (zero-prompt posture; default on for bare/solo-dev installs; off for ci/paranoid; ineligible classes still ask: protected-path writes, secrets, ifc-taint, malformed payloads; negate with --no-auto-approve-escalations)")
+    ap.add_argument("--auto-approve-escalations", action=argparse.BooleanOptionalAction, default=None, help="Auto-approve eligible escalations instead of prompting (zero-prompt posture; default on for bare/solo-dev installs; off for ci/paranoid; ineligible classes still ask: protected-path writes AND reads, secrets, ifc-taint, malformed payloads; negate with --no-auto-approve-escalations)")
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")
@@ -507,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="Print the settings that would be written; modify nothing")
     ap.add_argument("--preset", choices=["solo-dev", "ci", "paranoid"], default=None, help="Opinionated flag bundle (explicit flags still override)")
     ap.add_argument("--context-guard", action=argparse.BooleanOptionalAction, default=False, help="Enable deterministic context-hygiene gating for redundant/oversized reads (negate with --no-context-guard)")
+    ap.add_argument("--auto-daemon", action=argparse.BooleanOptionalAction, default=None, help="PreToolUse hook auto-spawns the warm TCP hook daemon on cold fallback (near-zero marginal latency after first call; pure optimization; negate with --no-auto-daemon)")
     ap.add_argument("--full-lifecycle", action="store_true", help="Also register Phase 1 lifecycle hooks (SessionStart, InstructionsLoaded, UserPromptSubmit, PostToolUseFailure, PostToolBatch, PreCompact, SubagentStop, Stop, PermissionDenied)")
     ap.add_argument("--self-test", action="store_true", help="In-process installation checks (imports, probe verdicts, installed settings)")
     args = ap.parse_args(argv)
@@ -536,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         http_daemon=args.http_daemon,
         context_guard=bool(args.context_guard),
         full_lifecycle=bool(args.full_lifecycle),
+        auto_daemon=bool(args.auto_daemon),
     )
 
 

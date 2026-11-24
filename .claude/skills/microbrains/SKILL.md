@@ -26,7 +26,7 @@ python .claude/skills/microbrains/install_hook.py --http-daemon http://127.0.0.1
 python .claude/skills/microbrains/install_hook.py --project-dir /path/to/repo  # target another project
 python .claude/skills/microbrains/install_hook.py --shared      # write portable config to .claude/settings.json
 python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts; default on)
-python .claude/skills/microbrains/install_hook.py --auto-approve-escalations  # zero-prompt posture: eligible escalations auto-allow (default on; only protected-path writes / secrets / ifc-taint / malformed still ask)
+python .claude/skills/microbrains/install_hook.py --auto-approve-escalations  # zero-prompt posture: eligible escalations auto-allow (default on; only protected-path writes AND reads / secrets / ifc-taint / malformed still ask)
 python .claude/skills/microbrains/install_hook.py --no-auto-approve-escalations  # restore ask-on-novel-command
 python .claude/skills/microbrains/install_hook.py --async-post  # run PostToolUse asynchronously instead of blocking
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
@@ -39,7 +39,7 @@ python .claude/skills/microbrains/install_hook.py --self-test  # end-to-end prob
 
 Console entrypoints installed by `pip install -e .`: `aetheris` (unified CLI), `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`, `aetheris-pr-gate`, `aetheris-install-antigravity`.
 
-Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`.
+Note: `.claude/` control-plane files are protected by Layer 0 while enforce mode is active; operator maintenance of hook config or skills requires running from a user shell or setting `AETHERIS_ALLOW_POLICY_EDIT=1`. The gate also write-protects its OWN source tree (the live `aetheris_microbrains/` package directory): agent write-class calls and shell redirections into it hard-deny, while reads stay free; the same break-glass env var unlocks package maintenance. If the warm hook daemon is running, restart it after editing gate code so it serves the new bytes.
 
 Verify with a probe payload (expect `permissionDecision: "deny"` and exit code `2` for the root rm probe):
 
@@ -150,7 +150,8 @@ The hook CLI queries the TCP daemon first and falls back to identical in-process
 - `--sandbox-wrap auto|bwrap` - wrap approved shell commands in OS sandbox containment (`bwrap` on Linux when installed)
 - `--context-guard` (`AETHERIS_CONTEXT_GUARD=1`) - block redundant unchanged whole reads, serve inline outlines on oversized reads, and block hung stdin / root-origin searches
 - `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts
-- `--auto-approve-escalations` (`AETHERIS_AUTO_APPROVE_ESCALATIONS=1`) - flip eligible escalations to silent allow instead of prompting; ineligible classes (protected-path writes, secrets, ifc-taint, malformed) still ask; hard denies remain silent blocks
+- `--auto-approve-escalations` (`AETHERIS_AUTO_APPROVE_ESCALATIONS=1`) - flip eligible escalations to silent allow instead of prompting; ineligible classes (protected-path writes AND reads, secrets, ifc-taint, malformed) still ask; hard denies remain silent blocks
+- `--auto-daemon` (`AETHERIS_AUTO_DAEMON=1`) - auto-spawn the warm TCP hook daemon on cold fallback so per-call latency drops from a fresh interpreter spawn to a localhost verdict; pure optimization, identical verdicts, respawns after its idle TTL expires
 
 ## Response contract
 

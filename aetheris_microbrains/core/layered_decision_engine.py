@@ -637,6 +637,62 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
     return _is_protected_path_cached(raw, _policy_protected_patterns(policy))
 
 
+_LIVE_PACKAGE_DIR: Optional[str] = None
+_LIVE_PACKAGE_DIR_RESOLVED = False
+
+
+def _live_package_dir() -> Optional[str]:
+    """Absolute path of the RUNNING gate's own package tree (resolved once per process)."""
+    global _LIVE_PACKAGE_DIR, _LIVE_PACKAGE_DIR_RESOLVED
+    if not _LIVE_PACKAGE_DIR_RESOLVED:
+        _LIVE_PACKAGE_DIR_RESOLVED = True
+        try:
+            _LIVE_PACKAGE_DIR = str(Path(__file__).resolve().parents[1])
+        except Exception:
+            _LIVE_PACKAGE_DIR = None
+    return _LIVE_PACKAGE_DIR
+
+
+@lru_cache(maxsize=4096)
+def _is_live_package_path_cached(raw_norm: str, pkg_norm: str, raw_is_abs: bool) -> bool:
+    """True if normalized `raw_norm` is (or lives under) the live package dir `pkg_norm`."""
+    if not pkg_norm:
+        return False
+    if raw_norm == pkg_norm:
+        return True
+    sep = "\\" if "\\" in pkg_norm else "/"
+    if raw_is_abs and raw_norm.startswith(pkg_norm.rstrip(sep) + sep):
+        return True
+    if not raw_is_abs:
+        # Relative targets: the package directory name is an import invariant
+        # (`import aetheris_microbrains` requires the dir to be named exactly
+        # that), so a cwd-relative path into `<pkg_name>/...` is treated as a
+        # package write no matter which cwd would resolve it.
+        first_seg = raw_norm.replace("\\", "/").strip("/").split("/", 1)[0]
+        pkg_name = pkg_norm.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return bool(first_seg) and first_seg == pkg_name
+    return False
+
+
+def _is_live_package_path(path_str: Optional[str]) -> bool:
+    """True if the target is (or lives under) the RUNNING gate's own source tree.
+
+    WRITE-protection only: reads of the gate's own source stay ungated so normal
+    development (Read/Grep/cat of the package) never escalates. Wire sites:
+    `evaluate_layer0_policy` (write-class tool deny), `_is_privileged_or_unsafe_
+    redirect_target` (shell `>` veto), and the `AETHERIS_ALLOW_POLICY_EDIT`
+    break-glass in `decide()` (operator package maintenance).
+    """
+    if not path_str:
+        return False
+    raw = str(path_str).replace("\\", "/").strip()
+    if not raw or "\x00" in raw:
+        return False
+    raw_norm = os.path.normcase(os.path.normpath(raw))
+    pkg_norm = os.path.normcase(os.path.normpath(_live_package_dir() or ""))
+    return _is_live_package_path_cached(raw_norm, pkg_norm, os.path.isabs(raw))
+
+
 def evaluate_layer0_policy(
     tool_name: str,
     target_path: Optional[str] = None,
@@ -649,6 +705,17 @@ def evaluate_layer0_policy(
     risk_class = TOOL_RISK_CLASSES.get(clean_tool, "EXTERNAL_ACTION")
 
     is_write = risk_class in ("REVERSIBLE_WRITE", "IRREVERSIBLE_DESTRUCTIVE", "EXTERNAL_ACTION")
+    if target_path and (is_write or clean_tool in ("", "apply_patch")) and _is_live_package_path(target_path):
+        # The gate's own source tree is a constitutional asset: hard-deny agent
+        # writes (reads stay free — source is public, and read-escalation would
+        # poison every dev session). Operator maintenance goes through a user
+        # shell or the AETHERIS_ALLOW_POLICY_EDIT=1 break-glass in decide().
+        return {
+            "decision": "deny",
+            "risk_class": risk_class,
+            "reason_code": "layer0_protected_path_veto",
+            "protected_path": target_path,
+        }
     if target_path and is_protected_path(target_path, cfg):
         if is_write or clean_tool in ("", "apply_patch"):
             return {
@@ -2839,6 +2906,9 @@ def _is_privileged_or_unsafe_redirect_target(target: str) -> bool:
         return True
     if is_protected_path(t):
         return True
+    if _is_live_package_path(t):
+        # The running gate's own source: never a redirect target.
+        return True
     return False
 
 
@@ -4963,11 +5033,16 @@ def decide(
         l0 = evaluate_layer0_policy(tool_name, target_path, cfg, input_data=input_data)
         if l0["decision"] == "deny":
             # Break-glass: operator-held env var unlocks policy-plane maintenance only
-            # (hook config, skill files). The agent cannot set env vars in the hook
-            # process; credential stores (.env, keys, secrets) are never eligible.
+            # (hook config, skill files, and the gate's own source tree). The agent
+            # cannot set env vars in the hook process; credential stores (.env, keys,
+            # secrets) are never eligible.
+            _bp = str(l0.get("protected_path") or "")
             if not (
                 os.getenv("AETHERIS_ALLOW_POLICY_EDIT") == "1"
-                and _is_agent_control_plane_path(str(l0.get("protected_path") or ""))
+                and (
+                    _is_agent_control_plane_path(_bp)
+                    or _is_live_package_path(_bp)
+                )
             ):
                 return _finish("deny", "blocked_policy", ["deny"], l0["reason_code"], 0)
 

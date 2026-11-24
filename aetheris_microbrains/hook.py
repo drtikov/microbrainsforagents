@@ -37,6 +37,11 @@ _APPROVE_ONCE_INELIGIBLE_PREFIXES = (
     "layer0_protected_path",
     "layer0_secret",
     "layer1_ifc_taint",
+    # Protected-path shell reads (layer1_protected_path_shell_read[_escalate])
+    # must surface as a real ask, never a silent auto-approval: reading a
+    # credential or control-plane file into context is exactly the egress-class
+    # act the zero-prompt posture must not hide from the operator.
+    "layer1_protected_path",
     "malformed_",
 )
 _APPROVE_ONCE_SHELL_TOOLS = frozenset({
