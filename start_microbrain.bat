@@ -1,3 +1,3 @@
 @echo off
-cd /d I:\aether
-"C:\Users\user\AppData\Local\Programs\Python\Python310\python.exe" -m aetheris_microbrains.core.microbrain_server
+cd /d "%~dp0"
+python -m aetheris_microbrains.mcp_server --http --port 8080 %*

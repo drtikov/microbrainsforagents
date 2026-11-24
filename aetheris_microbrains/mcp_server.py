@@ -213,6 +213,23 @@ def build_mcp_server(
             "results": sanitized,
         })
 
+    if hasattr(server, "custom_route"):
+        @server.custom_route("/health", methods=["GET"])
+        async def _http_health(_request: Any) -> Any:
+            from starlette.responses import JSONResponse
+            from . import __version__
+
+            tools_registered = sorted(
+                getattr(getattr(server, "_tool_manager", None), "_tools", {}).keys()
+            )
+            return JSONResponse({
+                "status": "ok",
+                "server": name,
+                "version": __version__,
+                "tools_registered": tools_registered,
+                "tool_count": len(tools_registered),
+            })
+
     return server
 
 

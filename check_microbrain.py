@@ -11,7 +11,11 @@ def check_server(base_url: str = "http://127.0.0.1:8080") -> int:
     try:
         with urllib.request.urlopen(f"{base_url}/health", timeout=5) as resp:
             health = json.loads(resp.read().decode("utf-8"))
-        print(f"[ok] GET {base_url}/health -> {health.get('status')} (brains={len(health.get('brains_loaded', []))})")
+        if "tool_count" in health:
+            detail = f"tools={health.get('tool_count')}"
+        else:
+            detail = f"brains={len(health.get('brains_loaded', []))}"
+        print(f"[ok] GET {base_url}/health -> {health.get('status')} ({detail})")
     except Exception as exc:
         print(f"[FAIL] GET {base_url}/health failed: {exc}", file=sys.stderr)
         return 1
