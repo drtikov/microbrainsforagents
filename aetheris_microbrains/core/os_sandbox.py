@@ -207,7 +207,10 @@ class DomainAllowlistProxy:
 
 def find_aetheris_gate_binary() -> Optional[str]:
     """Locate the native `aetheris-gate` Rust binary on PATH or in the repo build directory."""
-    on_path = shutil.which("aetheris-gate")
+    try:
+        on_path = shutil.which("aetheris-gate")
+    except (AttributeError, OSError):
+        on_path = None
     if on_path:
         return on_path
     exe_name = "aetheris-gate.exe" if os.name == "nt" else "aetheris-gate"
@@ -237,7 +240,11 @@ def build_os_sandbox_command(
     mode = str(sandbox_mode or "none").strip().lower()
     if mode in {"", "none", "off", "false"}:
         return None
-    resolved_gate = gate_bin or find_aetheris_gate_binary()
+    if mode in {"bwrap", "seatbelt"} and sys.platform == "win32":
+        return None
+    resolved_gate: Optional[str] = None
+    if mode in {"auto", "aetheris-gate", "landlock", "job"}:
+        resolved_gate = gate_bin or find_aetheris_gate_binary()
     if mode == "auto":
         if shutil.which("srt"):
             mode = "srt"
@@ -252,8 +259,6 @@ def build_os_sandbox_command(
 
     if mode == "srt":
         return f"srt -- /bin/sh -c {shlex.quote(raw_cmd)}"
-    if mode in {"bwrap", "seatbelt"} and sys.platform == "win32":
-        return None
 
     proj = str(Path(project_dir or os.getcwd()).resolve())
     quoted_cmd = shlex.quote(raw_cmd)

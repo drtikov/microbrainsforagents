@@ -255,18 +255,20 @@ def test_installer_remove_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
 
 def test_resolve_preset_bundles():
     mod = _load_installer()
-    sa, sh, aa, ap_, prof = mod.resolve_preset("solo-dev", None, None, None, None, None)
-    assert (sa, sh, aa, ap_, prof) == (False, False, True, True, "dev")
-    sa, sh, aa, ap_, prof = mod.resolve_preset("ci", None, None, None, None, None)
-    assert (sa, sh, aa, ap_, prof) == (False, False, False, False, "strict")
-    sa, sh, aa, ap_, prof = mod.resolve_preset("paranoid", None, None, None, None, None)
-    assert (sa, sh, aa, ap_, prof) == (True, False, False, False, "strict")
+    sa, sh, aa, ap_, prof, aae = mod.resolve_preset("solo-dev", None, None, None, None, None)
+    assert (sa, sh, aa, ap_, prof, aae) == (False, False, True, True, "dev", True)
+    sa, sh, aa, ap_, prof, aae = mod.resolve_preset("ci", None, None, None, None, None)
+    assert (sa, sh, aa, ap_, prof, aae) == (False, False, False, False, "strict", False)
+    sa, sh, aa, ap_, prof, aae = mod.resolve_preset("paranoid", None, None, None, None, None)
+    assert (sa, sh, aa, ap_, prof, aae) == (True, False, False, False, "strict", False)
 
 
 def test_resolve_preset_explicit_flags_override():
     mod = _load_installer()
-    sa, sh, aa, ap_, prof = mod.resolve_preset("paranoid", False, True, True, True, "dev")
-    assert (sa, sh, aa, ap_, prof) == (False, True, True, True, "dev")
+    sa, sh, aa, ap_, prof, aae = mod.resolve_preset("paranoid", False, True, True, True, "dev")
+    assert (sa, sh, aa, ap_, prof, aae) == (False, True, True, True, "dev", False)
+    sa, sh, aa, ap_, prof, aae = mod.resolve_preset("paranoid", False, True, True, True, "dev", True)
+    assert (sa, sh, aa, ap_, prof, aae) == (False, True, True, True, "dev", True)
 
 
 def test_installer_self_test_passes_on_installed_project(tmp_path, capsys):
