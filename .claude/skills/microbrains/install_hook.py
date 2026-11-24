@@ -7,14 +7,16 @@ or `.claude/settings.json` (`--shared`) without clobbering unrelated configurati
 
 Usage:
     python install_hook.py [--strict-ast] [--shadow] [--shared] [--auto-allow]
+                           [--auto-approve-escalations]
                            [--profile strict|dev] [--policy FILE]
                            [--session-state FILE] [--journal-path FILE]
                            [--project-dir DIR] [--async-post]
                            [--preset solo-dev|ci|paranoid] [--no-auto-allow]
+                           [--no-auto-approve-escalations]
                            [--no-async-post] [--dry-run] [--self-test] [--remove]
 
 Presets (`--preset`):
-    solo-dev   dev profile + auto-allow + async post (low-friction local work)
+    solo-dev   dev profile + auto-allow + auto-approve-escalations + async post (zero-prompt local work)
     ci         strict profile, enforce mode, synchronous post (deterministic CI)
     paranoid   strict profile + strict AST + enforce (maximum scrutiny)
 Explicit flags always override the preset.
@@ -188,6 +190,7 @@ def install(
     shared: bool = False,
     settings_path: Path | None = None,
     auto_allow: bool = False,
+    auto_approve_escalations: bool = False,
     profile: str | None = None,
     policy: str | None = None,
     session_state: str | None = "auto",
@@ -219,6 +222,8 @@ def install(
         post_extra.append("--shadow")
     if auto_allow:
         pre_extra.append("--auto-allow")
+    if auto_approve_escalations:
+        pre_extra.append("--auto-approve-escalations")
     if context_guard:
         pre_extra.append("--context-guard")
         post_extra.append("--context-guard")
@@ -243,6 +248,8 @@ def install(
             ignored_flags.append("--strict-ast")
         if auto_allow:
             ignored_flags.append("--auto-allow")
+        if auto_approve_escalations:
+            ignored_flags.append("--auto-approve-escalations")
         if profile:
             ignored_flags.append(f"--profile {profile}")
         if policy:
@@ -354,19 +361,36 @@ def resolve_preset(
     auto_allow: bool | None,
     async_post: bool | None,
     profile: str | None,
-) -> tuple[bool, bool, bool, bool, str | None]:
+    auto_approve_escalations: bool | None = None,
+) -> tuple[bool, bool, bool, bool, str | None, bool]:
     """Merge a `--preset` bundle with explicitly-passed flags (explicit always wins)."""
     if preset == "solo-dev":
         profile = profile or "dev"
         auto_allow = True if auto_allow is None else auto_allow
+        auto_approve_escalations = True if auto_approve_escalations is None else auto_approve_escalations
         async_post = True if async_post is None else async_post
     elif preset == "ci":
         profile = profile or "strict"
+        auto_allow = False if auto_allow is None else auto_allow
+        auto_approve_escalations = False if auto_approve_escalations is None else auto_approve_escalations
         async_post = False if async_post is None else async_post
     elif preset == "paranoid":
         profile = profile or "strict"
+        auto_allow = False if auto_allow is None else auto_allow
+        auto_approve_escalations = False if auto_approve_escalations is None else auto_approve_escalations
         strict_ast = True if strict_ast is None else strict_ast
-    return bool(strict_ast), bool(shadow), bool(auto_allow), bool(async_post), profile
+    else:
+        # Bare install (no preset): keep the low-friction allow posture.
+        auto_allow = True if auto_allow is None else auto_allow
+        auto_approve_escalations = True if auto_approve_escalations is None else auto_approve_escalations
+    return (
+        bool(strict_ast),
+        bool(shadow),
+        bool(auto_allow),
+        bool(async_post),
+        profile,
+        bool(auto_approve_escalations),
+    )
 
 
 def self_test(project_dir: Path | None = None) -> int:
@@ -468,7 +492,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--strict-ast", action=argparse.BooleanOptionalAction, default=None, help="Enable strict AST import/dynamic-call allowlist (negate with --no-strict-ast)")
     ap.add_argument("--shadow", action=argparse.BooleanOptionalAction, default=None, help="Observe-only: log decisions, never block (negate with --no-shadow)")
-    ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=True, help="Emit permissionDecision='allow' on safe verdicts (default on; negate with --no-auto-allow)")
+    ap.add_argument("--auto-allow", action=argparse.BooleanOptionalAction, default=None, help="Emit permissionDecision='allow' on safe verdicts (default on for bare/solo-dev installs; off for ci/paranoid; negate with --no-auto-allow)")
+    ap.add_argument("--auto-approve-escalations", action=argparse.BooleanOptionalAction, default=None, help="Auto-approve eligible escalations instead of prompting (zero-prompt posture; default on for bare/solo-dev installs; off for ci/paranoid; ineligible classes still ask: protected-path writes, secrets, ifc-taint, malformed payloads; negate with --no-auto-approve-escalations)")
     ap.add_argument("--shared", action="store_true", help="Target shared .claude/settings.json with portable `python`")
     ap.add_argument("--profile", choices=["strict", "dev"], default=None, help="Policy profile (`strict` or `dev`)")
     ap.add_argument("--policy", default=None, help="Path to JSON/TOML/YAML PolicyConfig file")
@@ -490,8 +515,9 @@ def main(argv: list[str] | None = None) -> int:
         return self_test(project_dir=proj)
     if args.remove:
         return remove(shared=args.shared, project_dir=proj, dry_run=args.dry_run)
-    strict_ast, shadow, auto_allow, async_post, profile = resolve_preset(
-        args.preset, args.strict_ast, args.shadow, args.auto_allow, args.async_post, args.profile
+    strict_ast, shadow, auto_allow, async_post, profile, auto_approve_escalations = resolve_preset(
+        args.preset, args.strict_ast, args.shadow, args.auto_allow, args.async_post, args.profile,
+        args.auto_approve_escalations,
     )
     sess_arg = None if args.no_session_state else args.session_state
     return install(
@@ -499,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
         shadow,
         shared=args.shared,
         auto_allow=auto_allow,
+        auto_approve_escalations=auto_approve_escalations,
         profile=profile,
         policy=args.policy,
         session_state=sess_arg,

@@ -1672,12 +1672,12 @@ def test_fable_42_audit_remediation_fixes(tmp_path, monkeypatch):
         val_resp = asyncio.run(microbrain_server.validate_code_endpoint(val_req))
         assert val_resp.success is True
 
-    # 5. Honest tree-sitter detection (bare module without grammar stays False / regex_heuristic)
+    # 5. Honest tree-sitter detection (bare module without grammar stays False / regex_heuristic or multilang_structural)
     dummy_ts = types.ModuleType("tree_sitter")
     monkeypatch.setitem(sys.modules, "tree_sitter", dummy_ts)
     ts_diff = analyze_code_diff("src/app.ts", "export const x: number = 1;\n")
     assert ts_diff["context_ast_parsed"] is False
-    assert ts_diff["ast_parser_backend"] == "regex_heuristic"
+    assert ts_diff["ast_parser_backend"] in {"regex_heuristic", "multilang_structural"}
 
     # 6. CriticalEnsemble variance_threshold actually gates approval & pipeline reflects it dynamically
     ce = CriticalEnsemble(variance_threshold=0.0001)

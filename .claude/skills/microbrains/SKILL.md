@@ -17,7 +17,7 @@ and fail-closed escalation. It is a static-analysis layer, NOT an OS sandbox.
 Run the bundled installer (idempotent, merges without clobbering existing hooks). By default it writes to `.claude/settings.local.json` (gitignored, pinned to your local Python executable with forward slashes), registers `PreToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*` with fail-closed `"onFailure": "block"` and `--session-state auto`), and registers synchronous `PostToolUse` (`Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*`) so secret/injection alerts and snapshot evictions apply properly. Pass `--shared` to write portable `python` hooks into `.claude/settings.json`:
 
 ```bash
-python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny) + --session-state auto
+python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny); auto-allow + auto-approve-escalations + --session-state auto by default
 python .claude/skills/microbrains/install_hook.py --shadow      # observe-only, never blocks
 python .claude/skills/microbrains/install_hook.py --strict-ast  # also allowlist dynamic calls/imports
 python .claude/skills/microbrains/install_hook.py --profile dev # developer workflow allowlist
@@ -25,10 +25,12 @@ python .claude/skills/microbrains/install_hook.py --policy security.toml --no-se
 python .claude/skills/microbrains/install_hook.py --http-daemon http://127.0.0.1:8765  # native Claude Code HTTP hook mode
 python .claude/skills/microbrains/install_hook.py --project-dir /path/to/repo  # target another project
 python .claude/skills/microbrains/install_hook.py --shared      # write portable config to .claude/settings.json
-python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts)
+python .claude/skills/microbrains/install_hook.py --auto-allow  # emit allow on safe verdicts (skips host prompts; default on)
+python .claude/skills/microbrains/install_hook.py --auto-approve-escalations  # zero-prompt posture: eligible escalations auto-allow (default on; only protected-path writes / secrets / ifc-taint / malformed still ask)
+python .claude/skills/microbrains/install_hook.py --no-auto-approve-escalations  # restore ask-on-novel-command
 python .claude/skills/microbrains/install_hook.py --async-post  # run PostToolUse asynchronously instead of blocking
 python .claude/skills/microbrains/install_hook.py --remove      # uninstall the hooks
-python .claude/skills/microbrains/install_hook.py --preset solo-dev   # bundles: dev profile + auto-allow + async post (also: ci, paranoid)
+python .claude/skills/microbrains/install_hook.py --preset solo-dev   # bundles: dev profile + auto-allow + auto-approve-escalations (zero prompts) + async post (also: ci, paranoid)
 python .claude/skills/microbrains/install_hook.py --preset solo-dev --no-auto-allow --no-async-post  # override any preset boolean
 python .claude/skills/microbrains/install_hook.py --context-guard    # block redundant/oversized whole reads + hung stdin / root search
 python .claude/skills/microbrains/install_hook.py --dry-run    # preview the settings JSON without writing
@@ -148,6 +150,7 @@ The hook CLI queries the TCP daemon first and falls back to identical in-process
 - `--sandbox-wrap auto|bwrap` - wrap approved shell commands in OS sandbox containment (`bwrap` on Linux when installed)
 - `--context-guard` (`AETHERIS_CONTEXT_GUARD=1`) - block redundant unchanged whole reads, serve inline outlines on oversized reads, and block hung stdin / root-origin searches
 - `--shadow` - observe-only (or `AETHERIS_HOOK_SHADOW=1`); `--auto-allow` - emit allow on safe verdicts
+- `--auto-approve-escalations` (`AETHERIS_AUTO_APPROVE_ESCALATIONS=1`) - flip eligible escalations to silent allow instead of prompting; ineligible classes (protected-path writes, secrets, ifc-taint, malformed) still ask; hard denies remain silent blocks
 
 ## Response contract
 
