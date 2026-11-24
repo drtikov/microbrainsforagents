@@ -80,13 +80,13 @@ The microbrains provide:
 ## Usage
 
 ```bash
-# Start server
+# Start core HTTP server (/health + /microbrain/* endpoints)
 python -m aetheris_microbrains.core.microbrain_server
 
-# Verify
+# Verify (health-only pass for core server; full /health + /mcp pass for aetheris-mcp --http)
 python check_microbrain.py
 
-# Hermes MCP config
+# Hermes MCP config (requires aetheris-mcp --http --port 8080 or start_microbrain.bat)
 mcp_servers:
   aetheris-microbrains:
     type: "http"
