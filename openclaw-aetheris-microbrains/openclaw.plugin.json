@@ -1,0 +1,62 @@
+{
+  "id": "aetheris-microbrains",
+  "name": "Aetheris Microbrains Security Gate",
+  "description": "Deterministic sub-2ms pre-flight policy gate, polyglot AST/deferred-exec scanner, IFC session taint tracker, and synchronous DLP transcript scrubber for OpenClaw.",
+  "version": "0.7.6",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "profile": {
+        "type": "string",
+        "enum": ["strict", "dev"],
+        "default": "dev"
+      },
+      "shadow": {
+        "type": "boolean",
+        "default": false
+      },
+      "daemonUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8765"
+      },
+      "daemonPort": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "default": 8765
+      },
+      "autoStartDaemon": {
+        "type": "boolean",
+        "default": true
+      },
+      "failClosed": {
+        "type": "boolean",
+        "default": true
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 200,
+        "maximum": 4500,
+        "default": 2500
+      },
+      "sandboxWrap": {
+        "type": "string",
+        "enum": ["none", "srt", "bwrap", "seatbelt", "landlock", "job", "aetheris-gate", "auto"],
+        "default": "none"
+      },
+      "autoApproveEscalations": {
+        "type": "boolean",
+        "default": false
+      },
+      "pythonBin": {
+        "type": "string",
+        "default": "python"
+      },
+      "matcher": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  }
+}

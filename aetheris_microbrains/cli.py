@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -53,6 +53,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("hermes")
     if (home / ".cursor").exists() or (ws / ".cursor").exists():
         detected.append("cursor")
+    if (home / ".openclaw").exists():
+        detected.append("openclaw")
     return detected
 
 
@@ -107,6 +109,17 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             profile=args.profile,
             workspace=ws,
             plugin_dir=pd,
+            dry_run=bool(args.dry_run),
+        )
+    if host == "openclaw":
+        from .install_openclaw import install_config as oc_install, self_test as oc_self_test
+
+        if args.self_test:
+            return oc_self_test()
+        return oc_install(
+            profile=str(args.profile or "dev"),
+            shadow=bool(args.shadow),
+            auto_approve_escalations=bool(args.auto_approve_escalations),
             dry_run=bool(args.dry_run),
         )
     if host == "dsh":

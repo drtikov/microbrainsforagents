@@ -674,8 +674,8 @@ def serve_http(
     auth_value = str(token or os.getenv("AETHERIS_DAEMON_TOKEN") or "").strip() or secrets.token_hex(16)
     daemon_flags = dict(flags or {})
     http_host_flag = str(daemon_flags.get("host") or "claude").strip().lower()
-    if http_host_flag != "claude":
-        print(f"hook HTTP daemon requires host='claude' (got '{http_host_flag}'): HTTP hook payloads follow the Claude Code contract")
+    if http_host_flag not in {"claude", "openclaw"}:
+        print(f"hook HTTP daemon requires host='claude' or 'openclaw' (got '{http_host_flag}')")
         return 2
     cache = VerdictCache()
     target = Path(state_path) if state_path else get_daemon_state_path()
@@ -709,6 +709,15 @@ def serve_http(
         def do_POST(self) -> None:
             nonlocal served_count
             path = self.path.split("?")[0]
+            if path == "/v1/shutdown":
+                auth_hdr = self.headers.get("Authorization", "")
+                supplied = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+                if not hmac.compare_digest(supplied, auth_value):
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                self._send_json(200, {"ok": True, "stopping": True})
+                threading.Thread(target=httpd.shutdown, daemon=True).start()
+                return
             if path in {"/v1/hook/pre", "/v1/hook/post"}:
                 ev = "post" if path == "/v1/hook/post" else "pre"
             elif path.startswith("/v1/hook/event/"):
@@ -742,10 +751,18 @@ def serve_http(
             if not isinstance(payload, dict):
                 self._send_json(400, {"error": "expected_json_object"})
                 return
-            req = {"event": ev, "payload": payload, "flags": dict(daemon_flags)}
+            req_flags = dict(daemon_flags)
+            req_host_hdr = str(self.headers.get("X-Aetheris-Host") or "").strip().lower()
+            if req_host_hdr in {"claude", "codex", "hermes", "antigravity", "openclaw", "generic"}:
+                req_flags["host"] = req_host_hdr
+            effective_host = str(req_flags.get("host") or "claude").strip().lower()
+            req = {"event": ev, "payload": payload, "flags": req_flags}
             verdict, _cached = evaluate_request(req, cache=cache)
             if daemon_flags.get("shadow"):
                 out_body: Dict[str, Any] = {}
+            elif effective_host in {"openclaw", "antigravity"}:
+                hso = verdict.get("hookSpecificOutput")
+                out_body = hso if isinstance(hso, dict) else {}
             elif verdict.get("hookSpecificOutput") is not None:
                 hso = verdict["hookSpecificOutput"]
                 if (
@@ -807,12 +824,21 @@ def main(argv: Optional[list] = None) -> int:
     )
     parser.add_argument("--port", type=int, default=0, help="TCP/HTTP port (0 = ephemeral)")
     parser.add_argument("--http", action="store_true", help="Serve native Claude Code `type: http` hook endpoints (/v1/hook/pre, /v1/hook/post, /health)")
+    parser.add_argument("--detach", action="store_true", help="Spawn the daemon detached in the background and exit 0")
+    parser.add_argument("--token", default=None, help="Explicit bearer token for HTTP daemon mode")
     parser.add_argument("--state-dir", default=None, help="Override the state directory for hook_daemon.json")
     parser.add_argument("--max-requests", type=int, default=None, help="Stop after N requests (testing)")
+    parser.add_argument(
+        "--host",
+        choices=["claude", "codex", "hermes", "antigravity", "openclaw", "generic"],
+        default="claude",
+        help="Default host output adapter (override per HTTP request via X-Aetheris-Host)",
+    )
     parser.add_argument("--log-decisions", action="store_true", help="Log decisions to the journal")
     parser.add_argument("--shadow", action="store_true", help="Shadow mode passthrough")
     parser.add_argument("--strict-ast", action="store_true", help="Strict AST passthrough")
     parser.add_argument("--auto-allow", action="store_true", help="Emit allow verdicts explicitly in HTTP mode")
+    parser.add_argument("--auto-approve-escalations", action="store_true", help="Auto-approve eligible escalations without prompting")
     parser.add_argument("--profile", default=None, help="Policy profile passthrough")
     parser.add_argument("--policy", default=None, help="Policy file passthrough")
     parser.add_argument("--journal-path", default=None, help="Journal path passthrough")
@@ -843,10 +869,12 @@ def main(argv: Optional[list] = None) -> int:
             pass
 
     flags = {
+        "host": args.host,
         "log_decisions": bool(args.log_decisions),
         "shadow": bool(args.shadow),
         "strict_ast": bool(args.strict_ast),
         "auto_allow": bool(args.auto_allow),
+        "auto_approve_escalations": bool(args.auto_approve_escalations),
         "replace_tool_output": bool(args.replace_tool_output),
         "semantic_guard": bool(args.semantic_guard),
         "sandbox_wrap": str(args.sandbox_wrap or "none"),
@@ -857,9 +885,26 @@ def main(argv: Optional[list] = None) -> int:
         "session_state_path": None if args.no_session_state else (args.session_state or "auto"),
     }
     state_path = get_daemon_state_path(Path(args.state_dir)) if args.state_dir else None
+    if args.detach:
+        child_argv = [sys.executable, "-m", "aetheris_microbrains.hook_daemon"]
+        for tok in (argv if argv is not None else sys.argv[1:]):
+            if tok != "--detach":
+                child_argv.append(tok)
+        spawn_kw: Dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            spawn_kw["creationflags"] = 0x08000000 | 0x00000008
+        else:
+            spawn_kw["start_new_session"] = True
+        subprocess.Popen(child_argv, **spawn_kw)  # aetheris: allow subprocess_call:Popen -- spawn detached hook HTTP daemon
+        return 0
     if args.http:
         port_val = args.port if args.port else 8765
-        return serve_http(port=port_val, state_path=state_path, flags=flags, max_requests=args.max_requests)
+        return serve_http(port=port_val, state_path=state_path, flags=flags, token=args.token, max_requests=args.max_requests)
     sock_path = ((state_path.parent if state_path else get_daemon_state_path().parent) / "hook_daemon.sock") if args.uds else None
     return serve(
         port=args.port,

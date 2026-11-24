@@ -56,6 +56,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [Packaging and Pure-Stdlib Core Isolation (`verify-core`)](#packaging-and-pure-stdlib-core-isolation-verify-core)
 - [CI/CD PR Gate and SARIF Reporting](#cicd-pr-gate-and-sarif-reporting)
 - [DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)](#deepseek-harness-dsh-integration-cordis-mcp-bundle)
+- [OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)](#openclaw-integration-native-gateway-plugin-before_tool_call--dlp)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -412,6 +413,25 @@ DeepSeek Harness connects directly to `aetheris_microbrains.mcp_server` via the 
 
 ---
 
+## OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)
+
+**OpenClaw** integrates natively via the Gateway plugin bundle in [`openclaw-aetheris-microbrains/`](openclaw-aetheris-microbrains/) (`@aetheris/openclaw-microbrains`) paired with the `--host openclaw` adapter in `hook.py` and `hook_daemon.py`.
+
+- **Pre-Flight Gate (`before_tool_call`, priority `100`):** Intercepts OpenClaw tool calls (`exec`, `apply_patch`, `fs_write`, `web_search`, `send_message`, `spawn_agent`, MCP tools) using a fail-closed HTTP call to the local warm daemon (`POST /v1/hook/pre` with `X-Aetheris-Host: openclaw`), returning `{ block: true, blockReason }`, native `requireApproval` (`timeoutBehavior: "deny"`), `{ params }` sandbox rewrites, or automatic blocking on unattended `trigger: "cron"` escalations.
+- **Synchronous Transcript Scrubbing (`tool_result_persist`):** Redacts API keys, DB credentials, and PEM private keys before OpenClaw writes tool outputs to session transcripts.
+- **Post-Tool Audit & Taint (`after_tool_call`) + Managed Service:** Records cross-turn IFC session taint via `/v1/hook/post` and auto-manages the local `aetheris-daemon` background HTTP service with `api.registerService`.
+
+```bash
+pip install -e .
+aetheris install openclaw --self-test
+openclaw plugins install --link ./openclaw-aetheris-microbrains
+# Or merge into ~/.openclaw/openclaw.json automatically:
+aetheris install openclaw
+openclaw gateway restart
+```
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -435,7 +455,8 @@ Microbrains works alongside any AI agent or framework:
 | **Hermes Agent** | **Hermes Agent** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
 | **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
 | **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
-| **Personal & Desktop OS Assistants** | **OpenClaw**, **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
+| **OpenClaw** | **OpenClaw** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
+| **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 
 ---

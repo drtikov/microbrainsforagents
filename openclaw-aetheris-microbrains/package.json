@@ -1,0 +1,23 @@
+{
+  "name": "@aetheris/openclaw-microbrains",
+  "version": "0.7.6",
+  "description": "Native OpenClaw Plugin SDK guardrail integrating Aetheris Microbrains pre-flight policy checks, IFC session taint, and DLP transcript scrubbing.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "files": [
+    "openclaw.plugin.json",
+    "package.json",
+    "index.mjs",
+    "index.ts",
+    "README.md"
+  ],
+  "license": "Apache-2.0"
+}

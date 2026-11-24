@@ -84,6 +84,7 @@ aetheris-mcp = "aetheris_microbrains.mcp_server:main"
 aetheris-mcp-proxy = "aetheris_microbrains.mcp_proxy:main"
 aetheris-pr-gate = "aetheris_microbrains.pr_gate:main"
 aetheris-install-antigravity = "aetheris_microbrains.install_antigravity:main"
+aetheris-install-openclaw = "aetheris_microbrains.install_openclaw:main"
 
 [project.urls]
 Homepage = "https://github.com/drtikov/microbrainsforagents"

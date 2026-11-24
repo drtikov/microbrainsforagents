@@ -23,6 +23,7 @@ CORE_SECURITY_MODULES: Tuple[str, ...] = (
     "cli",
     "install_antigravity",
     "install_dsh",
+    "install_openclaw",
     "core/audit_ui",
     "core/context_hygiene",
     "core/deferred_exec_guard",
