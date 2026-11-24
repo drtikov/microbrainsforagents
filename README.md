@@ -6,9 +6,9 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Hermes Agent**, **Codex**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
-It sits directly in front of tool execution and shell invocation. By analyzing unified diffs via Python AST and shell commands via wrapper-aware tokenization before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
+It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
 ```text
        [ User / Task Prompt ]
@@ -48,25 +48,33 @@ It sits directly in front of tool execution and shell invocation. By analyzing u
   - [📊 Antigravity Benchmarks (Tokens, Safety & Speed)](#-antigravity-benchmarks-tokens-safety--speed)
   - [One-Command Setup for Antigravity](#one-command-setup-for-antigravity)
   - [Implementation & Test Suite](#implementation--test-suite)
+- [Native Rust Shim (`aetheris-gate`) and Auto-Spawning IPC Daemon](#native-rust-shim-aetheris-gate-and-auto-spawning-ipc-daemon)
+- [Multi-Language AST Linter and Supply-Chain Deferred Exec Guard](#multi-language-ast-linter-and-supply-chain-deferred-exec-guard)
+- [MCP Security Gateway and Out-of-Band Secret Broker](#mcp-security-gateway-and-out-of-band-secret-broker)
+- [Policy-as-Code (Cedar and Rego) and OS Containment Sandboxing](#policy-as-code-cedar-and-rego-and-os-containment-sandboxing)
+- [OpenTelemetry GenAI Export and Real-Time Local Audit Web UI](#opentelemetry-genai-export-and-real-time-local-audit-web-ui)
+- [Packaging and Pure-Stdlib Core Isolation (`verify-core`)](#packaging-and-pure-stdlib-core-isolation-verify-core)
+- [CI/CD PR Gate and SARIF Reporting](#cicd-pr-gate-and-sarif-reporting)
 - [DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)](#deepseek-harness-dsh-integration-cordis-mcp-bundle)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
 - [🔒 Cybersecurity & Pre-Flight Policy Controls](#-cybersecurity--pre-flight-policy-controls)
 - [🏗️ 4-Layer Decision Architecture](#️-4-layer-decision-architecture)
-- [📦 Installation](#-installation)
+- [📦 Installation & Unified CLI (`aetheris`)](#-installation--unified-cli-aetheris)
 - [⚡ Quickstart & Python Examples](#-quickstart)
   - [0. Unified 4-Layer Decision Contract](#0-unified-4-layer-decision-contract)
   - [1. Claude Code & Agent Harness PreToolUse Hook Integration](#1-claude-code--agent-harness-pretooluse-hook-integration)
   - [2. Allowlist-First Shell Gate & Dev Profile](#2-allowlist-first-shell-gate--dev-profile)
   - [3. Cache-Safe Sticky Session Tool Narrowing](#3-cache-safe-sticky-session-tool-narrowing)
-- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks-551-passed-2-skipped)
+- [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks)
   - [0. Micro-Benchmark: decide() Latency Distribution](#0-micro-benchmark-decide-real-world-latency-distribution)
   - [1. External Tool-Drop Rate & Live-LLM A/B](#1-external-tool-drop-rate-baseline-comparison--live-llm-ab-examples06_real_llm_ab_benchmarkpy)
   - [2. SWE-bench Lite Zero-LLM Gate Benchmark](#2-external-swe-bench-lite-300-real-github-issues-zero-llm-gate-benchmark-examples07_swebench_lite_gate_benchmarkpy)
   - [3. Multi-Turn Session Prompt-Cache Benchmark](#3-multi-turn-session-prompt-cache-benchmark-examples08_frozen_advisor_benchmarkpy)
   - [4. Agent Security & Anti-Evasion Benchmark](#4-agent-security--anti-evasion-benchmark-examples10_agent_security_benchmarkpy)
   - [5. Hermes Agent Microbrains Performance Benchmark](#5-hermes-agent-microbrains-performance-benchmark-benchmarkpy--benchmark_resultsmd)
+  - [6. DeepSeek Harness On/Off A/B Benchmark](#6-deepseek-harness-onoff-ab-benchmark-benchmark_dsh_mcp_abpy)
 - [📄 License & Commercial Support](#-license--commercial-support)
 
 ---
@@ -92,7 +100,8 @@ This repository includes a ready-to-use **Claude Code skill** in `.claude/skills
 
 ```bash
 pip install -e .
-python .claude/skills/microbrains/install_hook.py              # enforce mode (allow/ask/deny) + --session-state auto
+python .claude/skills/microbrains/install_hook.py              # enforce mode + auto-allow + auto-approve-escalations + --session-state auto
+python .claude/skills/microbrains/install_hook.py --no-auto-approve-escalations  # restore ask prompt on novel escalations
 python .claude/skills/microbrains/install_hook.py --shadow     # observe-only mode first (logs, never blocks)
 python .claude/skills/microbrains/install_hook.py --preset solo-dev  # preset bundles: solo-dev | ci | paranoid (--no-* flags override)
 python .claude/skills/microbrains/install_hook.py --http-daemon http://127.0.0.1:8765  # native Claude Code HTTP hook mode
@@ -106,7 +115,7 @@ python -m aetheris_microbrains.doctor --scan-mcp               # audit .mcp.json
 
 Installed console entrypoints: `aetheris` (unified CLI), `aetheris-hook`, `aetheris-doctor`, `aetheris-audit`, `aetheris-daemon`, `aetheris-verify`, `aetheris-mcp`, `aetheris-mcp-proxy`, `aetheris-pr-gate`, `aetheris-install-antigravity`.
 
-By default, `install_hook.py` writes hooks relative to the repository root next to the script into `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection; pass `--project-dir /path/to/project` when installing from a wheel or shared environment into another repository. For active coding sessions, running the warm daemon is the recommended default—cold per-call CLI spawns spend ~94 ms on Python interpreter startup versus <1 ms warm evaluation—either via the TCP evaluator (`python -m aetheris_microbrains.hook_daemon`) or the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765` paired with `install_hook.py --http-daemon http://127.0.0.1:8765`).
+By default, `install_hook.py` writes hooks relative to the repository root next to the script into `.claude/settings.local.json` (which is gitignored, so your local Python path is never committed to git) with `--session-state auto` for cross-turn IFC taint protection and zero-prompt `auto-allow` + `auto-approve-escalations` (use `--preset ci` or `--preset paranoid` for strict prompt-on-escalation behavior); pass `--project-dir /path/to/project` when installing into another repository. To eliminate Python subprocess cold-start latency (~200–500 ms) in favor of `<1 ms` warm evaluation, use `--auto-daemon` (`aetheris_microbrains.hook_daemon` with `--idle-timeout`), the native Rust shim (`rust/aetheris-gate`, `<15 ms` cold start), or the native HTTP hook endpoint (`python -m aetheris_microbrains.hook_daemon --http --port 8765` paired with `install_hook.py --http-daemon http://127.0.0.1:8765`).
 
 ### What It Gives You
 
@@ -334,41 +343,49 @@ Measured on `2026-11-23` across two fresh, isolated subagent contexts on the sam
 - **[`aetheris_microbrains/hook.py`](aetheris_microbrains/hook.py):** `--host antigravity` (`antigravity_pretooluse_v1`) adapter normalizing camelCase `toolCall`, PascalCase arguments (`CommandLine`, `Path`, `TargetFile`, `Target`/`Replacement`, `TargetContent`/`ReplacementContent`, `ReplacementChunks`, `Content`, `CodeContent`), and `conversationId` session scoping with top-level JSON exit `0` responses.
 - **[`aetheris_microbrains/install_antigravity.py`](aetheris_microbrains/install_antigravity.py):** One-command installer (`aetheris-install-antigravity` in `pyproject.toml`) writing `plugin.json`, top-level named `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, and `skills/aetheris-microbrains/SKILL.md` globally (`~/.gemini/config/plugins/aetheris-microbrains/`) or per-workspace (`--workspace`).
 - **[`.antigravity-plugin/`](.antigravity-plugin/):** Ready-to-use checked-in plugin bundle (`plugin.json`, `hooks.json`, `mcp_config.json`, `rules/AGENTS.md`, `skills/aetheris-microbrains/SKILL.md`).
-- **[`aetheris_microbrains/tests/test_antigravity_integration.py`](aetheris_microbrains/tests/test_antigravity_integration.py):** End-to-end contract, CLI mode, installer lifecycle, and bundle schema tests (**`554 passed, 2 skipped`** across the full test suite, plus `ANTIGRAVITY SELF-TEST PASSED` on `~/.gemini/config/plugins/aetheris-microbrains`).
+- **[`aetheris_microbrains/tests/test_antigravity_integration.py`](aetheris_microbrains/tests/test_antigravity_integration.py):** End-to-end contract, CLI mode, installer lifecycle, and bundle schema tests (**`570 passed, 2 skipped`** on Windows / **`566 passed, 6 skipped`** on Linux CI across the full suite, plus `ANTIGRAVITY SELF-TEST PASSED` on `~/.gemini/config/plugins/aetheris-microbrains`).
 
 ---
 
 ## Native Rust Shim (`aetheris-gate`) and Auto-Spawning IPC Daemon
 
-Zero-dependency native Rust binary shim (`rust/aetheris-gate`) for sub-15ms cold invocations, auto-spawning background IPC daemon with idle TTL, and OS sandbox containment (Windows Job Objects / Linux Landlock).
-
-## Multi-Language AST Linter and Supply-Chain Deferred Exec Guard
-
-Polyglot pre-flight syntax and security scanner for JS/TS, Go, Rust, SQL, Terraform, and Dockerfiles (`core/multilang_ast.py`) alongside supply-chain deferred execution defense across package.json, tasks.json, Makefiles, conftest.py root hooks, site-packages .pth files, and CI workflows (`core/deferred_exec_guard.py`).
-
-## MCP Security Gateway and Out-of-Band Secret Broker
-
-Upgraded `aetheris-mcp-proxy` (`mcp_proxy.py`) with out-of-band secret brokering (`` handles via `core/secret_broker.py`), stdio downstream child proxying, dynamic rug-pull tool isolation, and indirect prompt injection response quarantining.
-
-## Policy-as-Code (Cedar and Rego) and OS Containment Sandboxing
-
-Compilers and evaluators for AWS Cedar (.cedar) and OPA Rego (.rego) policies (`core/policy_as_code.py`) with round-trip export support, paired with network domain allowlist loopback proxies and platform-native sandbox generators (`core/os_sandbox.py`).
-
-## OpenTelemetry GenAI Export and Real-Time Local Audit Web UI
-
-Export forensic decision events as OpenTelemetry GenAI semantic convention spans (`core/otel_exporter.py`) with file export (`--export-otel`) and direct OTLP HTTP push (`--push-otel`). An interactive zero-dependency local browser dashboard (`core/audit_ui.py` / `aetheris-audit --ui` / `aetheris audit --ui --port 8767`) provides real-time Server-Sent Events (SSE), search filters, and CSRF-protected pending rule approvals.
+Zero-dependency native Rust binary shim (`rust/aetheris-gate`) for `<15 ms` cold invocations: evaluates Layer-0 invariants locally in Rust, auto-spawns and queries the warm IPC daemon (`hook_daemon.py` with `--idle-timeout` and flag forwarding), and supports OS sandbox containment (`aetheris-gate sandbox -- ...` using Windows Job Objects / Linux Landlock). Verify with `aetheris-gate --self-test`.
 
 ---
 
-## Packaging and Pure-Stdlib Core Isolation (verify-core)
+## Multi-Language AST Linter and Supply-Chain Deferred Exec Guard
 
-Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`). 34 core security modules run on Python standard library only with zero third-party dependencies, guaranteeing sub-millisecond evaluation and complete air-gapped isolation. Run `aetheris verify-core` to verify that core security modules have zero third-party imports.
+Polyglot pre-flight syntax and security scanner for JS/TS, Go, Rust, SQL, Terraform, and Dockerfiles (`core/multilang_ast.py`, with optional `tree-sitter` bindings via `[ast]`) alongside supply-chain deferred execution defense (`core/deferred_exec_guard.py`) across `package.json`, `.vscode/tasks.json`, `Makefile`, `conftest.py` root hooks, site-packages `.pth` files, and `.github/workflows/*.yml` CI files.
+
+---
+
+## MCP Security Gateway and Out-of-Band Secret Broker
+
+Upgraded `aetheris-mcp-proxy` (`mcp_proxy.py`) with out-of-band secret brokering (`$SECRET:<NAME>` synthetic handles via `core/secret_broker.py` so raw credentials never enter the agent context), stdio downstream child proxying (`--downstream SERVER=CMD`), dynamic rug-pull tool quarantine (`notifications/tools/list_changed`), and indirect prompt-injection response quarantining (`--block-injections`).
+
+---
+
+## Policy-as-Code (Cedar and Rego) and OS Containment Sandboxing
+
+Compilers, evaluators, and round-trip exporters for AWS Cedar (`.cedar`) and OPA Rego (`.rego`) policies (`core/policy_as_code.py`, loadable directly via `PolicyConfig.from_file()`), paired with loopback network domain allowlist proxies (`DomainAllowlistProxy`) and platform-native sandbox command builders (`build_os_sandbox_command` in `core/os_sandbox.py` for `srt`, `bwrap`, `seatbelt`, `landlock`, `job`, and `aetheris-gate`).
+
+---
+
+## OpenTelemetry GenAI Export and Real-Time Local Audit Web UI
+
+Export forensic decision events as OpenTelemetry GenAI semantic convention spans (`core/otel_exporter.py`) via file export (`aetheris audit --export-otel traces.json`) or direct OTLP HTTP push (`aetheris audit --push-otel http://localhost:4318/v1/traces`). An interactive zero-dependency local browser dashboard (`core/audit_ui.py`, launched with `aetheris audit --ui --port 8767`) provides live Server-Sent Events (SSE), search/filter controls, and a CSRF-protected workbench for pending escalation approvals.
+
+---
+
+## Packaging and Pure-Stdlib Core Isolation (`verify-core`)
+
+Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`): **34 core security modules** run strictly on the Python standard library with zero third-party dependencies (zero NumPy or experimental imports on the security decision path), while **49 lab/research modules** remain cleanly isolated. Run `aetheris verify-core` to verify isolation programmatically.
 
 ---
 
 ## CI/CD PR Gate and SARIF Reporting
 
-The standalone pull request scanner `aetheris-pr-gate` (`pr_gate.py`) inspects git diffs, changed files, and repository trees before merging. It outputs SARIF 2.1.0 security reports for GitHub Code Scanning and formatted Markdown summaries for automated pull request comments. Includes a ready-to-use GitHub Action workflow at `examples/github-action/action.yml`.
+The standalone pull request scanner `aetheris-pr-gate` (`pr_gate.py`, or `aetheris pr-gate`) inspects git diffs (`--base`/`--head`), diff files (`--diff-file`), and repository paths (`--paths`) before merging. It emits **SARIF 2.1.0** reports (`--sarif-out`) for GitHub Code Scanning and Markdown summaries for automated PR comments, with a ready-to-use GitHub Action in [`examples/github-action/`](examples/github-action/action.yml).
 
 ---
 
@@ -399,11 +416,11 @@ DeepSeek Harness connects directly to `aetheris_microbrains.mcp_server` via the 
 
 > [!IMPORTANT]
 > **What Microbrains IS and IS NOT:**
-> - **IT IS:** A deterministic, ultra-fast pre-flight linter, AST security scanner, and policy gate. It is designed to run in `--shadow` mode or active enforcement mode as an additional layer of defense.
-> - **IT IS NOT:** An OS sandbox, container, hypervisor, or substitute for kernel-level isolation (Docker, gVisor, seccomp, AppArmor).
-> - **IN-BAND DISCLOSURE:** Microbrains cannot prevent an LLM from speaking credentials out loud into chat text if raw secrets already reside in the model's context window. Production secrets must remain in isolated vaults or secret brokers.
-> - **STATIC ANALYSIS LIMITATIONS:** Shell tokenization and AST parsing operate at static inspection time. Dynamic variable indirection (`X=.env; cat $X`) cannot be fully resolved statically; Microbrains safely **escalates** such patterns, but robust security requires OS-level containment.
-> - **WHAT STATIC PRE-FLIGHT DOES NOT CATCH:** Runtime-assembled strings split across separate variables or modules, indirect commands hidden inside external `Makefile` / `package.json` scripts (commands like `make` / `npm run` escalate rather than inspect arbitrary build graphs), symlink/TOCTOU filesystem races, and in-band disclosure of secrets already inside the LLM context.
+> - **IT IS:** A deterministic, ultra-fast pre-flight linter, polyglot AST/deferred-execution scanner, and policy gate. It runs in `--shadow` or active enforcement mode as a defense-in-depth layer.
+> - **IT IS NOT:** A full container or VM hypervisor—though opt-in OS containment wrappers (`--sandbox-wrap`, `core/os_sandbox.py`, and `aetheris-gate sandbox` via Windows Job Objects, Linux Landlock/`bwrap`, macOS Seatbelt, and `DomainAllowlistProxy`) can wrap allowed commands and restrict egress.
+> - **IN-BAND DISCLOSURE:** Microbrains cannot prevent an LLM from speaking credentials out loud into chat text if raw secrets already reside in the model's context window. Keep production credentials isolated out-of-band using `core/secret_broker.py` (`$SECRET:<NAME>` handles in `aetheris-mcp-proxy`) or short-lived scoped tokens.
+> - **STATIC ANALYSIS LIMITATIONS:** Shell tokenization and AST parsing operate at static inspection time. Dynamic variable indirection (`X=.env; cat $X`) cannot be fully resolved statically; Microbrains safely **escalates** such patterns, while OS containment bounds runtime effects.
+> - **WHAT STATIC PRE-FLIGHT DOES NOT CATCH:** Runtime-assembled strings split across separate variables or modules, executing pre-existing arbitrary targets via `make` / `npm run` (while **edits** to `Makefile`, `package.json`, `.vscode/tasks.json`, `conftest.py`, `*.pth`, and CI workflows are scanned by `core/deferred_exec_guard.py`), and symlink/TOCTOU filesystem races outside OS sandboxes.
 
 ---
 
@@ -413,11 +430,13 @@ Microbrains works alongside any AI agent or framework:
 
 | Category | Agents & Frameworks | Integration Status | What Microbrains Does |
 | :--- | :--- | :--- | :--- |
-| **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook** (`python -m aetheris_microbrains.hook`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
-| **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Native Plugin + CLI** (`aetheris-install-antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
-| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Adapter** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
-| **Personal & Desktop OS Assistants** | **OpenClaw**, **Hermes Agent**, **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
-| **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Adapter** (`mb.narrow_tool_surface(...)`) | Prunes tool schemas per turn to cut token costs without starving agents of tools. |
+| **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook / Native Rust Shim** (`python -m aetheris_microbrains.hook` / `aetheris-gate`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
+| **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
+| **Hermes Agent** | **Hermes Agent** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
+| **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
+| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
+| **Personal & Desktop OS Assistants** | **OpenClaw**, **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
+| **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 
 ---
 
@@ -430,9 +449,9 @@ Catching broken syntax, missing variables, or leaked keys locally in 1.3 ms stop
 Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destructive commands (`rm -rf`, `DROP DATABASE`), and catches hidden code execution tricks (`eval`, `base64` decode into `exec`).
 
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
-Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check when your LLM takes 5 to 20 seconds to reply.
+Runs strictly on the Python standard library across its **34 core security modules** (plus optional zero-dependency Rust shim `aetheris-gate`), with pure NumPy reserved for optional Layer-2 routing and lab research modules. You won't notice a sub-millisecond check when your LLM takes 5 to 20 seconds to reply.
 
-### 4. 🧭 Reliable Escalations, Safe Fallbacks & Audit Trail (`v0.7.1`–`v0.7.6`)
+### 4. 🧭 Reliable Escalations, Safe Fallbacks & Audit Trail
 - **Safe Timeout Contracts & Fail-Closed Boundaries:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission. Missing context (e.g. unsupplied `file_content` for ambiguous diffs) likewise degrades safely to `"ask"` rather than auto-allowing.
 - **Fail-Closed Fallback on Tool Ambiguity:**
   - In tool routing, if the confidence score falls below the required threshold, the engine safely abstains from pruning and falls back to escalating the full catalog to avoid starving the agent of required tools.
@@ -446,8 +465,8 @@ Runs in pure NumPy on standard CPUs. You won't notice a 1.5 millisecond check wh
 - **Outbound Secret Egress & Post-Tool Scrubbing:** Inspects tool arguments across all tools (shell commands, `WebFetch`, MCP payloads) to block raw credential exfiltration (`layer1_secret_egress_veto`), and provides `mb.scrub_tool_output()` / `python -m aetheris_microbrains.hook --event post-tool-use` to sanitize returned credentials before context persistence.
 - **Human-Friendly Audit CLI & Policy Governance:**
   - Every decision logs structured provenance (`reason_code`, `label`, `input_sha256`, `payload_preview`) to your OS user state directory (`AETHERIS_STATE_DIR` / `decision_journal.jsonl`, automatically rotated at 10 MiB with `0o600` permissions).
-  - Humans can inspect why an action stopped using `python -m aetheris_microbrains.audit --last` or `--summary`.
-  - Security policies can be loaded from JSON, TOML (`.toml` via stdlib `tomllib`), or YAML via `PolicyConfig.from_file("security_rules.toml")` without modifying Python code (see [SECURITY.md](SECURITY.md)).
+  - Humans can inspect why an action stopped using `aetheris audit --last` / `--summary`, or launch the real-time web dashboard (`aetheris audit --ui --port 8767`) and OpenTelemetry GenAI span exporter (`--export-otel` / `--push-otel`).
+  - Security policies can be loaded from JSON, TOML (`.toml` via stdlib `tomllib`), YAML, **AWS Cedar (`.cedar`)**, or **OPA Rego (`.rego`)** via `PolicyConfig.from_file(...)` without modifying Python code (see [SECURITY.md](SECURITY.md)).
 
 ---
 
@@ -458,7 +477,7 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Zero Third-Party Dependencies in Hook:** The production `PreToolUse` / `PostToolUse` gate in `hook.py` relies exclusively on Python standard library modules (`argparse`, `hashlib`, `json`, `os`, `pathlib`, `re`, `shlex`, `sys`, `time`, `typing`) and the internal AST analysis engine. Third-party packages (NumPy, FastAPI, PyYAML) are never imported on the critical path of the pre-flight hook.
 * **Credential & Environment Isolation Boundary (Upstream Requirement):** `PreToolUse` hooks stop tool-level secret reads (`.env`, `.ssh/`, `env` dumps, `/proc/*/environ`, `$SECRET` echoing) and raw secret egress across tool arguments, **but** they cannot prevent in-band disclosure (e.g., echoing into chat text) if raw credentials are already sitting inside the LLM context window before a prompt injection fires. Always keep raw production credentials out of the agent's process environment and context window (use short-lived scoped tokens, a secret broker/vault, or credential-injecting egress proxies).
 * **Sensitive Asset Protection Across Tools & Shell (Layer 0 & Layer 1):** Denies writes/mutations to `.env*`, `.git/hooks/`, `.git/config`, `.ssh/`, `id_rsa`, `credentials.json`, `/proc/*/environ`, agent control-plane paths (`.claude/`, `.codex/`, `.cursor/`, `.vscode/`, `CLAUDE.md`, `AGENTS.md`), and cloud/package credential stores (`~/.aws/credentials`, `~/.npmrc`, `~/.pypirc`, `~/.docker/config.json`). Normalizes paths, blocks null-byte bypasses, and matches glob patterns via `fnmatch`.
-* **Obfuscated Payload, Outbound Egress & High-Entropy Secret Screening (Layer 1):** Inspects applied Python ASTs/diffs (`eval`/`exec`, `os.system`, `subprocess(shell=True)`, `base64`-to-`exec`, `getattr` obfuscation, `__builtins__` tampering, `secret_leak_pattern_found`, `ast_secret_exfil_pattern`), non-Python diffs (shell scripts, Makefiles, Dockerfiles), **and** scans command strings and arbitrary nested tool/MCP/web arguments for raw API keys (Stripe `sk_live_...`, Anthropic, OpenAI, GitHub, HuggingFace, Google), database URIs (`postgres://`, `mysql://`, `mongodb://`), JWT tokens, Bearer headers, and PEM private keys (`layer1_secret_egress_veto`).
+* **Obfuscated Payload, Polyglot Code & Deferred-Exec Screening (Layer 1):** Inspects applied Python ASTs/diffs (`eval`/`exec`, `os.system`, `subprocess(shell=True)`, `base64`-to-`exec`, `getattr` obfuscation, `__builtins__` tampering, `secret_leak_pattern_found`, `ast_secret_exfil_pattern`), polyglot diffs across **JS/TS, Go, Rust, SQL, Terraform/HCL, Dockerfiles, shell scripts, and YAML** (`core/multilang_ast.py`), deferred-execution supply-chain edits in `package.json`, `.vscode/tasks.json`, `Makefile`, `conftest.py`, `*.pth`, and CI workflows (`core/deferred_exec_guard.py`), **and** scans command strings and arbitrary nested tool/MCP/web arguments for raw API keys (Stripe `sk_live_...`, Anthropic, OpenAI, GitHub, HuggingFace, Google), database URIs (`postgres://`, `mysql://`, `mongodb://`), JWT tokens, Bearer headers, and PEM private keys (`layer1_secret_egress_veto`).
 * **Allowlist-First Shell Guard, Newline Injection & Wrapper Unwrapping:** Catches newline-separated commands (`echo ok\nrm -rf /`), unwraps wrapper commands (`xargs`, `find -exec/-ok`, `env`, `sudo`, `nohup`, `timeout`, inline `VAR=val`, `LD_PRELOAD` overrides) before running checks—blocking destructive shell chains (`rm -rf`, `env sh -c "rm -rf /"`, `curl | sh`, `dd of=/dev/`, `DROP DATABASE`) and secret env-var exposures (`echo $OPENAI_API_KEY`, `printenv GITHUB_TOKEN`), escalating bare `env`/`printenv`/`ls env:` and unrecognized commands.
 * **MCP Supply-Chain Security & Rug-Pull Defenses (`v0.7.6+`):**
   * `scan_mcp_tools()` scans incoming MCP tool definitions (including cross-tool ShareLock split payloads) for indirect prompt injection, payload poisoning, and tool shadowing against local built-ins (`trust_is_builtin_field=False` by default).
@@ -470,14 +489,14 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Uninspected External / MCP Tool Escalation:** Tools without inspected `cmd`/`diff` payloads (and not explicitly `READ_ONLY`) escalate to `"ask"` instead of auto-approving; `PolicyConfig(require_approval_for_external=True)` enforces confirmation on all external actions.
 * **Audit, Human Explainability & Decision Journaling (`python -m aetheris_microbrains.audit`):**
   * Every decision writes a forensic entry outside the package tree (`AETHERIS_STATE_DIR` or the OS user state directory, with `AETHERIS_JOURNAL_PATH` override and automatic 10 MiB `.1` rotation) containing the exact `reason_code`, human explanation `label`, cryptographic `input_sha256`, triggering layer, latency, any `suppressed_findings`, and a redacted `payload_preview`.
-  * Inspect reasons instantly in terminal: use `--last`, `--summary`, `--explain` / `--find <sha-prefix>`, `--daily`, or `--shadow-report` (projects enforce-mode deny/ask rates from `--shadow` journals).
+  * Inspect reasons instantly in terminal (`--last`, `--summary`, `--explain` / `--find <sha-prefix>`, `--daily`, `--shadow-report`), launch the interactive Web UI (`--ui --port 8767`), or export OpenTelemetry GenAI traces (`--export-otel` / `--push-otel`).
   * Shadow mode (`--shadow`) logs what would be blocked without disrupting live workflows; hook errors fail closed with exit code `2` (use `"onFailure": "block"` in Claude Code ≥ `2.1.295`).
-  * Policy controls also support `allowed_web_domains`, `trusted_mcp_servers` / `doctor --pin-mcp <server>` / `--scan-mcp`, opt-in `import_taint_enabled`, additive `extra_protected_patterns`, `allow_inline_suppression`, and AgentSpec-style `custom_rules` (`action: deny | escalate`, `tool`, `path_glob`, `cmd_regex`), plus optional `[ast]` `tree-sitter-bash` shell AST verification.
+  * Policy controls also support `allowed_web_domains`, `trusted_mcp_servers` / `doctor --pin-mcp <server>` / `--scan-mcp`, opt-in `import_taint_enabled`, additive `extra_protected_patterns`, `allow_inline_suppression`, and AgentSpec-style `custom_rules` (`action: deny | escalate`, `tool`, `path_glob`, `cmd_regex`), plus optional `[ast]` `tree-sitter` grammars (Bash, JavaScript, TypeScript, Go, Rust, YAML).
 * **Configurable Rule Governance & Profiles (`strict` vs. `dev`):**
-  * Load team policies dynamically via `PolicyConfig.from_file("my_policy.toml")` (or JSON/YAML).
+  * Load team policies dynamically via `PolicyConfig.from_file(...)` (supports JSON, TOML, YAML, AWS Cedar `.cedar`, and OPA Rego `.rego`).
   * **`strict` (default):** Zero-trust execution—escalates unknown commands or mutations to human confirmation.
   * **`dev` profile (convenience profile, not a security boundary):** Cuts human escalation fatigue by allowing routine local dev commands (`git add/commit`, safe PyPI `pip`/`npm` installs without URLs or `-e`, `python script.py`, `mkdir`, single-file `rm`) while still escalating potentially destructive operations (`subprocess.run(shell=False)`, relative `shutil.rmtree`, `git branch -D`, `git checkout -- .`, `git stash drop`, `npm -g`, `pip install git+...`) and **strictly denying** destructive operations (`rm -rf /`, `rm -rf .git`, `rm -rf /var/...`, `git clean -fdx`, `<(...)` process substitutions), raw credential reads (`.ssh`, `.claude`, `.env`), and network exfiltration sinks (`curl -d @.env`, `cat .env | curl`).
-  * **Auditable Inline Suppression (`# aetheris: allow <rule> -- <reason>`):** Medium-severity findings (`subprocess_call:*`, `destructive_fs_call_relative:shutil.rmtree`, `dangerous_os_call:os.remove`/`unlink`, `dynamic_import:importlib.import_module`) and documentation/test secret fixtures (`secret_leak_pattern_found`) can be annotated with `# aetheris: allow <rule> -- <reason>`. Every suppression is logged to `decision_journal.jsonl` (allowed in `dev`, escalated as `layer1_ast_suppressed_escalate` in `strict`). Critical execution/exfiltration rules (`eval`, `exec`, `subprocess_shell_true`, `ast_secret_exfil_pattern`) cannot be suppressed.
+  * **Auditable Inline Suppression (`# aetheris: allow <rule> -- <reason>`):** Supports `#`, `//`, and `--` comment syntax across Python and polyglot files for medium-severity findings (`subprocess_call:*`, `destructive_fs_call_relative:shutil.rmtree`, `dangerous_os_call:os.remove`/`unlink`, `dynamic_import:importlib.import_module`) and documentation/test secret fixtures (`secret_leak_pattern_found`). Every suppression is logged to `decision_journal.jsonl` (allowed in `dev`, escalated as `layer1_ast_suppressed_escalate` in `strict`). Critical execution/exfiltration rules (`eval`, `exec`, `subprocess_shell_true`, `ast_secret_exfil_pattern`) cannot be suppressed.
   * See [SECURITY.md](SECURITY.md) for full threat model, profile details, and governance rules.
 
 ---
@@ -503,7 +522,7 @@ The repository also includes standalone research modules (including the 18 neuro
    * Evaluates multi-turn `SessionSecurityState` taint: hard denial on lethal trifecta (external ingestion + credential read + mutation/egress).
    * Supports `require_approval_for_external` and irreversible action guards.
 2. **Layer 1: Structural AST, Secret & Allowlist-First Shell Gate**
-   * Full-file reconstructed Python AST parsing (`ast.parse` applied over unified diffs), distinguishing harmless static data tables from high cyclomatic complexity changes.
+   * Full-file reconstructed Python AST parsing (`ast.parse` applied over unified diffs), distinguishing harmless static data tables from high cyclomatic complexity changes, paired with polyglot structural scanners (`core/multilang_ast.py` for JS/TS, Go, Rust, SQL, Terraform, Dockerfile) and supply-chain deferred-execution checks (`core/deferred_exec_guard.py`).
    * Detects Python AST secret exfiltration (`ast_secret_exfil_pattern`: credential read + network egress sink).
    * Hardcoded API secret detection (Stripe `sk_live_...`, JWT, database URIs, Anthropic, OpenAI, GitHub, Google, PEM private keys).
    * Allowlist-first `shlex` shell tokenizer with wrapper unwrapping (`xargs`, `find -exec`, `env`, `sudo`, `timeout`, `nohup`), newline separation handling, and shell script / Makefile scanning (`rm -rf`, `curl | sh`, `dd of=/dev/` deny; unknown commands safely escalate).
@@ -517,7 +536,7 @@ The repository also includes standalone research modules (including the 18 neuro
 
 ---
 
-## 📦 Installation
+## 📦 Installation & Unified CLI (`aetheris`)
 
 ```bash
 git clone https://github.com/drtikov/microbrainsforagents.git
@@ -525,13 +544,27 @@ cd microbrainsforagents
 pip install -e .
 ```
 
-Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`).
+Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`). The core 34 security modules use pure Python stdlib with zero third-party dependencies (`aetheris verify-core`).
 
 * **Naming clarity:** Repository name is `microbrainsforagents`, `pip` package name is `aetheris-microbrains`, and the Python import package is `aetheris_microbrains`.
 
-*Optional OpenCL acceleration:*
+### Unified `aetheris` CLI
+
 ```bash
-pip install -e .[opencl]
+aetheris install <antigravity|claude|codex|hermes|cursor|dsh|auto>  # Configure host hooks/plugins
+aetheris verify-core                                                 # Verify pure-stdlib core isolation
+aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
+aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
+aetheris mcp-proxy --stdio --downstream srv=cmd                      # Run MCP gateway + secret broker
+aetheris pr-gate --base main --format sarif                          # Run CI/CD pre-merge diff gate
+```
+
+*Optional extras and native Rust shim:*
+```bash
+pip install -e ".[mcp,ast]"       # MCP tools + tree-sitter polyglot AST grammars
+pip install -e ".[server,guard-ml]" # FastAPI worker + ONNX semantic guard
+pip install -e ".[opencl]"        # Optional OpenCL acceleration
+cargo build --release --manifest-path rust/aetheris-gate/Cargo.toml  # Optional <15ms native Rust shim
 ```
 
 ---
@@ -588,6 +621,9 @@ Verify inside Claude Code that the hook is registered via `/hooks` (or test that
 * **`--shadow` (or `AETHERIS_HOOK_SHADOW=1`):** Safe pilot/audit mode—logs what Microbrains *would* deny or escalate to the decision journal (`AETHERIS_JOURNAL_PATH` / OS user state dir) without blocking live execution. Empty stdin, malformed JSON, non-object payloads, and engine/import errors still return `0` with empty `stdout` **and** append a redacted stdlib-only `event_type: "hook_error"` entry to the journal so hook failures are never indistinguishable from unchecked calls.
 * **`--log-decisions` / `--journal-path` (`AETHERIS_LOG_DECISIONS=1`, `AETHERIS_JOURNAL_PATH`):** Persist hook telemetry (including shadow `hook_error` events) to a custom `decision_journal.jsonl` path across independent hook processes for pilot audits and drift detection.
 * **`--auto-allow` (or `AETHERIS_HOOK_AUTO_ALLOW=1`):** Explicitly outputs `{"permissionDecision": "allow"}` in `hookSpecificOutput` for trusted environments where verified commands should run without user prompting.
+* **`--auto-approve-escalations` (or `AETHERIS_AUTO_APPROVE_ESCALATIONS=1`):** Auto-approves eligible escalated actions without prompting (enabled by default on bare/`solo-dev` Claude skill installs) while still enforcing hard denies and asking on protected-path writes, secrets, IFC taint, and malformed payloads.
+* **`--auto-daemon`:** Auto-spawns the background warm IPC daemon (`hook_daemon.py`) on cold fallback to eliminate Python interpreter startup on subsequent hook calls.
+* **`--sandbox-wrap none|srt|bwrap|seatbelt|landlock|job|aetheris-gate|auto`:** Wraps approved shell commands in OS-level sandbox containment via `core/os_sandbox.py`.
 * **Protected Paths Escalation:** Reading sensitive files (`.env`, `.ssh/id_rsa`, `credentials.json`) automatically returns `permissionDecision: "ask"`, while modifications are strictly denied.
 * **Fail-Closed on Exceptions & Import Errors (Non-Shadow):** Unexpected runtime or import errors return exit code `2` with redacted details in `stderr`, preventing unsafe actions from running if the hook fails.
 
@@ -631,12 +667,12 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ## 🎯 Scope, Where It Fits & Alternatives
 
-* **Where Microbrains Fits:** A **single `pip install` (`numpy`-only), zero-GPU pre-flight bundle** for custom/local agents or harnesses that want AST diff checks, secret scanning, allowlist-first `shlex` shell gating, and Top-K tool narrowing in `< 2 ms` without wiring 4 separate external binaries/services.
+* **Where Microbrains Fits:** A **pure-stdlib security core (34 modules, `aetheris verify-core`) with optional pure-NumPy Layer-2 routing (`aetheris-microbrains`)** for custom/local agents or harnesses that want polyglot AST diff checks, deferred-execution guards, secret brokering, allowlist-first `shlex` shell gating, and Top-K tool narrowing in `< 2 ms` without wiring separate cloud services.
 * **Established Alternatives by Component:**
 
 | Capability | Microbrains Approach | Established Specialized Alternatives |
 | --- | --- | --- |
-| Python code & diff checks | Full-file `ast.parse` + sink visitor + opt-in `PolicyConfig(strict_ast_allowlist=True)` | Bandit, Semgrep, Meta LlamaFirewall CodeShield |
+| Multi-language code & diff checks | Full-file `ast.parse` + sink visitor + polyglot AST (`core/multilang_ast.py`) + deferred-exec guard (`core/deferred_exec_guard.py`) | Bandit, Semgrep, Meta LlamaFirewall CodeShield |
 | Secret detection | Diff literal & token-prefix scanner (`secret_leak_pattern_found`) | `gitleaks`, `trufflehog` |
 | Shell allow/deny | Allowlist-first `shlex` parser (`unknown -> escalate`) | Harness permission rules / `PreToolUse` hooks (Claude Code, Codex) |
 | Tool narrowing | `< 1 ms` bilingual SHA-256 char-trigram MoE + optional `embed_fn`/`tool_descriptions` hybrid | Anthropic deferred tool loading, `langgraph-bigtool` |
@@ -647,9 +683,9 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ---
 
-## 🧪 Testing & Reproducible Benchmarks (`551 Passed, 2 Skipped`)
+## 🧪 Testing & Reproducible Benchmarks
 
-Run the full verification suite (zero failures; 2 optional-dependency skips when `nir` or `onnx` are not installed):
+Run the full verification suite (**`570 passed, 2 skipped`** on Windows / **`566 passed, 6 skipped`** on Linux CI; skips occur when optional dependencies like `nir`, `onnx`, or platform-specific extras are not installed):
 
 ```bash
 pytest aetheris_microbrains/tests -q
@@ -666,7 +702,7 @@ Measured **in-process on small payloads** across N=500 consecutive pre-flight ev
 *\*Max outlier reflects one-time Python interpreter / GC cold-start on process boot. Sustained in-process p99 latency on small inputs is under 0.3 ms.*
 
 **Real-world timing caveats & scaling:**
-- **Subprocess hook cold-start overhead:** Each standalone `python -m aetheris_microbrains.hook` process invocation takes **~245–300 ms** wall-clock on Windows (including ~110 ms bare Python interpreter startup; NumPy is *not* imported on the hook critical path). To eliminate per-call startup cost, run the resident server (`python -m aetheris_microbrains.core.microbrain_server`).
+- **Subprocess hook cold-start overhead:** Each standalone `python -m aetheris_microbrains.hook` process invocation takes **~245–520 ms** wall-clock on Windows due to Python interpreter startup (NumPy is *not* imported on the hook critical path). To eliminate per-call startup cost, use `--auto-daemon` (`aetheris-daemon` TCP/UDS), native HTTP mode (`aetheris-daemon --http --port 8765`), or the zero-dependency native Rust shim (`rust/aetheris-gate`, `<15 ms` cold start).
 - **AST scaling with file size** *(measured median on `analyze_code_diff()`)*: `50 lines`: **2.3 ms**, `500 lines`: **22.5 ms**, `2,000 lines`: **98 ms**, `5,000 lines`: **269 ms**.
 - **Conformal calibration limits:** Conformal coverage guarantees in Layer 2 are marginal (not per-query), hold only under exchangeability (distribution shift degrades coverage—monitored via `drift_detected`), and carry finite-sample variance when per-class calibration counts are ~25.
 
