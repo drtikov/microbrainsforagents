@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|qoder|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "qoder", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -55,6 +55,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("cursor")
     if (home / ".openclaw").exists():
         detected.append("openclaw")
+    if (home / ".qoder").exists() or (ws / ".qoder").exists():
+        detected.append("qoder")
     return detected
 
 
@@ -129,6 +131,33 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             return dsh_self_test()
         return _print_setup()
 
+    if host == "qoder" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        deny_v = evaluate_hook_payload(
+            {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+            host="qoder",
+            log_decisions=False,
+        )
+        allow_v = evaluate_hook_payload(
+            {"tool_name": "Bash", "tool_input": {"command": "git status"}},
+            host="qoder",
+            log_decisions=False,
+        )
+        qoder_write = evaluate_hook_payload(
+            {"tool_name": "Write", "tool_input": {"file_path": ".qoder/settings.json", "content": "{}"}},
+            host="qoder",
+            log_decisions=False,
+        )
+        ok = (
+            deny_v.get("decision") == "deny"
+            and deny_v.get("exit_code") == 2
+            and allow_v.get("decision") == "allow"
+            and qoder_write.get("decision") == "deny"
+        )
+        print("QODER SELF-TEST PASSED" if ok else "QODER SELF-TEST FAILED")
+        return 0 if ok else 1
+
     bundle = _build_generic_hook_bundle(
         host,
         profile=str(args.profile or "dev"),
@@ -141,13 +170,26 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         "codex": Path(".codex") / "hooks.json",
         "hermes": Path(".hermes") / "aetheris_hooks.json",
         "cursor": Path(".cursor") / "hooks.json",
+        "qoder": Path(".qoder") / "settings.json",
     }
     target = Path(args.plugin_dir) if getattr(args, "plugin_dir", None) else (base_dir / rel_map[host])
+    merged_bundle = dict(bundle)
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                merged = dict(existing)
+                merged["hooks"] = bundle.get("hooks", {})
+                if "version" in bundle:
+                    merged["version"] = bundle["version"]
+                merged_bundle = merged
+        except Exception:
+            pass
     if args.dry_run:
         print(f"DRY RUN - would write {host} hooks config to {target}:")
-        print(json.dumps(bundle, indent=2, ensure_ascii=False))
+        print(json.dumps(merged_bundle, indent=2, ensure_ascii=False))
         return 0
-    _atomic_write_json(target, bundle)
+    _atomic_write_json(target, merged_bundle)
     print(f"Installed Aetheris Microbrains ({host}) -> {target}")
     return 0
 

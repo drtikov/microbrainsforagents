@@ -545,7 +545,7 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "qoder", "cursor", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
@@ -735,6 +735,8 @@ def evaluate_hook_payload(
         "hermes": "hermes_shell_hook_v1",
         "antigravity": "antigravity_pretooluse_v1",
         "openclaw": "openclaw_before_tool_call_v1",
+        "qoder": "qoder_pretooluse_v1",
+        "cursor": "cursor_hook_v1",
         "generic": "generic_v1",
     }[resolved_host]
     oc_ctx = payload.get("context") if isinstance(payload, dict) and isinstance(payload.get("context"), dict) else {}
@@ -961,7 +963,7 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "qoder", "cursor", "generic"}:
         resolved_host = "claude"
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
@@ -1213,13 +1215,13 @@ def evaluate_post_tool_use_payload(
         host_specific = {}
         host_action = "warn_logged" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_log"
-    elif resolved_host in {"claude", "codex"}:
+    elif resolved_host in {"claude", "codex", "qoder", "cursor"}:
         if any_alert:
             host_specific = {
                 "hookEventName": "PostToolUse",
                 "additionalContext": _post_warning_text(include_advice=True),
             }
-            if resolved_host == "claude" and supports_replace:
+            if resolved_host in {"claude", "qoder"} and supports_replace:
                 host_specific["updatedToolOutput"] = redacted_output
                 if supports_mcp_replace:
                     host_specific["updatedMCPToolOutput"] = redacted_output
@@ -1395,7 +1397,7 @@ def _openclaw_cli_fallback_json(
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "generic"}:
+    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "qoder", "cursor", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
@@ -1432,9 +1434,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "generic"],
+            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "qoder", "cursor", "generic"],
             default=host,
-            help="Host contract format (claude, codex, hermes, antigravity, openclaw, generic)",
+            help="Host contract format (claude, codex, hermes, antigravity, openclaw, qoder, cursor, generic)",
         )
         parser.add_argument(
             "--codex-escalate-deny",

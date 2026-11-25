@@ -451,6 +451,7 @@ Microbrains works alongside any AI agent or framework:
 | Category | Agents & Frameworks | Integration Status | What Microbrains Does |
 | :--- | :--- | :--- | :--- |
 | **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook / Native Rust Shim** (`python -m aetheris_microbrains.hook` / `aetheris-gate`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
+| **Qoder (Desktop & CLI)** | **Qoder Desktop**, **Qoder CLI** | **Native Hook Adapter + CLI** (`aetheris install qoder` / `--host qoder`) | Claude-compatible `PreToolUse`/`PostToolUse` gate, `.qoder/` self-protection, and optional `aetheris-mcp` tools. |
 | **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
 | **Hermes Agent** | **Hermes Agent** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
 | **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |

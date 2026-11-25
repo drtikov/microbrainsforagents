@@ -168,11 +168,15 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     ".windsurfrules",
     ".codex/",
     ".codex",
+    ".qoder/",
+    ".qoder",
     "claude.md",
     "agents.md",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks",
+    ".qoder/settings.json",
+    ".qoder/settings.local.json",
     ".mcp.json",
     ".cursor/mcp.json",
     ".vscode/tasks.json",
@@ -4468,7 +4472,7 @@ def get_recent_decision_journal(limit: int = 50) -> List[Dict[str, Any]]:
     return list(_DECISION_RING_BUFFER)[-limit:]
 
 
-_AGENT_CONTROL_PLANE_SEGMENTS: Tuple[str, ...] = (".claude", ".codex", ".cursor", ".mcp.json", ".vscode")
+_AGENT_CONTROL_PLANE_SEGMENTS: Tuple[str, ...] = (".claude", ".codex", ".cursor", ".qoder", ".mcp.json", ".vscode")
 _AGENT_CREDENTIAL_SEGMENTS: Tuple[str, ...] = (
     ".env", ".ssh", ".aws", ".git", "credentials", "id_rsa", "id_ed25519", "id_ecdsa",
     "secrets", "integrity", "bible.md", "axioms", ".pem", ".key",
