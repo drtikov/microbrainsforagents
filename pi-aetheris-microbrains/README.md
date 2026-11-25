@@ -7,8 +7,8 @@ Zero-dependency Level 3 Pi extension connecting Pi's `tool_call` and `tool_resul
 - **`tool_call` pre-flight gate**: Evaluates every tool invocation (`bash`, `write`, `edit`, `read`, etc.) against `aetheris-daemon` before execution (`X-Aetheris-Host: pi`).
 - **Native Layer 3 escalation**: Uses `ctx.ui.confirm(...)` in TUI and RPC modes when Microbrains returns `escalate: true`, falling back to `blockOnEscalate` in non-interactive runs.
 - **`tool_result` synchronous DLP scrubbing**: Redacts API keys, private keys, and connection strings from `event.content` and `event.details` before the LLM sees tool output, with best-effort daemon audit logging.
-- **`/aetheris` command**: Displays live daemon health and session metrics (`checked`, `blocked`, `approved`, `redacted`) via `ctx.ui.notify`.
-- **Settings & Lifecycle Persistence**: Reads optional overrides from `.pi/settings.json` (`"aetheris": { ... }`) via `ctx.settingsManager`, checks daemon health on `session_start`, aborts in-flight requests on `session_shutdown`, and persists session metrics via `pi.appendEntry("aetheris-stats", ...)`.
+- **`/aetheris` & `/aetheris-config` commands**: `/aetheris` displays live daemon health and session metrics (`checked`, `blocked`, `approved`, `redacted`); `/aetheris-config` displays effective configuration (with token masked) and current session stats.
+- **Settings & Lifecycle Persistence**: Reads optional overrides from `.pi/settings.json` (`"aetheris": { ... }`) via `ctx.settingsManager`, restores the latest branch-aware `aetheris-stats` snapshot on `session_start` (`getBranch()` fallback `getEntries()`), checks daemon health without blocking startup, aborts in-flight requests on `session_shutdown`, and persists stats-only snapshots on blocks, escalations, every 10 checks, and shutdown via `pi.appendEntry("aetheris-stats", ...)`.
 - **Fail-closed default**: Blocks tool execution when the daemon is unreachable unless `AETHERIS_FAIL_CLOSED=0` or `AETHERIS_HOOK_SHADOW=1`.
 
 ## Quick Setup

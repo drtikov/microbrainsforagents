@@ -183,10 +183,11 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
         "  appendEntry(type, data) { entries.push({ customType: type, data }); },"
         "};"
         "ext(mockPi);"
-        "if (typeof handlers.tool_call !== 'function' || typeof handlers.tool_result !== 'function' || typeof handlers.session_start !== 'function' || typeof handlers.session_shutdown !== 'function' || typeof commands.aetheris?.handler !== 'function') process.exit(2);"
+        "if (typeof handlers.tool_call !== 'function' || typeof handlers.tool_result !== 'function' || typeof handlers.session_start !== 'function' || typeof handlers.session_shutdown !== 'function' || typeof commands.aetheris?.handler !== 'function' || typeof commands['aetheris-config']?.handler !== 'function') process.exit(2);"
         "const warnNotes = [];"
-        "const priorEntries = [{ type: 'custom', customType: 'aetheris-stats', data: { checked: 3, blocked: 1, approved: 1, redacted: 2 } }];"
-        "const ctxOff = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'pi-sess-1', getEntries: () => priorEntries }, ui: { notify(msg, level) { warnNotes.push({ msg, level }); } } };"
+        "const staleBranch = [{ type: 'custom', customType: 'aetheris-stats', data: { checked: 1, blocked: 0, approved: 0, redacted: 0 } }, { type: 'custom', customType: 'aetheris-stats', data: { checked: 3, blocked: 1, approved: 1, redacted: 2 } }];"
+        "const decoyEntries = [{ type: 'custom', customType: 'aetheris-stats', data: { checked: 99, blocked: 99, approved: 99, redacted: 99 } }];"
+        "const ctxOff = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'pi-sess-1', getBranch: () => staleBranch, getEntries: () => decoyEntries }, ui: { notify(msg, level) { warnNotes.push({ msg, level }); } } };"
         "await handlers.session_start({ reason: 'startup' }, ctxOff);"
         "if (!warnNotes.some((n) => n.level === 'warning' && n.msg.includes('unreachable'))) process.exit(6);"
         f"const resEvent = {{ toolName: 'bash', content: [{{ type: 'text', text: {json.dumps('KEY=' + fake_tok)} }}], details: {{ raw: {json.dumps(fake_tok)} }} }};"
@@ -195,8 +196,9 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
         f"if (resEvent.content[0].text.includes({json.dumps(fake_tok)}) || resEvent.details.raw.includes({json.dumps(fake_tok)})) process.exit(4);"
         "const fc = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'rm -rf /' } }, ctxOff);"
         "if (!fc || fc.block !== true || !String(fc.reason).includes('fail-closed')) process.exit(5);"
+        "if (entries.length !== 1 || entries[0].data.checked !== 4 || entries[0].data.blocked !== 2 || 'token' in entries[0].data || 'daemonUrl' in entries[0].data) process.exit(8);"
         "await handlers.session_shutdown({}, ctxOff);"
-        "if (entries.length !== 1 || entries[0].customType !== 'aetheris-stats' || entries[0].data.checked !== 4 || entries[0].data.blocked !== 2 || entries[0].data.redacted < 4) process.exit(7);"
+        "if (entries.length !== 2 || entries[1].customType !== 'aetheris-stats' || entries[1].data.checked !== 4 || entries[1].data.blocked !== 2 || entries[1].data.redacted < 4) process.exit(7);"
         "console.log(JSON.stringify({ ok: true }));"
     )
     env = dict(os.environ)
@@ -207,18 +209,20 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
     assert proc_off.returncode == 0, proc_off.stderr or proc_off.stdout
     assert json.loads(proc_off.stdout.strip())["ok"] is True
 
-    # Part 2: Live HTTP daemon — settingsManager override, sessionManager.getSessionId(), allow, block, escalate, and /aetheris command
+    # Part 2: Live HTTP daemon — settingsManager override, periodic persist, allow/block/escalate, and /aetheris + /aetheris-config commands
     token = "test-pi-node-token"
     port, t = _start_test_daemon(tmp_path, token)
     try:
         online_script = (
             f"import {{ createAetherisPiExtension }} from {json.dumps(EXTENSION_FILE.as_uri())};"
-            "const handlers = {}; const commands = {};"
-            "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
+            "const handlers = {}; const commands = {}; const entries = [];"
+            "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; }, appendEntry(type, data) { entries.push({ customType: type, data }); } };"
             "createAetherisPiExtension()(mockPi);"
-            f"const settingsCtx = {{ cwd: process.cwd(), sessionManager: {{ getSessionId: () => 'pi-sess-2', getEntries: () => [] }}, settingsManager: {{ get(k) {{ return k === 'aetheris' ? {{ daemonUrl: 'http://127.0.0.1:{port}', token: {json.dumps(token)}, timeoutMs: 2000 }} : undefined; }} }} }};"
+            f"const settingsCtx = {{ cwd: process.cwd(), sessionManager: {{ getSessionId: () => 'pi-sess-2', getBranch: () => [{{ type: 'custom', customType: 'aetheris-stats', data: {{ checked: 9, blocked: 0, approved: 0, redacted: 0 }} }}] }}, settingsManager: {{ get(k) {{ return k === 'aetheris' ? {{ daemonUrl: 'http://127.0.0.1:{port}', token: {json.dumps(token)}, timeoutMs: 2000 }} : undefined; }} }} }};"
+            "await handlers.session_start({ reason: 'reload' }, settingsCtx);"
             "const allowRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'git status' } }, settingsCtx);"
             "if (allowRes !== undefined) process.exit(10);"
+            "if (entries.length !== 1 || entries[0].data.checked !== 10 || 'token' in entries[0].data || 'daemonUrl' in entries[0].data) process.exit(16);"
             "const blockRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c2', input: { command: 'rm -rf /' } }, settingsCtx);"
             "if (!blockRes || blockRes.block !== true) process.exit(11);"
             "const shadowCtx = { ...settingsCtx, settingsManager: { get(k) { return k === 'aetheris' ? { ...settingsCtx.settingsManager.get('aetheris'), shadow: true } : undefined; } } };"
@@ -232,7 +236,10 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
             "let notifiedMsg = ''; let notifiedLevel = '';"
             "await commands.aetheris.handler('', { ...settingsCtx, ui: { notify(msg, level) { notifiedMsg = msg; notifiedLevel = level; } } });"
             "if (!notifiedMsg.includes('daemon=UP') || notifiedLevel !== 'info') process.exit(14);"
-            "console.log(JSON.stringify({ ok: true, notifiedMsg }));"
+            "let cfgMsg = ''; let cfgLevel = '';"
+            "await commands['aetheris-config'].handler('', { ...settingsCtx, ui: { notify(msg, level) { cfgMsg = msg; cfgLevel = level; } } });"
+            f"if (cfgLevel !== 'info' || !cfgMsg.includes('daemonUrl: http://127.0.0.1:{port}') || !cfgMsg.includes('token: ***') || cfgMsg.includes({json.dumps(token)}) || !cfgMsg.includes('Session Stats:')) process.exit(17);"
+            "console.log(JSON.stringify({ ok: true, notifiedMsg, cfgMsg }));"
         )
         proc_on = subprocess.run([node, "--input-type=module", "-e", online_script], capture_output=True, text=True, check=False)
         assert proc_on.returncode == 0, proc_on.stderr or proc_on.stdout

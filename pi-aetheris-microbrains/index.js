@@ -136,8 +136,12 @@ export function createAetherisPiExtension(overrides = {}) {
     const stats = { checked: 0, blocked: 0, approved: 0, redacted: 0 };
     const activeControllers = new Set();
 
+    function persistStats() {
+      pi.appendEntry?.("aetheris-stats", { ...stats });
+    }
+
     pi.on("session_start", async (_event, ctx) => {
-      const entries = ctx?.sessionManager?.getEntries?.();
+      const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.();
       if (Array.isArray(entries)) {
         for (let i = entries.length - 1; i >= 0; i -= 1) {
           const entry = entries[i];
@@ -172,7 +176,7 @@ export function createAetherisPiExtension(overrides = {}) {
         }
       }
       activeControllers.clear();
-      pi.appendEntry?.("aetheris-stats", { ...stats });
+      persistStats();
     });
 
     pi.on("tool_call", async (event, ctx) => {
@@ -202,20 +206,28 @@ export function createAetherisPiExtension(overrides = {}) {
       if (err && !verdict) {
         if (!cfg.shadow && cfg.failClosed) {
           stats.blocked += 1;
+          persistStats();
           return {
             block: true,
             reason: `Aetheris pre-flight unavailable (fail-closed): ${String(err?.message || err)}`,
           };
         }
+        if (stats.checked % 10 === 0) {
+          persistStats();
+        }
         return undefined;
       }
 
       if (cfg.shadow || !verdict || typeof verdict !== "object") {
+        if (stats.checked % 10 === 0) {
+          persistStats();
+        }
         return undefined;
       }
 
       if (verdict.block === true) {
         stats.blocked += 1;
+        persistStats();
         return {
           block: true,
           reason: String(verdict.blockReason || verdict.reason || "Blocked by Aetheris pre-flight policy"),
@@ -228,8 +240,10 @@ export function createAetherisPiExtension(overrides = {}) {
           const ok = await ctx.ui.confirm("Aetheris Microbrains Escalation", `${toolName}: ${reason}\nAllow execution?`);
           if (ok === true) {
             stats.approved += 1;
+            persistStats();
           } else {
             stats.blocked += 1;
+            persistStats();
             return {
               block: true,
               reason: `Aetheris escalation declined: ${reason}`,
@@ -237,6 +251,7 @@ export function createAetherisPiExtension(overrides = {}) {
           }
         } else if (cfg.blockOnEscalate) {
           stats.blocked += 1;
+          persistStats();
           return {
             block: true,
             reason: `Aetheris escalation (requires review): ${reason}`,
@@ -246,6 +261,9 @@ export function createAetherisPiExtension(overrides = {}) {
 
       if (verdict.args && typeof verdict.args === "object" && event && typeof event.input === "object" && event.input !== null) {
         Object.assign(event.input, verdict.args);
+      }
+      if (stats.checked % 10 === 0) {
+        persistStats();
       }
       return undefined;
     });
@@ -300,6 +318,29 @@ export function createAetherisPiExtension(overrides = {}) {
           `failClosed=${cfg.failClosed} checked=${stats.checked} blocked=${stats.blocked} ` +
           `approved=${stats.approved} redacted=${stats.redacted}`;
         ctx?.ui?.notify?.(msg, up ? "info" : "warning");
+      },
+    });
+
+    pi.registerCommand("aetheris-config", {
+      description: "Show Aetheris Microbrains effective configuration and session stats",
+      handler: async (_args, ctx) => {
+        const cfg = _resolveEffectiveConfig(overrides, ctx);
+        const lines = [
+          "Aetheris Microbrains Config:",
+          `  daemonUrl: ${cfg.daemonUrl}`,
+          `  shadow: ${cfg.shadow}`,
+          `  failClosed: ${cfg.failClosed}`,
+          `  blockOnEscalate: ${cfg.blockOnEscalate}`,
+          `  timeoutMs: ${cfg.timeoutMs}`,
+          `  token: ${cfg.token ? "***" : "(empty)"}`,
+          "",
+          "Session Stats:",
+          `  checked: ${stats.checked}`,
+          `  blocked: ${stats.blocked}`,
+          `  approved: ${stats.approved}`,
+          `  redacted: ${stats.redacted}`,
+        ];
+        ctx?.ui?.notify?.(lines.join("\n"), "info");
       },
     });
   };
