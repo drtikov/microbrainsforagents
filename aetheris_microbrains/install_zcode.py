@@ -19,11 +19,20 @@ def _python_exe() -> str:
     return sys.executable.replace("\\", "/")
 
 
-def _hook_entry(event_args: List[str], extra: List[str]) -> Dict[str, Any]:
+def _hook_entry(event_args: List[str], extra: List[str], *, use_rust_shim: bool = False) -> Dict[str, Any]:
+    from .core.rust_shim import build_hook_command
+
+    cmd, full_args = build_hook_command(
+        "zcode",
+        event_args=event_args,
+        extra_args=extra,
+        use_rust_shim=use_rust_shim,
+        auto_daemon=True,
+    )
     return {
         "type": "process",
-        "command": _python_exe(),
-        "args": ["-m", "aetheris_microbrains.hook", *event_args, *extra],
+        "command": cmd,
+        "args": full_args,
         "timeoutMs": 10000,
         "statusMessage": "Aetheris Microbrains gate",
     }
@@ -36,6 +45,7 @@ def _build_entries(
     shadow: bool = False,
     no_session_state: bool = False,
     no_log: bool = False,
+    use_rust_shim: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     extra: List[str] = []
     if profile == "dev":
@@ -48,11 +58,11 @@ def _build_entries(
     log = [] if no_log else ["--log-decisions"]
     pre = {
         "matcher": PRE_TOOL_MATCHER,
-        "hooks": [_hook_entry(["--host", "zcode", *session], extra + log)],
+        "hooks": [_hook_entry([*session], extra + log, use_rust_shim=use_rust_shim)],
     }
     post = {
         "matcher": POST_TOOL_MATCHER,
-        "hooks": [_hook_entry(["--host", "zcode", "--event", "post-tool-use", *session], extra + log)],
+        "hooks": [_hook_entry(["--event", "post-tool-use", *session], extra + log, use_rust_shim=use_rust_shim)],
     }
     return pre, post
 
@@ -69,7 +79,7 @@ def _is_aetheris_group(group: Any) -> bool:
         return False
     for h in group.get("hooks", []):
         blob = json.dumps(h)
-        if MARKER in blob or "zcode_gate.py" in blob:
+        if MARKER in blob or "zcode_gate.py" in blob or "aetheris-gate" in blob:
             return True
     return False
 
@@ -175,6 +185,7 @@ def install(
     shadow: bool = False,
     no_session_state: bool = False,
     no_log: bool = False,
+    use_rust_shim: bool = False,
     remove: bool = False,
     dry_run: bool = False,
 ) -> int:
@@ -194,6 +205,7 @@ def install(
             shadow=shadow,
             no_session_state=no_session_state,
             no_log=no_log,
+            use_rust_shim=use_rust_shim,
         )
         config = _merge(config, pre, post)
 
@@ -214,6 +226,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--shadow", action="store_true", help="Observe-only: never block")
     p.add_argument("--no-session-state", action="store_true")
     p.add_argument("--no-log", action="store_true", help="Do not request --log-decisions")
+    p.add_argument("--use-rust-shim", action="store_true", help="Use native `aetheris-gate --auto-daemon` binary when available")
     p.add_argument("--remove", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--self-test", action="store_true")
@@ -231,6 +244,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         shadow=bool(args.shadow),
         no_session_state=bool(args.no_session_state),
         no_log=bool(args.no_log),
+        use_rust_shim=bool(args.use_rust_shim),
         remove=bool(args.remove),
         dry_run=bool(args.dry_run),
     )

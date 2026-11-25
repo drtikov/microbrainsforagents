@@ -91,16 +91,23 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
     return detected
 
 
-def _build_generic_hook_bundle(host: str, *, profile: str, shadow: bool, auto_allow: bool) -> Dict[str, Any]:
-    py = sys.executable.replace("\\", "/")
-    extra = f"--host {host} --profile {profile} --log-decisions --session-state auto"
+def _build_generic_hook_bundle(
+    host: str, *, profile: str, shadow: bool, auto_allow: bool, use_rust_shim: bool = False
+) -> Dict[str, Any]:
+    from .core.rust_shim import build_hook_command
+
+    extra = ["--profile", profile, "--log-decisions", "--session-state", "auto"]
     if shadow:
-        extra += " --shadow"
+        extra.append("--shadow")
     if auto_allow:
-        extra += " --auto-allow"
-    pre_cmd = f'"{py}" -m aetheris_microbrains.hook {extra}'
-    post_extra = f"{extra} --replace-tool-output" if host in {"claude", "qoder"} else extra
-    post_cmd = f'"{py}" -m aetheris_microbrains.hook --event post-tool-use {post_extra}'
+        extra.append("--auto-allow")
+    pre_exe, pre_args = build_hook_command(host, event_args=[], extra_args=extra, use_rust_shim=use_rust_shim)
+    post_extra = [*extra, "--replace-tool-output"] if host in {"claude", "qoder"} else list(extra)
+    post_exe, post_args = build_hook_command(
+        host, event_args=["--event", "post-tool-use"], extra_args=post_extra, use_rust_shim=use_rust_shim
+    )
+    pre_cmd = " ".join([f'"{pre_exe}"', *pre_args])
+    post_cmd = " ".join([f'"{post_exe}"', *post_args])
     if host == "cursor":
         return {
             "version": 1,
@@ -149,7 +156,7 @@ def _merge_hooks_non_destructively(existing_hooks: Any, new_hooks: Dict[str, Any
                     serialized = json.dumps(entry, ensure_ascii=False)
                 except Exception:
                     serialized = str(entry)
-                if "aetheris_microbrains.hook" not in serialized:
+                if "aetheris_microbrains.hook" not in serialized and "aetheris-gate" not in serialized:
                     preserved.append(entry)
         merged[event_name] = [*preserved, *new_entries]
     return merged
@@ -199,6 +206,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             workspace=ws,
             profile=str(args.profile or "strict"),
             shadow=bool(args.shadow),
+            use_rust_shim=bool(args.use_rust_shim),
             dry_run=bool(args.dry_run),
         )
     if host == "openhands":
@@ -210,6 +218,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             workspace=ws,
             profile=str(args.profile or "dev"),
             shadow=bool(args.shadow),
+            use_rust_shim=bool(args.use_rust_shim),
             dry_run=bool(args.dry_run),
         )
 
@@ -345,6 +354,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         profile=str(args.profile or "dev"),
         shadow=bool(args.shadow),
         auto_allow=bool(args.auto_allow),
+        use_rust_shim=bool(args.use_rust_shim),
     )
     base_dir = ws if ws is not None else Path.home()
     rel_map = {

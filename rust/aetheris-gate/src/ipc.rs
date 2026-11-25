@@ -63,9 +63,28 @@ fn find_python_executable() -> String {
     "python".to_string()
 }
 
+#[cfg(windows)]
+fn clear_std_handle_inheritance() {
+    extern "system" {
+        fn GetStdHandle(nStdHandle: u32) -> isize;
+        fn SetHandleInformation(hObject: isize, dwMask: u32, dwFlags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    for std_id in [(-10i32) as u32, (-11i32) as u32, (-12i32) as u32] {
+        unsafe {
+            let h = GetStdHandle(std_id);
+            if h != 0 && h != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 pub fn spawn_daemon_detached(state_dir: &Path) {
     let py = find_python_executable();
     let state_arg = state_dir.to_string_lossy().to_string();
+    #[cfg(windows)]
+    clear_std_handle_inheritance();
     let mut cmd = Command::new(py);
     cmd.args([
         "-m",

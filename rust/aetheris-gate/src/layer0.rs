@@ -36,7 +36,8 @@ impl Default for CliFlags {
             .trim()
             .to_ascii_lowercase();
         let host = match raw_host.as_str() {
-            "claude" | "codex" | "hermes" | "antigravity" | "generic" => raw_host,
+            "claude" | "codex" | "hermes" | "antigravity" | "openclaw" | "opencode" | "kilocode"
+            | "pi" | "omp" | "qoder" | "zcode" | "openhands" | "cursor" | "generic" => raw_host,
             _ => "claude".to_string(),
         };
         Self {
@@ -100,7 +101,23 @@ pub fn parse_cli_flags(args: &[String]) -> CliFlags {
             "--host" => {
                 if let Some(v) = next(&mut i) {
                     let low = v.trim().to_ascii_lowercase();
-                    if matches!(low.as_str(), "claude" | "codex" | "hermes" | "antigravity" | "generic") {
+                    if matches!(
+                        low.as_str(),
+                        "claude"
+                            | "codex"
+                            | "hermes"
+                            | "antigravity"
+                            | "openclaw"
+                            | "opencode"
+                            | "kilocode"
+                            | "pi"
+                            | "omp"
+                            | "qoder"
+                            | "zcode"
+                            | "openhands"
+                            | "cursor"
+                            | "generic"
+                    ) {
                         cfg.host = low;
                     }
                 }
@@ -213,6 +230,8 @@ const DIFF_KEYS: &[&str] = &[
     "payload_diff",
     "patch",
     "new_string",
+    "new_str",
+    "file_text",
     "Replacement",
     "ReplacementContent",
     "content",
@@ -247,12 +266,11 @@ fn extract_tool_and_input<'a>(payload: &'a JsonValue) -> (String, &'a JsonValue)
 
 fn canonical_tool(raw_low: &str) -> &str {
     match raw_low {
-        "bash" | "shell" | "shell_command" | "exec_command" | "execute_shell" | "run_command"
-        | "terminal" => "execute_shell",
-        "edit" | "str_replace_editor" | "edit_file" | "multiedit" | "notebookedit"
-        | "patch" | "apply_patch" | "replace_file_content" | "multi_replace_file_content" => {
-            "edit_file"
-        }
+        "bash" | "shell" | "shell_command" | "exec_command" | "execute_shell" | "execute_bash"
+        | "run_command" | "terminal" => "execute_shell",
+        "edit" | "str_replace_editor" | "file_editor" | "edit_file" | "multiedit"
+        | "notebookedit" | "patch" | "apply_patch" | "replace_file_content"
+        | "multi_replace_file_content" => "edit_file",
         "write" | "write_file" | "repo_write" | "fwrite" | "write_to_file" => "write_file",
         "read" | "read_file" | "repo_read" | "view_file" => "read_file",
         "grep" | "grep_search" | "search_code" | "find_by_name" => "search_code",
@@ -264,7 +282,19 @@ fn canonical_tool(raw_low: &str) -> &str {
 fn is_control_plane_segment(seg: &str) -> bool {
     matches!(
         seg,
-        ".claude" | ".codex" | ".cursor" | ".mcp.json" | ".vscode"
+        ".claude"
+            | ".codex"
+            | ".cursor"
+            | ".qoder"
+            | ".opencode"
+            | ".kilo"
+            | ".pi"
+            | ".omp"
+            | ".zcode"
+            | ".zcode-plugin"
+            | ".openhands"
+            | ".mcp.json"
+            | ".vscode"
     )
 }
 
@@ -358,7 +388,21 @@ pub fn is_protected_path(path: &str) -> bool {
     for s in &segs {
         if matches!(
             *s,
-            ".ssh" | ".gnupg" | ".azure" | ".claude" | ".codex" | ".cursor" | "constitution"
+            ".ssh"
+                | ".gnupg"
+                | ".azure"
+                | ".claude"
+                | ".codex"
+                | ".cursor"
+                | ".qoder"
+                | ".opencode"
+                | ".kilo"
+                | ".pi"
+                | ".omp"
+                | ".zcode"
+                | ".zcode-plugin"
+                | ".openhands"
+                | "constitution"
         ) {
             return true;
         }
@@ -441,7 +485,15 @@ pub fn fast_layer0_veto(payload: &JsonValue, flags: &CliFlags) -> Option<FastVet
     }
     let (raw_tool, inp) = extract_tool_and_input(payload);
     let raw_low = raw_tool.to_ascii_lowercase();
-    let tool = canonical_tool(&raw_low);
+    let tool = if matches!(raw_low.as_str(), "file_editor" | "str_replace_editor") {
+        match inp.get("command").and_then(|v| v.as_str()).map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("view") => "read_file",
+            Some("create") => "write_file",
+            _ => "edit_file",
+        }
+    } else {
+        canonical_tool(&raw_low)
+    };
 
     let target_path = PATH_KEYS
         .iter()

@@ -30,6 +30,16 @@ from .core.runtime_paths import (
     get_state_dir,
 )
 from .core.secrets import redact_secrets as _redact_error_text
+from .hosts import (
+    HTTP_DIRECT_HSO_HOSTS,
+    PLUGIN_BLOCK_HOSTS,
+    POST_CLAUDE_COMPAT_HOSTS,
+    REPLACE_OUTPUT_HOSTS,
+    SUPPORTED_HOOK_HOSTS,
+    get_host_adapter,
+    list_hosts,
+    resolve_host,
+)
 
 _DEFAULT_HOOK_JOURNAL_PATH = get_default_journal_path()
 _PENDING_APPROVAL_TTL_SEC = 600.0
@@ -563,9 +573,7 @@ def evaluate_hook_payload(
 ) -> Dict[str, Any]:
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
-    resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
-        resolved_host = "claude"
+    resolved_host = resolve_host(host, default="claude")
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -748,22 +756,7 @@ def evaluate_hook_payload(
         reason = _redact_error_text(f"[{verdict['risk_level']}] {verdict['reason_code']}: {verdict['label']}")
     else:
         reason = _redact_error_text(f"{verdict['reason_code']}: {verdict['label']}")
-    host_contract = {
-        "claude": "claude_pretooluse_v1",
-        "codex": "codex_pretooluse_no_ask_v1",
-        "hermes": "hermes_shell_hook_v1",
-        "antigravity": "antigravity_pretooluse_v1",
-        "openclaw": "openclaw_before_tool_call_v1",
-        "opencode": "opencode_plugin_v1",
-        "kilocode": "kilocode_plugin_v1",
-        "pi": "pi_extension_v1",
-        "omp": "omp_extension_v1",
-        "qoder": "qoder_pretooluse_v1",
-        "zcode": "zcode_pretooluse_v1",
-        "openhands": "openhands_hook_v1",
-        "cursor": "cursor_hook_v1",
-        "generic": "generic_v1",
-    }[resolved_host]
+    host_contract = get_host_adapter(resolved_host).contract
     oc_ctx = payload.get("context") if isinstance(payload, dict) and isinstance(payload.get("context"), dict) else {}
     oc_trigger = str(oc_ctx.get("trigger") or (payload.get("trigger") if isinstance(payload, dict) else "") or "").strip().lower()
 
@@ -774,7 +767,7 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = {"decision": "ask"}
-        elif resolved_host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+        elif resolved_host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
             perm = None
             exit_code = 0
             host_action = "shadow_observe"
@@ -785,7 +778,7 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = None
-    elif resolved_host in {"opencode", "kilocode", "pi", "omp"}:
+    elif resolved_host in PLUGIN_BLOCK_HOSTS:
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
             exit_code = 2
@@ -1011,9 +1004,7 @@ def evaluate_post_tool_use_payload(
     if resolved_policy_path:
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
-    resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
-        resolved_host = "claude"
+    resolved_host = resolve_host(host, default="claude")
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
@@ -1247,9 +1238,9 @@ def evaluate_post_tool_use_payload(
     if shadow_mode:
         host_action = "shadow_observe"
         scrubbing_mode = "shadow_observe"
-        if resolved_host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+        if resolved_host in HTTP_DIRECT_HSO_HOSTS:
             host_specific = {}
-    elif resolved_host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+    elif resolved_host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
         host_specific = {
             "redacted_output": redacted_output,
             "secrets_found": secrets_found,
@@ -1264,13 +1255,13 @@ def evaluate_post_tool_use_payload(
         host_specific = {}
         host_action = "warn_logged" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_log"
-    elif resolved_host in {"claude", "codex", "qoder", "zcode", "openhands", "cursor"}:
+    elif resolved_host in POST_CLAUDE_COMPAT_HOSTS:
         if any_alert:
             host_specific = {
                 "hookEventName": "PostToolUse",
                 "additionalContext": _post_warning_text(include_advice=True),
             }
-            if resolved_host in {"claude", "qoder", "zcode", "openhands"} and supports_replace:
+            if resolved_host in REPLACE_OUTPUT_HOSTS and supports_replace:
                 host_specific["updatedToolOutput"] = redacted_output
                 if supports_mcp_replace:
                     host_specific["updatedMCPToolOutput"] = redacted_output
@@ -1445,9 +1436,7 @@ def _openclaw_cli_fallback_json(
 
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
-    host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
-        host = "claude"
+    host = resolve_host(os.getenv("AETHERIS_HOOK_HOST"), default="claude")
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
     raw: str = ""
@@ -1483,9 +1472,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"],
+            choices=list(list_hosts()),
             default=host,
-            help="Host contract format (claude, codex, hermes, antigravity, openclaw, opencode, kilocode, pi, omp, qoder, zcode, openhands, cursor, generic)",
+            help="Host contract format (registered in aetheris_microbrains.hosts)",
         )
         parser.add_argument(
             "--codex-escalate-deny",
@@ -1583,13 +1572,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             if event_kind == "post-tool-use":
                 if host == "generic":
                     print(json.dumps({"decision": "allow", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
-                elif host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+                elif host in HTTP_DIRECT_HSO_HOSTS:
                     print("{}")
                 return 0
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind))
                 return 0
-            if host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+            if host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, err_msg="empty_hook_payload"))
                 return 0
             if host == "codex":
@@ -1671,13 +1660,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
                 if host == "antigravity":
                     print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-                elif host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+                elif host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                     print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
                 return 0
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
                 return 0
-            if host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+            if host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, err_msg=err_msg))
                 return 0
             if host == "generic":
@@ -1802,13 +1791,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if post_res.get("journal_written") is False:
                     j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
                     print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
-                if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+                if host in HTTP_DIRECT_HSO_HOSTS:
                     print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(post_res, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
-            if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+            if host in HTTP_DIRECT_HSO_HOSTS:
                 hso = post_res.get("hookSpecificOutput")
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return 0
@@ -1834,14 +1823,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session_state_path=session_state_path,
                 )
             if shadow_mode:
-                if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+                if host in HTTP_DIRECT_HSO_HOSTS:
                     print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(lc_res, ensure_ascii=False))
                 return int(lc_res.get("exit_code", 0))
             hso = lc_res.get("hookSpecificOutput")
-            if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi", "omp"}:
+            if host in HTTP_DIRECT_HSO_HOSTS:
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return 0
             if hso is not None:
@@ -1877,7 +1866,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-            elif host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+            elif host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
@@ -1908,10 +1897,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             return exit_code
 
         perm = result["permissionDecision"]
-        if host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+        if host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
             hso = result.get("hookSpecificOutput")
             print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
-            return exit_code if host in {"opencode", "kilocode", "pi", "omp"} else 0
+            return exit_code if host in PLUGIN_BLOCK_HOSTS else 0
         if host == "antigravity":
             hso = result.get("hookSpecificOutput")
             has_overwrite = isinstance(hso, dict) and "overwrite" in hso
@@ -1954,13 +1943,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-            elif host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+            elif host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
             return 0
         if host == "antigravity":
             print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
             return 0
-        if host in {"openclaw", "opencode", "kilocode", "pi", "omp"}:
+        if host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
             print(_openclaw_cli_fallback_json(event_kind, err_msg=err_msg))
             return 0
         if host == "generic":

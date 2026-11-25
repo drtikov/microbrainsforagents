@@ -102,35 +102,50 @@ def test_zcode_pre_and_post_hook_contract():
     assert post_v["secrets_found"] is True
 
 
-def test_zcode_gate_wrapper_subprocess_probes():
+def test_zcode_gate_wrapper_subprocess_probes(tmp_path):
     env = dict(os.environ)
     env["ZCODE_PLUGIN_ROOT"] = str(REPO_ROOT)
+    env["AETHERIS_STATE_DIR"] = str(tmp_path)
 
-    deny_proc = subprocess.run(
-        [sys.executable, "-I", str(GATE_SCRIPT), "--session-state", "auto"],
-        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-    assert deny_proc.returncode == 2, deny_proc.stderr
-    deny_json = json.loads(deny_proc.stdout.strip())
-    assert deny_json["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert deny_json["hookSpecificOutput"]["permissionDecision"] == "deny"
+    try:
+        deny_proc = subprocess.run(
+            [sys.executable, "-I", str(GATE_SCRIPT), "--session-state", "auto"],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+            check=False,
+        )
+        assert deny_proc.returncode == 2, deny_proc.stderr
+        deny_json = json.loads(deny_proc.stdout.strip())
+        assert deny_json["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+        assert deny_json["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    allow_proc = subprocess.run(
-        [sys.executable, "-I", str(GATE_SCRIPT), "--session-state", "auto"],
-        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}}),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=30,
-        check=False,
-    )
-    assert allow_proc.returncode == 0, allow_proc.stderr
-    assert allow_proc.stdout.strip() == ""
+        allow_proc = subprocess.run(
+            [sys.executable, "-I", str(GATE_SCRIPT), "--session-state", "auto"],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git status"}}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+            check=False,
+        )
+        assert allow_proc.returncode == 0, allow_proc.stderr
+        assert allow_proc.stdout.strip() == ""
+    finally:
+        state_file = tmp_path / "hook_daemon.json"
+        if state_file.is_file():
+            try:
+                import socket as _sock
+                info = json.loads(state_file.read_text(encoding="utf-8"))
+                port = int(info.get("port") or 0)
+                auth = str(info.get("auth") or "")
+                if port and auth:
+                    with _sock.create_connection(("127.0.0.1", port), timeout=1.0) as s:
+                        s.sendall((json.dumps({"auth": auth, "cmd": "shutdown"}) + "\n").encode("utf-8"))
+            except Exception:
+                pass
 
 
 def test_zcode_installer_and_cli_integration(tmp_path, capsys):
