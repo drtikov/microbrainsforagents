@@ -42,7 +42,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [🧩 Built-in Claude Code Skill (`/microbrains`)](#-built-in-claude-code-skill-microbrains)
 - [Cursor Integration (Native Hooks v2 + Warm Rust Shim)](#cursor-integration-native-hooks-v2--warm-rust-shim)
 - [Devin Integration (Native Hook v1 + Auto-Detect)](#devin-integration-native-hook-v1--auto-detect)
-- [Cline Integration (Native `.clinerules/hooks` + Warm Rust Shim)](#cline-integration-native-clineruleshooks--warm-rust-shim)
+- [Cline Integration (VS Code & Cline CLI: Native Hooks + Warm Rust Shim)](#cline-integration-vs-code--cline-cli-native-hooks--warm-rust-shim)
 - [MiniMax Code (`mcode`) Integration (Native `.minimax/hooks.json` + CLI)](#minimax-code-mcode-integration-native-minimaxhooksjson--cli)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhandshooksjson--python-securityanalyzer)
@@ -90,7 +90,7 @@ Microbrains works alongside any AI agent or framework:
 | **Autonomous Coding Agents** | **SWE-agent**, **Aider** | **Python API** | **Python API** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
 | **Cursor** | **Cursor** | **Hook v2 Tested** | **Native Hooks v2 + CLI** (`aetheris install cursor` / `--host cursor`) | 8-event `hooks.json` (`preToolUse`/`postToolUse` matcher-scoped, `beforeShellExecution`/`afterShellExecution`, `beforeMCPExecution`/`afterMCPExecution`, `beforeReadFile`, `afterFileEdit`), `failClosed` pre-gates, `--replace-tool-output` DLP, `conversation_id` IFC, and auto `aetheris-gate` shim. |
 | **Devin** | **Devin** | **Hook & Installer Tested** | **Native Hook v1 + CLI** (`aetheris install devin` / `--host devin` / `--host auto`) | `.devin/hooks.v1.json` (`PreToolUse`/`PostToolUse` `decision: approve\|block` + exit 2), `DEVIN_PROJECT_DIR` auto-detect, structured `tool_response` DLP `additionalContext` alerts, and `.devin/` self-protection. |
-| **Cline** | **Cline** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install cline` / `--host cline`) | `.clinerules/hooks/` (`PreToolUse`/`PostToolUse` + `.ps1` scripts), `cancel: true/false`, `SEARCH/REPLACE` diff AST inspection, `contextModification` DLP warnings, and `.clinerules/` protection. |
+| **Cline** | **Cline (VS Code & CLI)** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install cline` / `--host cline`) | `.clinerules/hooks/`, `~/Documents/Cline/Rules/Hooks/`, and `~/.cline/hooks/` (`CLINE_DIR` / `CLINE_HOOKS_DIR`), `PreToolUse`/`PostToolUse` (+ `.ps1`), `cancel: true/false`, `SEARCH/REPLACE` diff AST, and `.clinerules/`/`.cline/` protection. |
 | **MiniMax Code (`mcode`)** | **MiniMax Code** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install mcode` / `--host mcode`) | `.minimax/hooks.json` (`PreToolUse`/`PostToolUse`, `commandWindows`, `timeout: 10`), lowercase native matcher, silent allow / `ask` / exit 2 deny, `additionalContext` DLP, and `.minimax/` protection. |
 | **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
@@ -225,20 +225,22 @@ Microbrains adds a local <2 ms safety and quality pre-flight layer in front of *
 
 ---
 
-## Cline Integration (Native `.clinerules/hooks` + Warm Rust Shim)
+## Cline Integration (VS Code & Cline CLI: Native Hooks + Warm Rust Shim)
 
-Use Microbrains with **stock VS Code Cline** without forking or rebuilding the extension (`cline_hook_v1` via [`hosts/cline.py`](aetheris_microbrains/hosts/cline.py)):
+Use Microbrains with **stock VS Code Cline and Cline CLI** without forking or rebuilding the extension (`cline_hook_v1` via [`hosts/cline.py`](aetheris_microbrains/hosts/cline.py)):
 
-- **Easy 1-Command Install (POSIX + Windows `.ps1`):**
+- **Easy 1-Command Install (VS Code + Cline CLI, POSIX + Windows `.ps1`):**
   ```bash
   pip install -e .
   aetheris install cline --self-test
-  # Project-level (.clinerules/hooks/):
+  # Project-level (.clinerules/hooks/, shared by VS Code Cline & Cline CLI):
   aetheris install cline --workspace . --profile guardrails
-  # Or global (~/Documents/Cline/Rules/Hooks/ across all VS Code workspaces):
+  # Global install (writes ~/Documents/Cline/Rules/Hooks/ + ~/.cline/hooks/, honors CLINE_DIR / CLINE_HOOKS_DIR):
   aetheris install cline --profile guardrails
+  # For Cline CLI, ensure hooks are enabled:
+  cline config set hooksEnabled=true
   ```
-  Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (or `~/Documents/Cline/Rules/Hooks/` without `--workspace .`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
+  Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (workspace) or both `~/Documents/Cline/Rules/Hooks/` and `~/.cline/hooks/` (global, honoring `CLINE_DIR` / `CLINE_HOOKS_DIR`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
 - **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
 
 | Benchmark (Local Cline Env, v0.7.6) | Measured Result | Benefit |

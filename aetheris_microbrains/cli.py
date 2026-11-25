@@ -95,7 +95,14 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
     )
     if (ws / ".devin").exists() or devin_user.exists():
         detected.append("devin")
-    if (ws / ".clinerules").exists() or (ws / ".cline").exists() or (home / "Documents" / "Cline").exists():
+    if (
+        (ws / ".clinerules").exists()
+        or (ws / ".cline").exists()
+        or (home / ".cline").exists()
+        or (home / "Documents" / "Cline").exists()
+        or bool(os.environ.get("CLINE_DIR"))
+        or bool(os.environ.get("CLINE_HOOKS_DIR"))
+    ):
         detected.append("cline")
     if (home / ".minimax").exists() or (ws / ".minimax").exists():
         detected.append("mcode")
@@ -620,11 +627,20 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         post_exe, post_args = build_hook_command(
             "cline", event_args=["--event", "post-tool-use"], extra_args=extra, use_rust_shim=effective_rust_shim
         )
-        hooks_dir = (
-            Path(args.plugin_dir)
-            if getattr(args, "plugin_dir", None)
-            else ((ws / ".clinerules" / "hooks") if ws is not None else (Path.home() / "Documents" / "Cline" / "Rules" / "Hooks"))
-        )
+        env_hooks_dir = str(os.environ.get("CLINE_HOOKS_DIR") or "").strip()
+        env_cline_dir = str(os.environ.get("CLINE_DIR") or "").strip()
+        if getattr(args, "plugin_dir", None):
+            hooks_dirs = [Path(args.plugin_dir)]
+        elif ws is not None:
+            hooks_dirs = [ws / ".clinerules" / "hooks"]
+        elif env_hooks_dir:
+            hooks_dirs = [Path(env_hooks_dir).expanduser()]
+        else:
+            vscode_dir = Path.home() / "Documents" / "Cline" / "Rules" / "Hooks"
+            cline_cli_base = Path(env_cline_dir).expanduser() if env_cline_dir else (Path.home() / ".cline")
+            cline_cli_dir = cline_cli_base / "hooks"
+            hooks_dirs = [vscode_dir] if cline_cli_dir == vscode_dir else [vscode_dir, cline_cli_dir]
+
         pre_args_str = " ".join(pre_args)
         post_args_str = " ".join(post_args)
         files_to_write = {
@@ -634,21 +650,24 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             "PostToolUse.ps1": f'$inputJson = [Console]::In.ReadToEnd()\n$inputJson | & "{post_exe}" {post_args_str}\nexit $LASTEXITCODE\n',
         }
         if args.dry_run:
-            print(f"DRY RUN - would write cline hook scripts to {hooks_dir}:")
-            for fname, body in files_to_write.items():
-                print(f"--- {hooks_dir / fname} ---")
-                print(body.rstrip())
+            for hdir in hooks_dirs:
+                print(f"DRY RUN - would write cline hook scripts to {hdir}:")
+                for fname, body in files_to_write.items():
+                    print(f"--- {hdir / fname} ---")
+                    print(body.rstrip())
             return 0
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-        for fname, body in files_to_write.items():
-            fpath = hooks_dir / fname
-            fpath.write_text(body, encoding="utf-8", newline="\n")
-            if not fname.endswith(".ps1"):
-                try:
-                    os.chmod(fpath, 0o755)
-                except OSError:
-                    pass
-        print(f"Installed Aetheris Microbrains (cline) -> {hooks_dir} [PreToolUse, PostToolUse (+ .ps1)]")
+        for hdir in hooks_dirs:
+            hdir.mkdir(parents=True, exist_ok=True)
+            for fname, body in files_to_write.items():
+                fpath = hdir / fname
+                fpath.write_text(body, encoding="utf-8", newline="\n")
+                if not fname.endswith(".ps1"):
+                    try:
+                        os.chmod(fpath, 0o755)
+                    except OSError:
+                        pass
+            print(f"Installed Aetheris Microbrains (cline) -> {hdir} [PreToolUse, PostToolUse (+ .ps1)]")
+        print("Note: For Cline CLI, ensure hooks are enabled (`cline config set hooksEnabled=true`).")
         return 0
     bundle = _build_generic_hook_bundle(
         host,

@@ -166,3 +166,29 @@ def test_cline_post_tool_dlp_and_cli_subprocess_and_installer(tmp_path, capsys):
     iso = verify_core_isolation()
     assert iso["ok"] is True
     assert iso["numpy_violations"] == []
+
+
+def test_cline_cli_env_dirs_and_detection(tmp_path, monkeypatch, capsys):
+    # 1. CLINE_DIR / CLINE_HOOKS_DIR detection
+    cline_home = tmp_path / "cline_home"
+    cline_home.mkdir()
+    monkeypatch.setenv("CLINE_DIR", str(cline_home))
+    assert "cline" in detect_installed_hosts(tmp_path)
+
+    # 2. CLINE_HOOKS_DIR overrides global target directory
+    custom_hooks = tmp_path / "env_hooks"
+    monkeypatch.setenv("CLINE_HOOKS_DIR", str(custom_hooks))
+    assert cli_main(["install", "cline", "--profile", "guardrails", "--no-rust-shim"]) == 0
+    out_env = capsys.readouterr().out
+    assert "hooksEnabled=true" in out_env
+    for fname in ("PreToolUse", "PostToolUse", "PreToolUse.ps1", "PostToolUse.ps1"):
+        assert (custom_hooks / fname).is_file(), f"Missing {fname} in CLINE_HOOKS_DIR"
+
+    # 3. With CLINE_HOOKS_DIR unset and no --workspace, installs to <CLINE_DIR>/hooks (and Documents/Cline)
+    monkeypatch.delenv("CLINE_HOOKS_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+    assert cli_main(["install", "cline", "--profile", "guardrails", "--no-rust-shim"]) == 0
+    capsys.readouterr()
+    cli_hooks = cline_home / "hooks"
+    for fname in ("PreToolUse", "PostToolUse", "PreToolUse.ps1", "PostToolUse.ps1"):
+        assert (cli_hooks / fname).is_file(), f"Missing {fname} in CLINE_DIR/hooks"
