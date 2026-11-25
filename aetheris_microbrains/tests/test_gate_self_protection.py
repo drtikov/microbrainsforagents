@@ -154,13 +154,17 @@ def test_env_suffix_glob_variants_escalate():
         "cat .en?.local",
         "cat .[e]nv.*",
         "cat config/.[e]nv.local",
+        "cat .???.local",
+        "cat .???.production",
+        "cat .*.local",
+        "cat .*.production",
     ):
         v = lde.decide({"tool": "execute_shell", "cmd": cmd}, context=None, policy=DEV_POLICY)
         assert v["decision"] == "escalate", f"Expected escalate for {cmd}, got {v}"
 
 
 def test_benign_dot_globs_stay_allowed():
-    for cmd in ("ls *", "ls *.local", "ls .*.local", "ls .git*.local"):
+    for cmd in ("ls *", "ls *.local", "ls .eslint*.js", "ls .git*.local"):
         v = lde.decide({"tool": "execute_shell", "cmd": cmd}, context=None, policy=DEV_POLICY)
         assert v["decision"] == "allow", f"Expected allow for {cmd}, got {v}"
 

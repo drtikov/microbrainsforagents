@@ -558,10 +558,10 @@ def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
             # Match against exact basenames (user's path is a targeted wildcard matching a protected name)
             if any(fnmatch.fnmatch(sens, basename) for sens in _PROTECTED_EXACT_BASENAMES):
                 return True
-            # Match `.env.<suffix>` glob variants that obscure the `.env` prefix (e.g. `.[e]nv.local`, `.e??.local`, `.[e]nv.*`)
+            # Match `.env.<suffix>` glob variants that obscure the `.env` prefix (e.g. `.[e]nv.local`, `.e??.local`, `.???.local`, `.*.local`)
             if basename.startswith(".") and "." in basename[1:]:
                 env_head = "." + basename[1:].split(".", 1)[0]
-                if any(ch not in "*?[]" for ch in env_head[1:]) and fnmatch.fnmatch(".env", env_head):
+                if fnmatch.fnmatch(".env", env_head):
                     return True
             # Match against all protected patterns and directories
             for pat in all_patterns:
