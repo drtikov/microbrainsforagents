@@ -568,17 +568,24 @@ omp                                                   # auto-spawns loopback dae
 
 ## ZCode Integration (One-Click Marketplace Plugin + CLI Installer)
 
-Install **Aetheris Microbrains** inside **ZCode** in one click via the root `marketplace.json` + `.zcode-plugin/` bundle, or pin a specific Python environment via `aetheris install zcode`:
+Protect every ZCode tool call (`Bash`, `Edit`, `Write`, `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, `mcp__.*`) with **proportionally scaled friction**: safe commands (`git status`) pass silently (`exit 0`), sensitive reads (`cat .env`) or risky non-root actions prompt via `permissionDecision: "ask"`, catastrophic actions (`rm -rf /`) hard-block (`exit 2`), and repeated identical prompts trigger `escalation_flood_detected`.
 
-- **Route A — One-Click Plugin Marketplace (Zero Config Editing):** Open **ZCode → Settings → Plugin Marketplace → Add**, paste `https://github.com/drtikov/microbrainsforagents`, and install **Aetheris Microbrains**. ZCode auto-enables `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), the `microbrains` skill, and `/mb:audit`, `/mb:doctor`, and `/mb:preflight` commands.
+- **Route A — One-Click Marketplace Plugin (Zero Config Editing):** Open **ZCode → Settings → Plugin Marketplace → Add**, paste `https://github.com/drtikov/microbrainsforagents`, and install **Aetheris Microbrains** (via root `marketplace.json` + `.zcode-plugin/`). Auto-enables `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), the `microbrains` skill, and `/mb:audit`, `/mb:doctor`, `/mb:preflight`.
 - **Route B — Pinned CLI / User-Scope Installer:** `pip install -e .` and run `aetheris install zcode --workspace .` (or `python -m aetheris_microbrains.install_zcode --user` for all workspaces) to pin `sys.executable` into `.zcode/config.json` / `~/.zcode/cli/config.json` with `hooks.enabled: true`.
-- **Contract & Layer 0 Protection:** `--host zcode` emits strict ZCode `PreToolUse` JSON (`permissionDecision: allow|ask|deny`, exit `2` on block, reason on `stderr`) and write-protects `.zcode/`, `.zcode/config.json`, `.zcode/cli/config.json`, and `.zcode-plugin/`.
+- **Layer 0 Self-Protection:** Write-protects `.zcode/`, `.zcode/config.json`, `.zcode/cli/config.json`, and `.zcode-plugin/` against prompt-injected tampering.
 
 ```bash
 pip install -e .
 aetheris install zcode --self-test
 aetheris install zcode --workspace .
 ```
+
+| ZCode Benchmark Suite | Results (Exact `zcode_gate.py` Path & Engine) |
+|---|---|
+| **Security anti-evasion** (`examples/10_agent_security_benchmark.py`) | **100.0%** attack detection (**22/22** TPR: PowerShell/FD exfil, AST tricks, MCP Unicode smuggling, wrapped secrets, IFC taint) · **0.0%** benign FP (**0/12**) · **0.40 ms** p50 / **2.97 ms** p95 in-process |
+| **Fresh-process ZCode hook (`n=100`)** | **100/100** verdict accuracy · **305 ms** mean / **405 ms** p95 *(52–79 ms bare Python spawn + imports; ~30× headroom under the 10 s hook timeout, ~3–10% of a typical 2–10 s LLM turn)* |
+| **In-process engine (`n=240`, no spawn)** | **0.35 ms** p50 · **0.68 ms** mean · **1.33 ms** p95 (**~1,462 decisions/sec** single-threaded) |
+| **Observed verdict semantics** | `git status` → **allow** (`exit 0`) · `cat .env` / `rm -rf /tmp/x` → **ask** · `rm -rf /` → **deny** (`exit 2`) · repeated spam → **deny** (`escalation_flood_detected`) |
 
 ---
 
@@ -1052,6 +1059,21 @@ OMP (`oh-my-pi`) paired with Microbrains achieves **100%** attack interception (
 | **Warmed HTTP Daemon** — `write-protected` | **1.41 ms** | **5.01 ms** | 1.79 ms |
 | **Warmed HTTP Daemon** — `read-file` | **1.85 ms** | **4.16 ms** | 2.21 ms |
 | **In-Process Python API** *(all tool types)* | **0.2–0.4 ms** | **0.5–0.8 ms** | 0.3–1.2 ms |
+
+### 8. ZCode Hook Path Benchmark Summary (Windows 10, Python 3.10.6)
+
+Measured statelessly from the repo clone through the exact invocation path used by `.zcode-plugin/hooks/hooks.json` (`python -I .zcode-plugin/hooks/zcode_gate.py`): **22/22 (100.0%)** attack detection, **0/12 (0.0%)** benign false positives (`examples/10`), and **100/100** verdict accuracy across `allow`/`deny`/`ask` probes. See [ZCode Integration](#zcode-integration-one-click-marketplace-plugin--cli-installer) for one-click Marketplace install.
+
+| Case (`n`) | p50 | p95 | Mean | Accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| `allow` (safe cmd, `n=40`) | 296 ms | 405 ms | 316 ms | **40/40** |
+| `deny` (`rm -rf /`, `n=20`) | 278 ms | 384 ms | 286 ms | **20/20** |
+| `ask` (`rm -rf` non-root, `n=20`) | 308 ms | 577 ms | 325 ms | **20/20** |
+| `ask` (protected read, `n=20`) | 280 ms | 333 ms | 280 ms | **20/20** |
+| **Overall fresh-process hook (`n=100`)** | — | **405 ms** | **305 ms** | **100/100** |
+| **In-process engine (`n=240`, no spawn)** | **0.35 ms** | **1.33 ms** | **0.68 ms** | **~1,462/s** |
+
+> **Scope note:** Bare `python -I -c pass` process spawn (`52–79 ms`) plus interpreter/module startup accounts for nearly all fresh-process latency while the decision itself stays `<1 ms` (`0.35 ms` p50 in-process). Under load, fresh-process runs ranged `200–320 ms` mean (up to `~600 ms` p95). In default `--session-state auto` mode, repeated identical escalations are approve-onced or flood-vetoed.
 
 ---
 
