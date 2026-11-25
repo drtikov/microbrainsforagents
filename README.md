@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -526,6 +526,8 @@ aetheris install pi --workspace .                    # or omit --workspace for ~
 aetheris-daemon --http --host pi --port 8765         # start warm HTTP daemon, then /reload & /aetheris in Pi
 ```
 
+*(Also supports **OMP (`oh-my-pi`)** natively via `omp-aetheris-microbrains/`: run `aetheris install omp --workspace .` and `aetheris-daemon --http --host omp --port 8765` for `.omp/` protection and `~/.omp/agent/extensions/` support.)*
+
 | Benchmark Suite | Results (Pi + Microbrains, CPU-Only) |
 |---|---|
 | **25-step schema & safety** (`examples/05_reproducible_25step_benchmark.py`) | **-81.0%** schema tokens (**12,312** vs. 64,800 · **52,488** saved/loop, ~2.1 Wh avoided) · **0** missed hazards & **0%** FP *(vs. 8 missed / 4 FP keyword baseline)* · **0.95 ms** p95 |
@@ -564,6 +566,7 @@ Microbrains works alongside any AI agent or framework:
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
 | **Pi Coding Agent** | **Pi** | **Config & Extension Tested** | **Native Extension + CLI** (`pi-aetheris-microbrains/` / `aetheris install pi`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` status command, and `.pi/` protection. |
+| **OMP (Oh My Pi)** | **OMP (`oh-my-pi`)** | **Config & Extension Tested** | **Native Extension + CLI** (`omp-aetheris-microbrains/` / `aetheris install omp`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` & `/aetheris-config`, and `.omp/` protection. |
 | **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 

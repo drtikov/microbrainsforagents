@@ -1,0 +1,16 @@
+{
+  "name": "aetheris-microbrains-omp",
+  "version": "0.7.6",
+  "type": "module",
+  "main": "./index.js",
+  "omp": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

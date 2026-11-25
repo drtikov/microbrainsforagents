@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|kilocode|pi|qoder|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|kilocode|pi|omp|qoder|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "pi", "qoder", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -77,6 +77,13 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         or (ws / ".pi").exists()
     ):
         detected.append("pi")
+    if (
+        (home / ".omp").exists()
+        or (home / ".omp" / "agent").exists()
+        or (ws / ".omp").exists()
+        or (ws / "omp.json").exists()
+    ):
+        detected.append("omp")
     return detected
 
 
@@ -231,6 +238,14 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             (".pi", "extensions", "aetheris-microbrains", "index.js"),
             (".pi", "agent", "extensions", "aetheris-microbrains", "index.js"),
             "Pi",
+        ),
+        "omp": (
+            "omp-aetheris-microbrains",
+            "index.js",
+            ".omp/settings.json",
+            (".omp", "extensions", "aetheris-microbrains", "index.js"),
+            (".omp", "agent", "extensions", "aetheris-microbrains", "index.js"),
+            "OMP",
         ),
     }
     if host in _ESM_PLUGIN_HOSTS:
