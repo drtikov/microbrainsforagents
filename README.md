@@ -57,6 +57,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [CI/CD PR Gate and SARIF Reporting](#cicd-pr-gate-and-sarif-reporting)
 - [DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)](#deepseek-harness-dsh-integration-cordis-mcp-bundle)
 - [OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)](#openclaw-integration-native-gateway-plugin-before_tool_call--dlp)
+- [Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)](#qoder-integration-desktop--cli-pretooluseposttooluse--qoder-protection)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -429,6 +430,29 @@ openclaw plugins install --link ./openclaw-aetheris-microbrains
 aetheris install openclaw
 openclaw gateway restart
 ```
+
+---
+
+## Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)
+
+**Qoder Desktop** and **Qoder CLI** integrate natively via the `--host qoder` adapter in `hook.py` and the `aetheris install qoder` installer in `cli.py`:
+
+- **Pre/Post-Tool Hook Gate (`--host qoder`):** Emits Qoder's Claude-compatible `allow` / `ask` / `deny` JSON contract with `timeout: 10`, `--session-state auto` for cross-turn IFC taint tracking, and `--replace-tool-output` on `PostToolUse` for automatic secret redaction in tool outputs.
+- **Built-in `.qoder/` Self-Protection:** `.qoder/`, `.qoder/settings.json`, and `.qoder/settings.local.json` are write-protected in `DEFAULT_PROTECTED_PATTERNS` so agents cannot disable hooks or tamper with settings.
+- **Non-Destructive Installer:** Preserves unrelated settings and pre-existing user hooks while idempotently updating Aetheris entries (writes `~/.qoder/settings.json` globally or machine-local `.qoder/settings.local.json` with `--workspace .`).
+
+```bash
+pip install -e .
+aetheris install qoder --self-test
+
+# Recommended shadow pilot first (logs decisions without blocking):
+aetheris install qoder --shadow --profile strict
+
+# Or enable workspace enforcement (.qoder/settings.local.json):
+aetheris install qoder --workspace . --profile dev
+```
+
+*(Optional: connect `aetheris-mcp` over `stdio` or `--http --port 8080` in Qoder's MCP connector settings for the 8 on-demand `microbrain_*` audit, scrubbing, and schema-scanning tools.)*
 
 ---
 
