@@ -545,7 +545,7 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "qoder", "cursor", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
@@ -737,6 +737,7 @@ def evaluate_hook_payload(
         "openclaw": "openclaw_before_tool_call_v1",
         "opencode": "opencode_plugin_v1",
         "kilocode": "kilocode_plugin_v1",
+        "pi": "pi_extension_v1",
         "qoder": "qoder_pretooluse_v1",
         "cursor": "cursor_hook_v1",
         "generic": "generic_v1",
@@ -751,7 +752,7 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = {"decision": "ask"}
-        elif resolved_host in {"openclaw", "opencode", "kilocode"}:
+        elif resolved_host in {"openclaw", "opencode", "kilocode", "pi"}:
             perm = None
             exit_code = 0
             host_action = "shadow_observe"
@@ -762,7 +763,7 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = None
-    elif resolved_host in {"opencode", "kilocode"}:
+    elif resolved_host in {"opencode", "kilocode", "pi"}:
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
             exit_code = 2
@@ -989,7 +990,7 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "qoder", "cursor", "generic"}:
         resolved_host = "claude"
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
@@ -1224,9 +1225,9 @@ def evaluate_post_tool_use_payload(
     if shadow_mode:
         host_action = "shadow_observe"
         scrubbing_mode = "shadow_observe"
-        if resolved_host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+        if resolved_host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
             host_specific = {}
-    elif resolved_host in {"openclaw", "opencode", "kilocode"}:
+    elif resolved_host in {"openclaw", "opencode", "kilocode", "pi"}:
         host_specific = {
             "redacted_output": redacted_output,
             "secrets_found": secrets_found,
@@ -1423,7 +1424,7 @@ def _openclaw_cli_fallback_json(
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"}:
+    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "qoder", "cursor", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
@@ -1460,9 +1461,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"],
+            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "qoder", "cursor", "generic"],
             default=host,
-            help="Host contract format (claude, codex, hermes, antigravity, openclaw, opencode, kilocode, qoder, cursor, generic)",
+            help="Host contract format (claude, codex, hermes, antigravity, openclaw, opencode, kilocode, pi, qoder, cursor, generic)",
         )
         parser.add_argument(
             "--codex-escalate-deny",
@@ -1560,13 +1561,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             if event_kind == "post-tool-use":
                 if host == "generic":
                     print(json.dumps({"decision": "allow", "reason_code": "empty_hook_payload", "host": "generic", "exit_code": 0}))
-                elif host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+                elif host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
                     print("{}")
                 return 0
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind))
                 return 0
-            if host in {"openclaw", "opencode", "kilocode"}:
+            if host in {"openclaw", "opencode", "kilocode", "pi"}:
                 print(_openclaw_cli_fallback_json(event_kind, err_msg="empty_hook_payload"))
                 return 0
             if host == "codex":
@@ -1648,13 +1649,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
                 if host == "antigravity":
                     print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-                elif host in {"openclaw", "opencode", "kilocode"}:
+                elif host in {"openclaw", "opencode", "kilocode", "pi"}:
                     print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
                 return 0
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
                 return 0
-            if host in {"openclaw", "opencode", "kilocode"}:
+            if host in {"openclaw", "opencode", "kilocode", "pi"}:
                 print(_openclaw_cli_fallback_json(event_kind, err_msg=err_msg))
                 return 0
             if host == "generic":
@@ -1779,13 +1780,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if post_res.get("journal_written") is False:
                     j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
                     print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
-                if host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+                if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
                     print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(post_res, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
-            if host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+            if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
                 hso = post_res.get("hookSpecificOutput")
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return 0
@@ -1811,14 +1812,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session_state_path=session_state_path,
                 )
             if shadow_mode:
-                if host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+                if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
                     print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(lc_res, ensure_ascii=False))
                 return int(lc_res.get("exit_code", 0))
             hso = lc_res.get("hookSpecificOutput")
-            if host in {"antigravity", "openclaw", "opencode", "kilocode"}:
+            if host in {"antigravity", "openclaw", "opencode", "kilocode", "pi"}:
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return 0
             if hso is not None:
@@ -1854,7 +1855,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-            elif host in {"openclaw", "opencode", "kilocode"}:
+            elif host in {"openclaw", "opencode", "kilocode", "pi"}:
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
@@ -1885,10 +1886,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             return exit_code
 
         perm = result["permissionDecision"]
-        if host in {"openclaw", "opencode", "kilocode"}:
+        if host in {"openclaw", "opencode", "kilocode", "pi"}:
             hso = result.get("hookSpecificOutput")
             print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
-            return exit_code if host in {"opencode", "kilocode"} else 0
+            return exit_code if host in {"opencode", "kilocode", "pi"} else 0
         if host == "antigravity":
             hso = result.get("hookSpecificOutput")
             has_overwrite = isinstance(hso, dict) and "overwrite" in hso
@@ -1931,13 +1932,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             if host == "antigravity":
                 print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
-            elif host in {"openclaw", "opencode", "kilocode"}:
+            elif host in {"openclaw", "opencode", "kilocode", "pi"}:
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
             return 0
         if host == "antigravity":
             print(_antigravity_cli_fallback_json(event_kind, err_msg=err_msg))
             return 0
-        if host in {"openclaw", "opencode", "kilocode"}:
+        if host in {"openclaw", "opencode", "kilocode", "pi"}:
             print(_openclaw_cli_fallback_json(event_kind, err_msg=err_msg))
             return 0
         if host == "generic":

@@ -1,0 +1,228 @@
+"""End-to-end tests for native Pi Coding Agent ESM extension, --host pi adapter, .pi/ protection, and installer."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+from aetheris_microbrains.cli import detect_installed_hosts, main as cli_main
+from aetheris_microbrains.core.layered_decision_engine import PolicyConfig, decide, is_protected_path
+from aetheris_microbrains.core.packaging_manifest import verify_core_isolation
+from aetheris_microbrains.hook import evaluate_hook_payload, evaluate_post_tool_use_payload
+from aetheris_microbrains.hook_daemon import serve_http
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EXTENSION_FILE = REPO_ROOT / "pi-aetheris-microbrains" / "index.js"
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _make_fixture_token(parts: tuple[str, ...]) -> str:
+    return "_".join(parts)
+
+
+def _start_test_daemon(tmp_path: Path, token: str):
+    port = _free_port()
+    t = threading.Thread(
+        target=serve_http,
+        kwargs={
+            "host": "127.0.0.1",
+            "port": port,
+            "state_path": tmp_path / "hook_daemon.json",
+            "flags": {"host": "pi", "profile": "dev"},
+            "token": token,
+        },
+        daemon=True,
+    )
+    t.start()
+    for _ in range(40):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=0.5) as resp:
+                if resp.status == 200:
+                    return port, t
+        except Exception:
+            time.sleep(0.05)
+    raise RuntimeError("Pi test HTTP daemon did not become ready")
+
+
+def _stop_test_daemon(port: int, token: str, t: threading.Thread) -> None:
+    shut_req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/shutdown",
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(shut_req, timeout=2.0) as resp:
+        assert json.loads(resp.read().decode("utf-8"))["stopping"] is True
+    t.join(timeout=3.0)
+
+
+def test_pi_control_plane_protected_by_default():
+    pol = PolicyConfig(profile="dev")
+    for p in (
+        ".pi/settings.json",
+        ".pi/extensions/aetheris-microbrains/index.js",
+        ".pi/agent/settings.json",
+        ".pi/agent/extensions/aetheris-microbrains/index.js",
+    ):
+        assert is_protected_path(p, pol) is True
+        assert decide({"tool": "write_file", "path": p, "diff": "{}"}, policy=pol)["decision"] == "deny"
+        assert decide({"tool": "read_file", "path": p}, policy=pol)["decision"] == "escalate"
+
+
+def test_pi_pre_and_post_hook_contract():
+    allow_v = evaluate_hook_payload(
+        {"toolName": "bash", "params": {"command": "git status"}},
+        host="pi",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert allow_v["host"] == "pi"
+    assert allow_v["host_contract"] == "pi_extension_v1"
+    assert allow_v["decision"] == "allow"
+    assert allow_v["hookSpecificOutput"] == {}
+
+    deny_v = evaluate_hook_payload(
+        {"toolName": "bash", "params": {"command": "rm -rf /"}},
+        host="pi",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert deny_v["decision"] == "deny"
+    assert deny_v["exit_code"] == 2
+    assert deny_v["hookSpecificOutput"]["block"] is True
+
+    esc_v = evaluate_hook_payload(
+        {"toolName": "bash", "params": {"command": "custom_unlisted_pi_cmd --flag"}},
+        host="pi",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert esc_v["decision"] == "escalate"
+    assert esc_v["hookSpecificOutput"]["escalate"] is True
+
+    wrap_v = evaluate_hook_payload(
+        {"toolName": "bash", "params": {"command": "ls -la"}},
+        host="pi",
+        sandbox_wrap="srt",
+        log_decisions=False,
+    )
+    assert wrap_v["hookSpecificOutput"]["args"]["command"].startswith("srt -- ")
+
+    fake_tok = _make_fixture_token(("sk", "live", "1234567890ABCDEFGHijklmn"))
+    post_v = evaluate_post_tool_use_payload(
+        {"toolName": "bash", "params": {"command": "env"}, "output": f"KEY={fake_tok}"},
+        host="pi",
+        log_decisions=False,
+    )
+    assert post_v["secrets_found"] is True
+    assert fake_tok not in post_v["hookSpecificOutput"]["redacted_output"]
+
+
+def test_pi_http_daemon_header_and_installer(tmp_path, capsys):
+    pi_dir = tmp_path / ".pi"
+    pi_dir.mkdir(parents=True)
+    assert "pi" in detect_installed_hosts(tmp_path)
+
+    assert cli_main(["install", "pi", "--workspace", str(tmp_path), "--dry-run"]) == 0
+    capsys.readouterr()
+    installed = pi_dir / "extensions" / "aetheris-microbrains" / "index.js"
+    assert not installed.exists()
+
+    assert cli_main(["install", "pi", "--workspace", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert installed.is_file()
+
+    assert cli_main(["install", "pi", "--self-test"]) == 0
+    assert "PI SELF-TEST PASSED" in capsys.readouterr().out
+
+    token = "test-pi-token"
+    port, t = _start_test_daemon(tmp_path, token)
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/hook/pre",
+            data=json.dumps({"toolName": "bash", "params": {"command": "rm -rf /"}}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}", "X-Aetheris-Host": "pi"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        assert body["block"] is True
+    finally:
+        _stop_test_daemon(port, token, t)
+
+    iso = verify_core_isolation()
+    assert iso["ok"] is True
+    assert iso["numpy_violations"] == []
+
+
+def test_pi_esm_extension_smoke_with_node(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        return
+    fake_tok = _make_fixture_token(("sk", "live", "ABCDEF1234567890abcdef"))
+
+    # Part 1: Fail-closed when daemon is unreachable + tool_result DLP scrubbing
+    offline_script = (
+        f"import ext, {{ scrubSecretsSync }} from {json.dumps(EXTENSION_FILE.as_uri())};"
+        "const handlers = {}; const commands = {};"
+        "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
+        "ext(mockPi);"
+        "if (typeof handlers.tool_call !== 'function' || typeof handlers.tool_result !== 'function' || typeof commands.aetheris?.handler !== 'function') process.exit(2);"
+        f"const resEvent = {{ toolName: 'bash', content: [{{ type: 'text', text: {json.dumps('KEY=' + fake_tok)} }}], details: {{ raw: {json.dumps(fake_tok)} }} }};"
+        "await handlers.tool_result(resEvent, { sessionId: 's1' });"
+        "if (!resEvent.content[0].text.includes('[REDACTED_BY_AETHERIS]')) process.exit(3);"
+        f"if (resEvent.content[0].text.includes({json.dumps(fake_tok)}) || resEvent.details.raw.includes({json.dumps(fake_tok)})) process.exit(4);"
+        "const fc = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'rm -rf /' } }, { cwd: process.cwd(), sessionId: 's1' });"
+        "if (!fc || fc.block !== true || !String(fc.reason).includes('fail-closed')) process.exit(5);"
+        "console.log(JSON.stringify({ ok: true }));"
+    )
+    env = dict(os.environ)
+    env["AETHERIS_DAEMON_URL"] = "http://127.0.0.1:1"
+    env["AETHERIS_TIMEOUT_MS"] = "250"
+    env["AETHERIS_FAIL_CLOSED"] = "1"
+    proc_off = subprocess.run([node, "--input-type=module", "-e", offline_script], capture_output=True, text=True, env=env, check=False)
+    assert proc_off.returncode == 0, proc_off.stderr or proc_off.stdout
+    assert json.loads(proc_off.stdout.strip())["ok"] is True
+
+    # Part 2: Live HTTP daemon — allow, block, escalate (confirm true/false), and /aetheris command
+    token = "test-pi-node-token"
+    port, t = _start_test_daemon(tmp_path, token)
+    try:
+        online_script = (
+            f"import {{ createAetherisPiExtension }} from {json.dumps(EXTENSION_FILE.as_uri())};"
+            "const handlers = {}; const commands = {};"
+            "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
+            f"createAetherisPiExtension({{ daemonUrl: 'http://127.0.0.1:{port}', token: {json.dumps(token)}, timeoutMs: 2000 }})(mockPi);"
+            "const allowRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'git status' } }, { cwd: process.cwd(), sessionId: 's1' });"
+            "if (allowRes !== undefined) process.exit(10);"
+            "const blockRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c2', input: { command: 'rm -rf /' } }, { cwd: process.cwd(), sessionId: 's1' });"
+            "if (!blockRes || blockRes.block !== true) process.exit(11);"
+            "let confirmCalls = 0;"
+            "const escApprove = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c3', input: { command: 'custom_unlisted_pi_cmd --flag' } }, { cwd: process.cwd(), sessionId: 's1', ui: { async confirm() { confirmCalls += 1; return true; } } });"
+            "if (escApprove !== undefined || confirmCalls !== 1) process.exit(12);"
+            "const escDecline = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c4', input: { command: 'custom_unlisted_pi_cmd --other' } }, { cwd: process.cwd(), sessionId: 's1', ui: { async confirm() { confirmCalls += 1; return false; } } });"
+            "if (!escDecline || escDecline.block !== true || !String(escDecline.reason).includes('declined') || confirmCalls !== 2) process.exit(13);"
+            "let notifiedMsg = ''; let notifiedLevel = '';"
+            "await commands.aetheris.handler('', { ui: { notify(msg, level) { notifiedMsg = msg; notifiedLevel = level; } } });"
+            "if (!notifiedMsg.includes('daemon=UP') || notifiedLevel !== 'info') process.exit(14);"
+            "console.log(JSON.stringify({ ok: true, notifiedMsg }));"
+        )
+        proc_on = subprocess.run([node, "--input-type=module", "-e", online_script], capture_output=True, text=True, check=False)
+        assert proc_on.returncode == 0, proc_on.stderr or proc_on.stdout
+        data = json.loads(proc_on.stdout.strip())
+        assert data["ok"] is True
+        assert "daemon=UP" in data["notifiedMsg"]
+    finally:
+        _stop_test_daemon(port, token, t)
