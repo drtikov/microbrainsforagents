@@ -365,11 +365,18 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tool_raw, tool_input = _extract_tool_and_input(payload)
 
     tool_lower = tool_raw.lower()
-    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "run_command", "terminal"}:
+    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "execute_bash", "run_command", "terminal"}:
         tool_name = "execute_shell"
+    elif tool_lower in {"file_editor", "str_replace_editor"}:
+        subcmd = str(tool_input.get("command") or "").strip().lower()
+        if subcmd == "view":
+            tool_name = "read_file"
+        elif subcmd == "create":
+            tool_name = "write_file"
+        else:
+            tool_name = "edit_file"
     elif tool_lower in {
         "edit",
-        "str_replace_editor",
         "edit_file",
         "fs_edit",
         "file_edit",
@@ -434,6 +441,14 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                         "new_string": str(item.get("ReplacementContent") or ""),
                         "replace_all": bool(item.get("AllowMultiple", False)),
                     })
+        elif "old_str" in tool_input and "new_str" in tool_input:
+            old_s = str(tool_input.get("old_str") or "")
+            if old_s:
+                edit_ops.append({
+                    "old_string": old_s,
+                    "new_string": str(tool_input.get("new_str") or ""),
+                    "replace_all": bool(tool_input.get("replace_all", False)),
+                })
         elif "old_string" in tool_input and "new_string" in tool_input:
             old_s = str(tool_input.get("old_string") or "")
             if old_s:
@@ -466,6 +481,10 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             diff = "\n".join(op["new_string"] for op in edit_ops)
         elif diff is None and "new_string" in tool_input:
             diff = str(tool_input.get("new_string") or "")
+        elif diff is None and "new_str" in tool_input:
+            diff = str(tool_input.get("new_str") or "")
+        elif diff is None and "file_text" in tool_input:
+            diff = str(tool_input.get("file_text") or "")
         elif diff is None and "Replacement" in tool_input:
             diff = str(tool_input.get("Replacement") or "")
         elif diff is None and "ReplacementContent" in tool_input:
@@ -545,7 +564,7 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
         resolved_host = "claude"
 
     norm = _normalize_hook_payload(payload)
@@ -741,6 +760,7 @@ def evaluate_hook_payload(
         "omp": "omp_extension_v1",
         "qoder": "qoder_pretooluse_v1",
         "zcode": "zcode_pretooluse_v1",
+        "openhands": "openhands_hook_v1",
         "cursor": "cursor_hook_v1",
         "generic": "generic_v1",
     }[resolved_host]
@@ -992,7 +1012,7 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = str(host or "claude").strip().lower()
-    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"}:
+    if resolved_host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
         resolved_host = "claude"
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
@@ -1244,13 +1264,13 @@ def evaluate_post_tool_use_payload(
         host_specific = {}
         host_action = "warn_logged" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_log"
-    elif resolved_host in {"claude", "codex", "qoder", "zcode", "cursor"}:
+    elif resolved_host in {"claude", "codex", "qoder", "zcode", "openhands", "cursor"}:
         if any_alert:
             host_specific = {
                 "hookEventName": "PostToolUse",
                 "additionalContext": _post_warning_text(include_advice=True),
             }
-            if resolved_host in {"claude", "qoder", "zcode"} and supports_replace:
+            if resolved_host in {"claude", "qoder", "zcode", "openhands"} and supports_replace:
                 host_specific["updatedToolOutput"] = redacted_output
                 if supports_mcp_replace:
                     host_specific["updatedMCPToolOutput"] = redacted_output
@@ -1426,7 +1446,7 @@ def _openclaw_cli_fallback_json(
 def main(argv: Optional[list[str]] = None) -> int:
     shadow_mode = bool(os.getenv("AETHERIS_HOOK_SHADOW") == "1")
     host = str(os.getenv("AETHERIS_HOOK_HOST") or "claude").strip().lower()
-    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"}:
+    if host not in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"}:
         host = "claude"
     journal_path: Optional[str] = str(os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
     event_kind = "pre-tool-use"
@@ -1463,9 +1483,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"],
+            choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "cursor", "generic"],
             default=host,
-            help="Host contract format (claude, codex, hermes, antigravity, openclaw, opencode, kilocode, pi, omp, qoder, zcode, cursor, generic)",
+            help="Host contract format (claude, codex, hermes, antigravity, openclaw, opencode, kilocode, pi, omp, qoder, zcode, openhands, cursor, generic)",
         )
         parser.add_argument(
             "--codex-escalate-deny",

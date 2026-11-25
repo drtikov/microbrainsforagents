@@ -65,6 +65,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [Pi Coding Agent Integration (Zero-npm-Dep Native Extension + Benchmarks)](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks)
 - [OMP (Oh My Pi) Integration (Zero-npm-Dep Extension + Benchmarks)](#omp-oh-my-pi-integration-zero-npm-dep-extension--benchmarks)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
+- [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhands-hooksjson--python-securityanalyzer)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -589,6 +590,32 @@ aetheris install zcode --workspace .
 
 ---
 
+## OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)
+
+Microbrains protects **OpenHands** across both its `.openhands/hooks.json` lifecycle hooks (`PreToolUse`/`PostToolUse` gating `terminal`, `execute_bash`, and `file_editor`) and the **OpenHands Software Agent SDK** (`AetherisSecurityAnalyzer`):
+
+- **Route 1 — `.openhands/hooks.json` Installer:** Writes non-destructive `type: "command"` hooks (`exit 2` block) and guards `.openhands/`, `.openhands/hooks.json`, `.openhands/skills/`, and `.openhands/microagents/` at Layer 0.
+
+```bash
+pip install -e .
+aetheris install openhands --self-test
+aetheris install openhands --workspace .    # or python -m aetheris_microbrains.install_openhands --user
+```
+
+- **Route 2 — OpenHands Python SDK (`SecurityAnalyzerBase`):**
+
+```python
+from openhands.sdk.security.confirmation_policy import ConfirmRisky
+from openhands.sdk.security.risk import SecurityRisk
+from aetheris_microbrains.openhands_analyzer import AetherisSecurityAnalyzer
+
+conversation.set_confirmation_policy(
+    ConfirmRisky(threshold=SecurityRisk.MEDIUM, analyzer=AetherisSecurityAnalyzer())
+)
+```
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -612,13 +639,14 @@ Microbrains works alongside any AI agent or framework:
 | **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Full E2E Tested** | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
 | **Hermes Agent** | **Hermes Agent** | **Full E2E Tested** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
 | **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Advisory MCP** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
-| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor** | **Python API / Partial (Cursor Shell-Only)** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
+| **Autonomous Coding Agents** | **SWE-agent**, **Aider**, **Cursor** | **Python API / Partial (Cursor Shell-Only)** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
 | **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
 | **Pi Coding Agent** | **Pi** | **Config & Extension Tested** | **Native Extension + CLI** (`pi-aetheris-microbrains/` / `aetheris install pi`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` status command, and `.pi/` protection. |
 | **OMP (Oh My Pi)** | **OMP (`oh-my-pi`)** | **Config & Extension Tested** | **Native Extension + CLI** (`omp-aetheris-microbrains/` / `aetheris install omp`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` & `/aetheris-config`, and `.omp/` protection. |
 | **ZCode** | **ZCode** | **Bundle & Contract Tested** | **Marketplace Plugin + CLI** (`.zcode-plugin/` / `aetheris install zcode`) | One-click Marketplace `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), `microbrains` skill, `/mb:audit`/`doctor`/`preflight`, and `.zcode/` protection. |
+| **OpenHands** | **OpenHands** | **Hook & SDK Tested** | **Hook Installer + SDK Analyzer** (`.openhands/hooks.json` + `AetherisSecurityAnalyzer` / `aetheris install openhands`) | `PreToolUse`/`PostToolUse` gating for `terminal`/`file_editor`, Python SDK `SecurityAnalyzerBase` (`LOW`/`MEDIUM`/`HIGH`), and `.openhands/` protection. |
 | **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 

@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|kilocode|pi|omp|qoder|zcode|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|kilocode|pi|omp|qoder|zcode|openhands|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -86,6 +86,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("omp")
     if (home / ".zcode").exists() or (ws / ".zcode").exists():
         detected.append("zcode")
+    if (home / ".openhands").exists() or (ws / ".openhands").exists():
+        detected.append("openhands")
     return detected
 
 
@@ -196,6 +198,17 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         return zcode_install(
             workspace=ws,
             profile=str(args.profile or "strict"),
+            shadow=bool(args.shadow),
+            dry_run=bool(args.dry_run),
+        )
+    if host == "openhands":
+        from .install_openhands import install as oh_install, self_test as oh_self_test
+
+        if args.self_test:
+            return oh_self_test()
+        return oh_install(
+            workspace=ws,
+            profile=str(args.profile or "dev"),
             shadow=bool(args.shadow),
             dry_run=bool(args.dry_run),
         )
