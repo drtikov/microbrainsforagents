@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -205,6 +206,7 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
     env["AETHERIS_DAEMON_URL"] = "http://127.0.0.1:1"
     env["AETHERIS_TIMEOUT_MS"] = "250"
     env["AETHERIS_FAIL_CLOSED"] = "1"
+    env["AETHERIS_AUTO_START"] = "0"
     proc_off = subprocess.run([node, "--input-type=module", "-e", offline_script], capture_output=True, text=True, env=env, check=False)
     assert proc_off.returncode == 0, proc_off.stderr or proc_off.stdout
     assert json.loads(proc_off.stdout.strip())["ok"] is True
@@ -248,3 +250,33 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
         assert "daemon=UP" in data["notifiedMsg"]
     finally:
         _stop_test_daemon(port, token, t)
+
+    # Part 3: Loopback daemon auto-start without manual daemon + clean session_shutdown
+    auto_port = _free_port()
+    auto_env = dict(os.environ)
+    auto_env["PYTHONPATH"] = (
+        f"{REPO_ROOT}{os.pathsep}{auto_env['PYTHONPATH']}" if auto_env.get("PYTHONPATH") else str(REPO_ROOT)
+    )
+    auto_env["AETHERIS_DAEMON_URL"] = f"http://127.0.0.1:{auto_port}"
+    auto_env["AETHERIS_DAEMON_TOKEN"] = ""
+    auto_env["AETHERIS_AUTO_START"] = "1"
+    auto_env["AETHERIS_PYTHON"] = sys.executable
+    auto_script = (
+        f"import ext from {json.dumps(EXTENSION_FILE.as_uri())};"
+        "const handlers = {}; const commands = {};"
+        "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
+        "ext(mockPi);"
+        "const ctxAuto = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'pi-auto-1' } };"
+        "const b = await handlers.tool_call({ toolName: 'bash', toolCallId: 'a1', input: { command: 'rm -rf /' } }, ctxAuto);"
+        "if (!b || b.block !== true || String(b.reason).includes('fail-closed')) process.exit(20);"
+        "const a = await handlers.tool_call({ toolName: 'bash', toolCallId: 'a2', input: { command: 'git status' } }, ctxAuto);"
+        "if (a !== undefined) process.exit(21);"
+        "let upMsg = '';"
+        "await commands.aetheris.handler('', { ui: { notify(m) { upMsg = m; } } });"
+        "if (!upMsg.includes('daemon=UP')) process.exit(22);"
+        "await handlers.session_shutdown({}, ctxAuto);"
+        "console.log(JSON.stringify({ ok: true }));"
+    )
+    proc_auto = subprocess.run([node, "--input-type=module", "-e", auto_script], capture_output=True, text=True, env=auto_env, check=False)
+    assert proc_auto.returncode == 0, proc_auto.stderr or proc_auto.stdout
+    assert json.loads(proc_auto.stdout.strip())["ok"] is True

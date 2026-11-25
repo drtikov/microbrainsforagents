@@ -62,7 +62,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)](#qoder-integration-desktop--cli-pretooluseposttooluse--qoder-protection)
 - [OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)](#opencode-integration-native-opencodeplugins-esm-plugin--benchmarks)
 - [Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)](#kilo-code-integration-native-kiloplugins-esm-plugin--benchmarks)
-- [Pi Coding Agent Integration (Zero-Dep Native Extension + Benchmarks)](#pi-coding-agent-integration-zero-dep-native-extension--benchmarks)
+- [Pi Coding Agent Integration (Zero-npm-Dep Native Extension + Benchmarks)](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -511,11 +511,11 @@ aetheris-daemon --http --host kilocode --port 8765   # optional warm HTTP daemon
 
 ---
 
-## Pi Coding Agent Integration (Zero-Dep Native Extension + Benchmarks)
+## Pi Coding Agent Integration (Zero-npm-Dep Native Extension + Benchmarks)
 
-Give **Pi** sub-millisecond pre-flight safety and **81% schema token savings** on CPU with a **zero-dependency, single-file ESM extension** (`pi-aetheris-microbrains/index.js`, no `npm install` or build step required):
+Give **Pi** local pre-flight safety and **81% schema token savings** on CPU with a **zero-npm-dependency, single-file ESM extension** (`pi-aetheris-microbrains/index.js` — no `npm install` or build step on the Pi side) backed by the pure-stdlib Python security core and an **auto-starting loopback HTTP daemon** (`AETHERIS_AUTO_START=1`):
 
-- **Hot-reloadable & Pi-native:** Auto-discovered under `.pi/extensions/` or `~/.pi/agent/extensions/`, supports `/reload`, `/aetheris`, and `/aetheris-config` (masked token + stats), and reads `.pi/settings.json` (`"aetheris": { ... }`) + env vars.
+- **Zero-friction & Pi-native:** Auto-discovered under `.pi/extensions/` or `~/.pi/agent/extensions/`, auto-spawns `aetheris-daemon` on localhost if not already running (and shuts it down cleanly on `session_shutdown`), supports `/reload`, `/aetheris`, and `/aetheris-config` (masked token + stats), and reads `.pi/settings.json` (`"aetheris": { ... }`) + env vars.
 - **Interactive Layer 3 Escalation:** Uses `ctx.ui.confirm()` in TUI and RPC modes before ambiguous actions execute (`blockOnEscalate` fallback when non-interactive).
 - **Synchronous DLP + Layer 0 Self-Protection:** Redacts secrets in `tool_result`, persists branch-aware `aetheris-stats` across reloads (without writing tokens/configs to disk), aborts in-flight requests on `session_shutdown`, and protects `.pi/` from tampering.
 
@@ -523,16 +523,17 @@ Give **Pi** sub-millisecond pre-flight safety and **81% schema token savings** o
 pip install -e .
 aetheris install pi --self-test
 aetheris install pi --workspace .                    # or omit --workspace for ~/.pi/agent/extensions/
-aetheris-daemon --http --host pi --port 8765         # start warm HTTP daemon, then /reload & /aetheris in Pi
+pi                                                   # auto-spawns loopback daemon (or run: aetheris-daemon --http --host pi --port 8765)
 ```
 
-*(Also supports **OMP (`oh-my-pi`)** natively via `omp-aetheris-microbrains/`: run `aetheris install omp --workspace .` and `aetheris-daemon --http --host omp --port 8765` for `.omp/` protection and `~/.omp/agent/extensions/` support.)*
+*(Also supports **OMP (`oh-my-pi`)** natively via `omp-aetheris-microbrains/`: run `aetheris install omp --workspace .` for `.omp/` protection, `~/.omp/agent/extensions/` discovery, and auto-spawning `--host omp` daemon support.)*
 
 | Benchmark Suite | Results (Pi + Microbrains, CPU-Only) |
 |---|---|
 | **25-step schema & safety** (`examples/05_reproducible_25step_benchmark.py`) | **-81.0%** schema tokens (**12,312** vs. 64,800 · **52,488** saved/loop, ~2.1 Wh avoided) · **0** missed hazards & **0%** FP *(vs. 8 missed / 4 FP keyword baseline)* · **0.95 ms** p95 |
 | **Security & anti-evasion** (`examples/10_agent_security_benchmark.py`) | **100%** attack detection (**22/22** — shell/`eval`/`exec`, secrets, `rm -rf`, `curl \| sh`, obfuscation) · **0%** benign FP (**0/12**) · **0.383 ms** p50 / **2.121 ms** p95 |
 | **SWE-bench Lite (300 real diffs)** (`examples/07_swebench_lite_gate_benchmark.py`) | **1.0%** false deny (3/300 dangerous `eval`/`exec` patterns) · **0** AST syntax FPs · **-36.7%** schema saved · **1.76 ms** p50 / **4.54 ms** p95 |
+| **Latency Breakdown (In-Process AST vs. HTTP Daemon)** | **Small payloads (in-process):** **0.085 ms** p50 / **0.237 ms** p95 · **Full AST diffs (in-process):** **~5.5 ms** p95 (100L) / **~31.5 ms** p95 (480L) · **Warm HTTP loopback:** **~6 ms** p50 / **~10 ms** mean / **~24 ms** p95 *(vs. ~400 ms cold Python spawn)* |
 | **Prompt-cache sticky Top-4 (120 tasks)** (`examples/08_frozen_advisor_benchmark.py`) | **100%** Recall@4 (**0/120** dropped vs. 7 keyword) · **56.7%** cache-adjusted net savings (vs. 46.6% keyword) · **10.2 ms** p95 |
 | **Modeled token economics *(local benchmark estimate)*** | **~\$0.079/loop** at \$1.50/M input (**~\$3.95/day** at 50 loops/day · **~\$118/month**) — CPU-only, zero GPU |
 
@@ -981,17 +982,18 @@ python benchmark_dsh_mcp_ab.py
 
 ### 6. Pi Coding Agent Benchmark Summary (CPU-Only, v0.7.6)
 
-Headline local CPU results for Pi (`v0.84.2`) paired with Microbrains (`v0.7.6`): **-81.0%** prefill schema tokens (**52,488** saved per 25-step loop), **100%** attack detection (**22/22**, **0%** benign FP), and **56.7%** cache-adjusted sticky savings at **100%** Recall@4 (**0/120** dropped tools). See [Pi Coding Agent Integration](#pi-coding-agent-integration-zero-dep-native-extension--benchmarks) for 1-command setup (`aetheris install pi --workspace .`).
+Headline local CPU results for Pi (`v0.84.2`) paired with Microbrains (`v0.7.6`): **-81.0%** prefill schema tokens (**52,488** saved per 25-step loop), **100%** attack detection (**22/22**, **0%** benign FP), and **56.7%** cache-adjusted sticky savings at **100%** Recall@4 (**0/120** dropped tools). See [Pi Coding Agent Integration](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks) for 1-command setup (`aetheris install pi --workspace .`).
 
 | Local CPU Operation | p50 Latency | p95 Latency |
 | --- | ---: | ---: |
-| Intent Classification | **0.3 ms** | **0.8 ms** |
-| Tool Routing (MoE) | **0.4 ms** | **1.1 ms** |
-| Code Validation (AST) | **0.6 ms** | **2.1 ms** |
-| Security Gate | **0.38 ms** | **2.1 ms** |
-| Counterfactual Gate | **1.2 ms** | **3.8 ms** |
+| Engine on Small Payloads (`N=500`, in-process) | **0.085 ms** | **0.237 ms** |
+| Real-File AST Diffs (`300` SWE-bench Lite, in-process) | **1.76 ms** | **4.54 ms** *(~31.5 ms at 480L)* |
+| Security Gate (`22` attacks, in-process) | **0.383 ms** | **2.121 ms** |
+| Tool Routing (`MoE`, in-process) | **0.4 ms** | **1.1 ms** |
+| Counterfactual Gate (in-process) | **1.2 ms** | **3.8 ms** |
+| Warm Loopback HTTP Daemon *(Pi extension transport)* | **~6 ms** | **~24 ms** *(vs. ~400 ms cold spawn)* |
 
-> **Scope note:** Token and dollar figures above (**-81.0%** prefill tokens; modeled **~\$0.079/loop** at \$1.50/M input) are local CPU benchmark estimates rather than live LLM invoice measurements.
+> **Scope note:** Sub-millisecond numbers are **in-process engine measurements** on small payloads; full multi-hundred-line AST diffs take `~5.5–31.5 ms` p95 in-process, and the warm localhost HTTP daemon adds loopback transport overhead (`~6 ms` p50 / `~10 ms` mean / `~24 ms` p95 on Windows). Token/dollar figures (**-81.0%** prefill tokens; **~\$0.079/loop** at \$1.50/M input) are local CPU benchmark estimates, not live LLM invoice measurements.
 
 ---
 

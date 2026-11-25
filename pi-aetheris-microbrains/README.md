@@ -19,11 +19,12 @@ aetheris install pi --self-test
 aetheris install pi --workspace .          # installs .pi/extensions/aetheris-microbrains/index.js
 # or omit --workspace to install globally to ~/.pi/agent/extensions/aetheris-microbrains/index.js
 
-# Start the warm HTTP daemon before launching pi
-aetheris-daemon --http --host pi --port 8765
+# Launch pi directly — the loopback HTTP daemon auto-starts on first check
+# (or start it manually beforehand: aetheris-daemon --http --host pi --port 8765)
+pi
 ```
 
-Inside a Pi session, run `/reload` after installing or run `/aetheris` to verify daemon connectivity.
+Inside a Pi session, run `/reload` after installing or run `/aetheris` / `/aetheris-config` to verify daemon connectivity. When auto-started by the extension on loopback, the daemon shuts down cleanly on `session_shutdown`.
 
 ## Environment Variables
 
@@ -31,6 +32,8 @@ Inside a Pi session, run `/reload` after installing or run `/aetheris` to verify
 |---|---|---|
 | `AETHERIS_DAEMON_URL` | `http://127.0.0.1:8765` | Warm HTTP daemon endpoint |
 | `AETHERIS_DAEMON_TOKEN` | *(empty)* | Optional Bearer token for authenticated daemons |
+| `AETHERIS_AUTO_START` | `1` | Auto-start loopback `aetheris-daemon` when unreachable (`0` disables) |
+| `AETHERIS_PYTHON` | `python` / `python3` | Python executable used for loopback daemon auto-start |
 | `AETHERIS_HOOK_SHADOW` | `0` | Set `1` for observe-only shadow mode |
 | `AETHERIS_FAIL_CLOSED` | `1` | Set `0` to allow tools when the daemon is unreachable |
 | `AETHERIS_BLOCK_ON_ESCALATE` | `1` | Set `0` to allow non-interactive escalations when `ctx.ui.confirm` is unavailable |

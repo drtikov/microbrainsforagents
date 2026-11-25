@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+
 const _SECRET_PATTERNS = [
   /\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b/g,
   /\bsk-(?:ant|proj)-[0-9A-Za-z_-]{16,}\b/g,
@@ -70,14 +73,37 @@ function _resolveEffectiveConfig(baseOverrides = {}, ctx = undefined) {
   ).replace(/\/+$/, "");
   const timeoutRaw = Number(baseOverrides.timeoutMs ?? settings.timeoutMs ?? env.AETHERIS_TIMEOUT_MS ?? 2500);
   const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? timeoutRaw : 2500, 200), 4500);
+  const defaultPy = typeof process !== "undefined" && process.platform === "win32" ? "python" : "python3";
   return {
     daemonUrl,
     token: String(baseOverrides.token ?? settings.token ?? env.AETHERIS_DAEMON_TOKEN ?? ""),
     shadow: Boolean(baseOverrides.shadow ?? settings.shadow ?? (env.AETHERIS_HOOK_SHADOW === "1")),
     failClosed: Boolean(baseOverrides.failClosed ?? settings.failClosed ?? (env.AETHERIS_FAIL_CLOSED !== "0")),
     blockOnEscalate: Boolean(baseOverrides.blockOnEscalate ?? settings.blockOnEscalate ?? (env.AETHERIS_BLOCK_ON_ESCALATE !== "0")),
+    autoStart: Boolean(baseOverrides.autoStart ?? settings.autoStart ?? (env.AETHERIS_AUTO_START !== "0")),
+    pythonBin: String(baseOverrides.pythonBin ?? settings.pythonBin ?? env.AETHERIS_PYTHON ?? defaultPy),
     timeoutMs,
   };
+}
+
+function _parseLoopbackDaemonUrl(daemonUrl) {
+  try {
+    const parsed = new URL(daemonUrl);
+    if (parsed.protocol !== "http:") {
+      return null;
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1" && host !== "[::1]") {
+      return null;
+    }
+    const port = parsed.port ? Number(parsed.port) : 80;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return null;
+    }
+    return { host, port };
+  } catch {
+    return null;
+  }
 }
 
 async function _postDaemon(url, token, body, timeoutMs, activeControllers = undefined) {
@@ -135,9 +161,88 @@ export function createAetherisPiExtension(overrides = {}) {
   return function aetherisMicrobrainsExtension(pi) {
     const stats = { checked: 0, blocked: 0, approved: 0, redacted: 0 };
     const activeControllers = new Set();
+    let spawnedDaemon = null;
+    let autoStartPromise = null;
+    let lastSpawnAttemptAt = 0;
 
     function persistStats() {
       pi.appendEntry?.("aetheris-stats", { ...stats });
+    }
+
+    function effectiveToken(cfg) {
+      if (cfg.token) {
+        return cfg.token;
+      }
+      if (spawnedDaemon && spawnedDaemon.daemonUrl === cfg.daemonUrl) {
+        return spawnedDaemon.token;
+      }
+      return "";
+    }
+
+    async function ensureDaemonRunning(cfg) {
+      if (!cfg.autoStart) {
+        return false;
+      }
+      const target = _parseLoopbackDaemonUrl(cfg.daemonUrl);
+      if (!target) {
+        return false;
+      }
+      if (autoStartPromise) {
+        return await autoStartPromise;
+      }
+      if (await _checkDaemonHealth(cfg.daemonUrl, effectiveToken(cfg), 250, activeControllers)) {
+        return true;
+      }
+      if (Date.now() - lastSpawnAttemptAt < 15000) {
+        return false;
+      }
+      lastSpawnAttemptAt = Date.now();
+
+      autoStartPromise = (async () => {
+        const spawnToken = cfg.token || randomBytes(16).toString("hex");
+        const env = typeof process !== "undefined" && process?.env ? { ...process.env } : {};
+        env.AETHERIS_DAEMON_TOKEN = spawnToken;
+        let childExited = false;
+        try {
+          const child = spawn(
+            cfg.pythonBin,
+            ["-m", "aetheris_microbrains.hook_daemon", "--http", "--host", "pi", "--port", String(target.port)],
+            {
+              detached: true,
+              stdio: "ignore",
+              windowsHide: true,
+              env,
+            },
+          );
+          child.once("error", () => {
+            childExited = true;
+          });
+          child.once("exit", () => {
+            childExited = true;
+          });
+          child.unref?.();
+        } catch {
+          return false;
+        }
+
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          if (await _checkDaemonHealth(cfg.daemonUrl, spawnToken, 300, activeControllers)) {
+            spawnedDaemon = { daemonUrl: cfg.daemonUrl, token: spawnToken };
+            return true;
+          }
+          if (childExited) {
+            break;
+          }
+        }
+        return false;
+      })();
+
+      try {
+        return await autoStartPromise;
+      } finally {
+        autoStartPromise = null;
+      }
     }
 
     pi.on("session_start", async (_event, ctx) => {
@@ -158,7 +263,10 @@ export function createAetherisPiExtension(overrides = {}) {
       }
 
       const cfg = _resolveEffectiveConfig(overrides, ctx);
-      const healthy = await _checkDaemonHealth(cfg.daemonUrl, cfg.token, cfg.timeoutMs, activeControllers);
+      let healthy = await _checkDaemonHealth(cfg.daemonUrl, effectiveToken(cfg), cfg.timeoutMs, activeControllers);
+      if (!healthy && cfg.autoStart) {
+        healthy = await ensureDaemonRunning(cfg);
+      }
       if (!healthy && !cfg.shadow && cfg.failClosed) {
         ctx?.ui?.notify?.(
           `Aetheris Microbrains daemon unreachable at ${cfg.daemonUrl} (fail-closed active)`,
@@ -177,6 +285,15 @@ export function createAetherisPiExtension(overrides = {}) {
       }
       activeControllers.clear();
       persistStats();
+      if (spawnedDaemon) {
+        const { daemonUrl, token } = spawnedDaemon;
+        spawnedDaemon = null;
+        try {
+          await _postDaemon(`${daemonUrl}/v1/shutdown`, token, {}, 800);
+        } catch {
+          // Best-effort cleanup of the auto-spawned daemon
+        }
+      }
     });
 
     pi.on("tool_call", async (event, ctx) => {
@@ -198,9 +315,21 @@ export function createAetherisPiExtension(overrides = {}) {
       let verdict = null;
       let err = null;
       try {
-        verdict = await _postDaemon(`${cfg.daemonUrl}/v1/hook/pre`, cfg.token, payload, cfg.timeoutMs, activeControllers);
+        verdict = await _postDaemon(`${cfg.daemonUrl}/v1/hook/pre`, effectiveToken(cfg), payload, cfg.timeoutMs, activeControllers);
       } catch (postErr) {
         err = postErr;
+      }
+
+      if (err && !verdict && cfg.autoStart && !/^HTTP \d+$/.test(String(err?.message || ""))) {
+        const started = await ensureDaemonRunning(cfg);
+        if (started) {
+          err = null;
+          try {
+            verdict = await _postDaemon(`${cfg.daemonUrl}/v1/hook/pre`, effectiveToken(cfg), payload, cfg.timeoutMs, activeControllers);
+          } catch (retryErr) {
+            err = retryErr;
+          }
+        }
       }
 
       if (err && !verdict) {
@@ -298,7 +427,7 @@ export function createAetherisPiExtension(overrides = {}) {
       try {
         await _postDaemon(
           `${cfg.daemonUrl}/v1/hook/post`,
-          cfg.token,
+          effectiveToken(cfg),
           payload,
           Math.min(cfg.timeoutMs, 1000),
           activeControllers,
@@ -312,7 +441,7 @@ export function createAetherisPiExtension(overrides = {}) {
       description: "Show Aetheris Microbrains pre-flight status",
       handler: async (_args, ctx) => {
         const cfg = _resolveEffectiveConfig(overrides, ctx);
-        const up = await _checkDaemonHealth(cfg.daemonUrl, cfg.token, cfg.timeoutMs, activeControllers);
+        const up = await _checkDaemonHealth(cfg.daemonUrl, effectiveToken(cfg), cfg.timeoutMs, activeControllers);
         const msg =
           `Aetheris Microbrains: daemon=${up ? "UP" : "DOWN"} shadow=${cfg.shadow} ` +
           `failClosed=${cfg.failClosed} checked=${stats.checked} blocked=${stats.blocked} ` +
@@ -325,14 +454,16 @@ export function createAetherisPiExtension(overrides = {}) {
       description: "Show Aetheris Microbrains effective configuration and session stats",
       handler: async (_args, ctx) => {
         const cfg = _resolveEffectiveConfig(overrides, ctx);
+        const tok = effectiveToken(cfg);
         const lines = [
           "Aetheris Microbrains Config:",
           `  daemonUrl: ${cfg.daemonUrl}`,
+          `  autoStart: ${cfg.autoStart}`,
           `  shadow: ${cfg.shadow}`,
           `  failClosed: ${cfg.failClosed}`,
           `  blockOnEscalate: ${cfg.blockOnEscalate}`,
           `  timeoutMs: ${cfg.timeoutMs}`,
-          `  token: ${cfg.token ? "***" : "(empty)"}`,
+          `  token: ${tok ? "***" : "(empty)"}`,
           "",
           "Session Stats:",
           `  checked: ${stats.checked}`,
