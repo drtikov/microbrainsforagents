@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|qoder|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|kilocode|qoder|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "qoder", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "qoder", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -64,6 +64,13 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         or (ws / "opencode.json").exists()
     ):
         detected.append("opencode")
+    if (
+        (home / ".config" / "kilo").exists()
+        or (home / ".kilo").exists()
+        or (ws / ".kilo").exists()
+        or (ws / "kilo.json").exists()
+    ):
+        detected.append("kilocode")
     return detected
 
 
@@ -194,8 +201,13 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("QODER SELF-TEST PASSED" if ok else "QODER SELF-TEST FAILED")
         return 0 if ok else 1
 
-    if host == "opencode":
-        src_plugin = Path(__file__).resolve().parents[1] / "opencode-aetheris-microbrains" / "aetheris-microbrains.js"
+    _ESM_PLUGIN_HOSTS = {
+        "opencode": ("opencode-aetheris-microbrains", "opencode.json", ".opencode", "opencode", "OpenCode"),
+        "kilocode": ("kilocode-aetheris-microbrains", "kilo.json", ".kilo", "kilo", "Kilo Code"),
+    }
+    if host in _ESM_PLUGIN_HOSTS:
+        bundle_dir, probe_cfg, ws_dir_name, global_dir_name, display_name = _ESM_PLUGIN_HOSTS[host]
+        src_plugin = Path(__file__).resolve().parents[1] / bundle_dir / "aetheris-microbrains.js"
         if args.self_test:
             from .hook import evaluate_hook_payload
 
@@ -206,17 +218,17 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
                     ok_file = False
             deny_v = evaluate_hook_payload(
                 {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
-                host="opencode",
+                host=host,
                 log_decisions=False,
             )
             allow_v = evaluate_hook_payload(
                 {"tool_name": "Bash", "tool_input": {"command": "git status"}},
-                host="opencode",
+                host=host,
                 log_decisions=False,
             )
             cfg_write = evaluate_hook_payload(
-                {"tool_name": "Write", "tool_input": {"file_path": "opencode.json", "content": "{}"}},
-                host="opencode",
+                {"tool_name": "Write", "tool_input": {"file_path": probe_cfg, "content": "{}"}},
+                host=host,
                 log_decisions=False,
             )
             ok = (
@@ -226,20 +238,20 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
                 and allow_v.get("decision") == "allow"
                 and cfg_write.get("decision") == "deny"
             )
-            print("OPENCODE SELF-TEST PASSED" if ok else "OPENCODE SELF-TEST FAILED")
+            print(f"{host.upper()} SELF-TEST PASSED" if ok else f"{host.upper()} SELF-TEST FAILED")
             return 0 if ok else 1
 
         if not src_plugin.is_file():
-            print(f"OpenCode plugin bundle missing: {src_plugin}")
+            print(f"{display_name} plugin bundle missing: {src_plugin}")
             return 1
         if getattr(args, "plugin_dir", None):
             target = Path(args.plugin_dir) / "aetheris-microbrains.js"
         elif ws is not None:
-            target = ws / ".opencode" / "plugins" / "aetheris-microbrains.js"
+            target = ws / ws_dir_name / "plugins" / "aetheris-microbrains.js"
         else:
-            target = Path.home() / ".config" / "opencode" / "plugins" / "aetheris-microbrains.js"
+            target = Path.home() / ".config" / global_dir_name / "plugins" / "aetheris-microbrains.js"
         if args.dry_run:
-            print(f"DRY RUN - would install OpenCode plugin -> {target}")
+            print(f"DRY RUN - would install {display_name} plugin -> {target}")
             return 0
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".aetheris-microbrains.", suffix=".tmp", dir=str(target.parent))
@@ -254,9 +266,9 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             except OSError:
                 pass
             raise
-        print(f"Installed OpenCode plugin -> {target}")
-        print("Start the warm HTTP daemon before launching OpenCode:")
-        print("  aetheris-daemon --http --host opencode --port 8765")
+        print(f"Installed {display_name} plugin -> {target}")
+        print(f"Start the warm HTTP daemon before launching {display_name}:")
+        print(f"  aetheris-daemon --http --host {host} --port 8765")
         return 0
 
     bundle = _build_generic_hook_bundle(

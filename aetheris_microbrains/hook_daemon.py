@@ -674,8 +674,8 @@ def serve_http(
     auth_value = str(token or os.getenv("AETHERIS_DAEMON_TOKEN") or "").strip() or secrets.token_hex(16)
     daemon_flags = dict(flags or {})
     http_host_flag = str(daemon_flags.get("host") or "claude").strip().lower()
-    if http_host_flag not in {"claude", "openclaw", "opencode", "qoder"}:
-        print(f"hook HTTP daemon requires host='claude', 'openclaw', 'opencode', or 'qoder' (got '{http_host_flag}')")
+    if http_host_flag not in {"claude", "openclaw", "opencode", "kilocode", "qoder"}:
+        print(f"hook HTTP daemon requires host='claude', 'openclaw', 'opencode', 'kilocode', or 'qoder' (got '{http_host_flag}')")
         return 2
     cache = VerdictCache()
     target = Path(state_path) if state_path else get_daemon_state_path()
@@ -835,14 +835,14 @@ def serve_http(
                 return
             req_flags = dict(daemon_flags)
             req_host_hdr = str(self.headers.get("X-Aetheris-Host") or "").strip().lower()
-            if req_host_hdr in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "qoder", "cursor", "generic"}:
+            if req_host_hdr in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"}:
                 req_flags["host"] = req_host_hdr
             effective_host = str(req_flags.get("host") or "claude").strip().lower()
             req = {"event": ev, "payload": payload, "flags": req_flags}
             verdict, _cached = evaluate_request(req, cache=cache)
             if daemon_flags.get("shadow"):
                 out_body: Dict[str, Any] = {}
-            elif effective_host in {"openclaw", "antigravity", "opencode"}:
+            elif effective_host in {"openclaw", "antigravity", "opencode", "kilocode"}:
                 hso = verdict.get("hookSpecificOutput")
                 out_body = hso if isinstance(hso, dict) else {}
             elif verdict.get("hookSpecificOutput") is not None:
@@ -912,7 +912,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--max-requests", type=int, default=None, help="Stop after N requests (testing)")
     parser.add_argument(
         "--host",
-        choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "qoder", "cursor", "generic"],
+        choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "qoder", "cursor", "generic"],
         default="claude",
         help="Default host output adapter (override per HTTP request via X-Aetheris-Host)",
     )
