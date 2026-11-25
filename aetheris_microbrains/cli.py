@@ -516,7 +516,8 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         # host-specific JSON file — writing ~/.hermes/aetheris_hooks.json registered nothing.
         from .hosts.hermes_config import install_hermes_hooks
 
-        target, merged = install_hermes_hooks(bundle, dry_run=bool(args.dry_run))
+        custom_cfg = Path(args.plugin_dir) if getattr(args, "plugin_dir", None) else None
+        target, merged = install_hermes_hooks(bundle, config_path=custom_cfg, dry_run=bool(args.dry_run))
         if args.dry_run:
             print(f"DRY RUN - would merge hermes hooks into {target}:")
             print(json.dumps(merged.get("hooks", {}), indent=2, ensure_ascii=False))

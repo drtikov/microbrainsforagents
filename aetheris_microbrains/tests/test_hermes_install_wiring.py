@@ -94,3 +94,23 @@ def test_install_is_idempotent(tmp_path, monkeypatch):
 
     cfg = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert len(cfg["hooks"]["pre_tool_call"]) == 1
+
+
+def test_plugin_dir_and_rust_shim_idempotency(tmp_path, monkeypatch):
+    import yaml
+
+    custom_cfg = tmp_path / "custom" / "hermes_config.yaml"
+    rust_bundle = {
+        "hooks": {
+            "PreToolUse": [{"hooks": [{"type": "command", "command": '"C:/bin/aetheris-gate.exe" --host hermes', "onFailure": "block"}]}],
+            "PostToolUse": [{"hooks": [{"type": "command", "command": '"C:/bin/aetheris-gate.exe" --host hermes --event post-tool-use'}]}],
+        }
+    }
+    monkeypatch.setattr(cli, "_build_generic_hook_bundle", lambda *a, **k: rust_bundle)
+
+    assert cli.main(["install", "hermes", "--plugin-dir", str(custom_cfg)]) == 0
+    assert cli.main(["install", "hermes", "--plugin-dir", str(custom_cfg)]) == 0
+    cfg = yaml.safe_load(custom_cfg.read_text(encoding="utf-8"))
+    assert len(cfg["hooks"]["pre_tool_call"]) == 1
+    assert len(cfg["hooks"]["post_tool_call"]) == 1
+    assert "aetheris-gate" in cfg["hooks"]["pre_tool_call"][0]["command"]

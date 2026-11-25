@@ -68,6 +68,9 @@ guard-ml = [
 mcp = [
     "mcp>=1.0.0,<2.0.0",
 ]
+hermes = [
+    "PyYAML>=6.0",
+]
 lab = [
     "numpy>=1.22.0",
 ]

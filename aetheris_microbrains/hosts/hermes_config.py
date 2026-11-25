@@ -35,6 +35,7 @@ HERMES_TOOL_MATCHER = (
 HERMES_EVENTS = {"PreToolUse": "pre_tool_call", "PostToolUse": "post_tool_call"}
 
 _HOOK_MARKER = "aetheris_microbrains.hook"
+_HOOK_MARKERS = ("aetheris_microbrains.hook", "aetheris-gate")
 
 
 def hermes_config_path() -> Path:
@@ -97,7 +98,10 @@ def merge_into_config(config: Dict[str, Any], hooks_block: Dict[str, Any]) -> Di
         kept = [
             item
             for item in existing
-            if not (isinstance(item, dict) and _HOOK_MARKER in str(item.get("command", "")))
+            if not (
+                isinstance(item, dict)
+                and any(marker in str(item.get("command", "")) for marker in _HOOK_MARKERS)
+            )
         ]
         hooks[event] = kept + specs
     merged["hooks"] = hooks
