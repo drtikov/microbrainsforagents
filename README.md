@@ -10,6 +10,8 @@
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
+> 📄 **Technical White Paper:** Read the full architecture, empirical trade-offs, and research agenda in [**WHITEPAPER.md**](WHITEPAPER.md).
+
 ```text
        [ User / Task Prompt ]
                  │

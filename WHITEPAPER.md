@@ -19,7 +19,7 @@ The rapid adoption of autonomous AI coding agents has revealed a structural syst
 
 **Aetheris Microbrains** investigates an architectural alternative: an external, model-independent cognitive-control, safety-gating, and cache-aware tool-routing layer positioned between the autonomous agent and its host execution environment. Rather than replacing or fine-tuning the underlying Large Language Model (LLM), Microbrains operates via sub-millisecond deterministic inspection (AST parsing, allowlist-first shell tokenization, information-flow taint tracking, secret egress prevention) paired with lightweight CPU-only Mixture-of-Experts (MoE) tool narrowing and split-conformal abstention.
 
-This white paper clearly distinguishes **implemented, deterministically tested system capabilities** from **preliminary live-agent research findings**. Deterministic policy, AST, secret-redaction, and cache-sticky tool-routing benchmarks demonstrate 100% hazard interception on test suites and substantial modeled token reductions. Separately, a preliminary two-worktree OpenAI Codex experiment observed a **58.3% reduction in total input tokens** (1,623,024 vs. 675,867) and a **61.1% reduction in uncached input tokens**. While encouraging, that live run represents a single exploratory observation and does not establish general cross-task efficiency gains. We propose a unified evaluation metric—**Engineering Efficiency** ($E = \text{Verified successful tasks} / \text{Total computational cost}$)—and a five-stage experimental program to test these hypotheses rigorously across diverse agent platforms.
+This white paper clearly distinguishes **implemented, deterministically tested system capabilities** from **preliminary live-agent research findings**. Deterministic policy, AST, secret-redaction, and cache-sticky tool-routing benchmarks demonstrate 100% interception across the defined hazard cases in the reported test suites alongside substantial modeled token reductions. Separately, a preliminary two-worktree OpenAI Codex experiment observed a **58.3% reduction in total input tokens** (1,623,024 vs. 675,867) and a **61.1% reduction in uncached input tokens**. However, hook execution was not independently confirmed in the recorded event stream of that single exploratory trial, so it does not establish causal attribution or general cross-task efficiency gains. We propose a unified evaluation metric—**Engineering Efficiency** ($E = \text{Verified successful tasks} / \text{Total computational cost}$)—and a five-stage experimental program to test these hypotheses rigorously across diverse agent platforms.
 
 ---
 
@@ -66,7 +66,8 @@ MicroBrains sits transparently in the tool-execution critical path via native ho
                                │
                                ▼
     ┌────────────────────────────────────────────────────┐
-    │          4-LAYER DECISION ENGINE (Pure Stdlib)      │
+    │   4-LAYER DECISION ENGINE (Stdlib L0/L1/L3 +       │
+    │                            Optional NumPy L2)      │
     │                                                    │
     │  Layer 0 — Constitutional Policy & Asset Gate      │
     │  • DEFAULT_PROTECTED_PATTERNS (.env*, .ssh/,       │
@@ -103,8 +104,13 @@ MicroBrains sits transparently in the tool-execution critical path via native ho
 
 ## 3. Architectural Principles
 
-### 3.1 Model Independence & Pure-Stdlib Core Isolation
-The 35-module security-critical core (verified deterministically via `aetheris verify-core`) has **zero NumPy or ML runtime dependencies** and is cleanly separated from 49 optional research/lab modules (`core_isolated=True`, `numpy_violations=[]`). Any LLM or agent harness can adopt the control plane without modifying model weights.
+### 3.1 Model Independence & Explicit Dependency Boundaries
+
+MicroBrains enforces strict separation between deterministic security enforcement and optional numerical/research components (verified continuously via `aetheris verify-core` -> `core_isolated=True`, `numpy_violations=[]`):
+
+- **Security-critical core (Layers 0, 1, 3 — 35 modules):** Python standard library only. Pre-flight AST inspection, shell tokenization, protected-path policies, IFC taint tracking, audit journaling, and host hook adapters carry **zero NumPy or third-party ML runtime dependencies**.
+- **Optional cognitive-routing subsystem (Layer 2):** Lightweight pure-NumPy CPU Mixture-of-Experts (`ToolRoutingMoE`), sticky `SessionToolSurface`, and split-conformal abstention gates.
+- **Optional research & server modules (49 lab modules + `[mcp]` / `[server]` / `[ast]` / `[guard-ml]`):** Isolated in separate opt-in dependency profiles so headless security hooks remain minimal and portable across LLM providers.
 
 ### 3.2 Allowlist-First, Fail-Closed Policy Evaluation
 Agent actions are classified deterministically across five operational classes:
@@ -128,16 +134,16 @@ Static AST and tokenizer analysis checks syntax and paths before execution; it d
 
 ### 4.1 Multi-Host Integration Matrix
 
-| Host Platform | Integration Mechanism | Adapter & Installer | Key Capabilities |
-| :--- | :--- | :--- | :--- |
-| **Claude Code** | `PreToolUse` / `PostToolUse` / Lifecycle hooks (CLI & HTTP) | `--host claude`, `install_hook.py` | Silent allow / ask / deny (exit 2), warm HTTP daemon, `updatedToolOutput` scrubbing |
-| **Codex CLI** | `.codex/hooks.json`, skill & `.codex-plugin/` | `--host codex`, `install_codex_hook.py` | Deferred escalation under auto-approve policy, `--codex-escalate-deny`, MCP support |
-| **Google Antigravity** | Native plugin bundle (`plugin.json`, `hooks.json`, MCP, skill) | `--host antigravity`, `aetheris install antigravity` | `allow`/`ask`/`force_ask`/`deny` contract, `--approve-once`, `aetheris-gate` shim option |
-| **OpenClaw** | Gateway plugin (`@aetheris/openclaw-microbrains`) | `--host openclaw`, `aetheris install openclaw` | `before_tool_call`, sync `tool_result_persist` DLP, `mcp_tool_registered` validation, HTTP/1.1 keep-alive |
-| **Qoder (Desktop & CLI)** | `PreToolUse` / `PostToolUse` hooks (`~/.qoder/settings.json`, `.qoder/settings.local.json`) | `--host qoder`, `aetheris install qoder` | Non-destructive hook merge, `.qoder/` protection, `--session-state auto`, `--replace-tool-output` |
-| **Hermes Agent** | FastMCP (`stdio` / Streamable HTTP + `GET /health`) + hooks | `--host hermes`, `aetheris-mcp` | 8 MCP tools (`microbrain_health`, preflight, scrub, scan, narrow, audit, directives, verify) |
-| **DeepSeek Harness** | Cordis MCP bundle | `aetheris install dsh` | On-demand Streamable HTTP MCP utilities (`127.0.0.1:8766/mcp`) |
-| **Cursor** | `.cursor/hooks.json` (`beforeShellExecution` / `afterShellExecution`) | `--host cursor`, `aetheris install cursor` | Shell execution pre/post hook gating |
+| Host Platform | Integration Mechanism | Maturity | Adapter & Installer | Key Capabilities |
+| :--- | :--- | :--- | :--- | :--- |
+| **Claude Code** | `PreToolUse` / `PostToolUse` / Lifecycle hooks (CLI & HTTP) | **Full E2E Tested** | `--host claude`, `install_hook.py` | Silent allow / ask / deny (exit 2), warm HTTP daemon, `updatedToolOutput` scrubbing |
+| **Codex CLI** | `.codex/hooks.json`, skill & `.codex-plugin/` | **Full E2E Tested** | `--host codex`, `install_codex_hook.py` | Deferred escalation under auto-approve policy, `--codex-escalate-deny`, MCP support |
+| **Google Antigravity** | Native plugin bundle (`plugin.json`, `hooks.json`, MCP, skill) | **Full E2E Tested** | `--host antigravity`, `aetheris install antigravity` | `allow`/`ask`/`force_ask`/`deny` contract, `--approve-once`, `aetheris-gate` shim option |
+| **OpenClaw** | Gateway plugin (`@aetheris/openclaw-microbrains`) | **Full E2E Tested** | `--host openclaw`, `aetheris install openclaw` | `before_tool_call`, sync `tool_result_persist` DLP, `mcp_tool_registered` validation, HTTP/1.1 keep-alive |
+| **Qoder (Desktop & CLI)** | `PreToolUse` / `PostToolUse` hooks (`~/.qoder/settings.json`, `.qoder/settings.local.json`) | **Full E2E Tested (Config/Contract)** | `--host qoder`, `aetheris install qoder` | Non-destructive hook merge, `.qoder/` protection, `--session-state auto`, `--replace-tool-output` |
+| **Hermes Agent** | FastMCP (`stdio` / Streamable HTTP + `GET /health`) + hooks | **Full E2E Tested** | `--host hermes`, `aetheris-mcp` | 8 MCP tools (`microbrain_health`, preflight, scrub, scan, narrow, audit, directives, verify) |
+| **DeepSeek Harness** | Cordis MCP bundle | **On-Demand MCP (Advisory)** | `aetheris install dsh` | On-demand Streamable HTTP MCP utilities (`127.0.0.1:8766/mcp`; no automatic tool hook interception) |
+| **Cursor** | `.cursor/hooks.json` (`beforeShellExecution` / `afterShellExecution`) | **Partial (Shell-Only Hook)** | `--host cursor`, `aetheris install cursor` | Shell execution pre/post CLI hook gating; file-edit/MCP interception and Cursor-live runtime remain unverified |
 
 ### 4.2 Architectural Case Study: Contextual Shell Classification (Windows PowerShell)
 
@@ -159,7 +165,9 @@ By routing recognized PowerShell invocations through dedicated read-only cmdlet 
 
 ### 5.1 Reproducible Local Benchmarks (Verified Suites)
 
-All figures below come from deterministic benchmark scripts in the repository (`examples/`, `tests/test_skill_gain_ab.py`, `BENCHMARK_RESULTS.md`). We report both wins and negative/trade-off results transparently:
+All figures below come from deterministic benchmark scripts in the repository (`examples/`, `aetheris_microbrains/tests/test_skill_gain_ab.py`, `BENCHMARK_RESULTS.md`). We report datasets, sample sizes, modeled pricing assumptions, and negative/trade-off results transparently:
+
+- **Provenance & Modeled Pricing Assumptions:** `05_skill_gain_ab_benchmark.py` (25 synthetic steps), `test_skill_gain_ab.py` (26 deterministic steps: 14 benign + 12 seeded hazards—4 syntax errors, 8 security incidents), and `11_claude_skills_efficiency_benchmark.py` (16-step deterministic research replay) directly measure gate latency and interception/false-positive counts, while USD/token savings are **modeled estimates** using documented Sonnet-class input pricing (`$3.00` / 1M tokens) in each script. `10_agent_security_benchmark.py` evaluates 22 curated attack payloads + 12 benign controls; adversarial test suites evaluate 100 dangerous + 100 safe cases; `06_real_llm_ab_benchmark.py` evaluates 40 tool-routing tasks; `08_frozen_advisor_benchmark.py` evaluates 120 turns over a 32-tool catalog.
 
 **Safety, Interception & Session Economics**
 
@@ -281,7 +289,7 @@ MicroBrains welcomes engineering review and joint empirical evaluation from team
 
 ## 11. Conclusion
 
-Improving autonomous AI agents requires more than larger foundation models—it requires disciplined execution infrastructure around those models. Aetheris Microbrains demonstrates that a lightweight, model-independent cognitive-control layer can enforce structural safety, prevent secret leaks, preserve prompt-cache prefixes, and integrate cleanly across eight major agent ecosystems with sub-millisecond typical overhead. While preliminary live-agent results show compelling token-reduction signals, the project commits to rigorous, multi-task empirical validation centered on **verified engineering output per unit of compute**.
+Improving autonomous AI agents requires more than larger foundation models—it requires disciplined execution infrastructure around those models. Aetheris Microbrains demonstrates that a lightweight, model-independent cognitive-control layer can enforce specified structural policy boundaries, implement tested mechanisms for detecting and blocking defined secret-exfiltration paths, preserve prompt-cache prefixes via sticky tool surfaces, and integrate cleanly across multiple agent ecosystems with sub-millisecond typical overhead. While preliminary live-agent results show compelling token-reduction signals, the project commits to rigorous, multi-task empirical validation centered on **verified engineering output per unit of compute**.
 
 ---
 
