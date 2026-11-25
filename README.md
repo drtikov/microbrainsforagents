@@ -246,6 +246,12 @@ SHA256 payload hashing is always included in engine timings; JSONL disk append (
 | `PostToolUse` command hook | 393.6 ms | 408.2 ms | Direct Python subprocess cold-start (10 runs) |
 | Combined per tool call (both hooks) | ~799 ms | — | Combined median when both run; mitigated via warm `aetheris-daemon` |
 
+#### Live Codex Task Assessment (58.3% Input-Token Reduction)
+
+In a single-task live Codex evaluation comparing runs with and without Microbrains:
+- **Observed in this run:** **58.3% fewer input tokens** (corresponding to ~2.4× theoretical workload capacity per fixed token budget if reproducible) and a stronger implementation verified by code comparison.
+- **Scope & limits:** Average savings across diverse tasks, 2.4× completed engineering output, and lower total development cost are **not yet established** from a single run—real-world economics also depend on output tokens, prompt caching, tool calls, and execution time. The target benchmark metric for cross-agent validation is **Engineering Efficiency** (`Verified successful tasks / Total computational cost`).
+
 ### Setup: Automatic Gate + Optional MCP
 
 1. **Install & pilot in `--shadow` mode first** *(recommended — logs verdicts without blocking)*:
