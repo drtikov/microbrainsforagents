@@ -146,6 +146,7 @@ def test_guardrails_and_dev_preserve_security_vetoes_and_risky_escalations():
             "docker run --rm alpine id",
             "kubectl delete pod foo",
             "gh pr merge 1",
+            "npx evil-package",
         ):
             r = decide({"tool": "execute_shell", "cmd": risky_cmd}, policy=cfg, context={"log_decisions": False})
             assert r["decision"] in {"escalate", "deny"}, (

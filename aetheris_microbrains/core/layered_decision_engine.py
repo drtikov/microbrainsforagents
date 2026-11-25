@@ -2688,7 +2688,7 @@ SAFE_DEV_SHELL_COMMANDS: Set[str] = {
     "mkdir", "touch", "cp", "mv", "rm", "rmdir",
     "npm", "pnpm", "yarn", "cargo", "pip", "poetry", "uv",
     "flake8", "isort", "pylint", "pyright", "ty", "bandit", "tox", "nox",
-    "node", "npx", "bun", "deno", "tsc", "eslint", "prettier", "vitest", "jest",
+    "node", "bun", "deno", "tsc", "eslint", "prettier", "vitest", "jest",
     "biome", "tsx", "vite", "next", "turbo", "webpack", "esbuild", "rollup", "swc",
     "go", "gofmt", "golangci-lint", "rustc", "rustfmt", "clippy",
     "make", "cmake", "ninja", "just", "bazel", "gradle", "gradlew", "mvn", "mvnw",
@@ -2717,7 +2717,7 @@ _GUARDRAILS_ESCALATE_COMMANDS: Set[str] = {
     "sh", "bash", "zsh", "dash", "fish", "ksh", "cmd", "powershell", "pwsh",
     "eval", "exec", "xargs", "env", "strace", "unbalanced_shell_quotes", "env_assignment",
     # Non-allowlisted VCS / package / runtime / container / dangerous-flag tool invocations
-    "git", "pip", "pip3", "npm", "pnpm", "yarn", "python", "python3", "node",
+    "git", "pip", "pip3", "npm", "pnpm", "yarn", "npx", "python", "python3", "node",
     "gh", "docker", "podman", "kubectl",
     "sed", "awk", "gawk", "mawk", "nawk", "find", "rg", "sort", "yq", "clang-format", "mypy",
 }
@@ -3160,6 +3160,22 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             ):
                 return False
         return True
+    if is_dev and exe == "npx":
+        if any(
+            a in {"-p", "--package", "-y", "--yes", "-c", "--call"}
+            or a.startswith(("--package=", "--call="))
+            for a in args_lower
+        ):
+            return False
+        idx = 0
+        while idx < len(args_lower) and args_lower[idx] in {"--no-install", "--no", "-q", "--quiet"}:
+            idx += 1
+        if idx >= len(args_lower):
+            return False
+        return args_lower[idx] in {
+            "vitest", "jest", "tsc", "eslint", "prettier", "biome",
+            "tsx", "vite", "next", "turbo", "webpack", "esbuild", "rollup", "swc",
+        }
     if exe == "gh":
         if not args_lower:
             return True
