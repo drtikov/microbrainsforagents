@@ -255,7 +255,7 @@ Use Microbrains with **stock VS Code Cline and Cline CLI** without forking or re
 
 ## MiniMax Code (`mcode`) Integration (Native `.minimax/hooks.json` + CLI)
 
-Native pre/post enforcement for **MiniMax Code (MCode)** (`mcode_pretooluse_v1` via [`hosts/mcode.py`](aetheris_microbrains/hosts/mcode.py)):
+MiniMax Code already speaks Microbrains' native `allow`/`deny`/`ask` + exit `2` hook dialect, so enabling sub-2 ms pre/post protection takes one command (`mcode_pretooluse_v1` via [`hosts/mcode.py`](aetheris_microbrains/hosts/mcode.py)) with zero manual config editing:
 
 - **1-Command Install:**
   ```bash

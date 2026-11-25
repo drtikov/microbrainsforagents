@@ -36,7 +36,7 @@ Crucially, these failures stem from the **surrounding execution architecture**, 
 
 - Can deterministic local analysis intercept syntax, supply-chain, and policy failures in sub-millisecond time before tools run?
 - Can session-sticky tool routing preserve LLM prompt-cache prefixes while still shrinking tool-schema bloat?
-- Can one control plane govern heterogeneous coding harnesses (`Claude Code`, `Codex CLI`, `Google Antigravity`, `OpenClaw`, `Qoder`, `Hermes`, `DeepSeek Harness`, `Cursor`) without altering foundation models?
+- Can one control plane govern heterogeneous coding harnesses (`Claude Code`, `Codex CLI`, `Google Antigravity`, `OpenClaw`, `Qoder`, `Hermes`, `DeepSeek Harness`, `Cursor`, `Devin`, `Cline`, `MiniMax Code`) without altering foundation models?
 - Can safety mechanisms remain resistant to evasion (shell wrappers, obfuscated globs, self-tampering) and fail closed?
 - Can an external control layer measurably increase *verified successful engineering output per unit of compute*?
 
@@ -272,7 +272,7 @@ To test H1–H3 rigorously without selection bias or safety degradation, we prop
 ## 8. Development Roadmap (Implemented vs. Planned)
 
 - **Phase I — Foundation & Security Core *(Largely Implemented)*:** Pure-stdlib 35-module security core (`verify-core`), 4-layer structural AST/shell/taint engine, gate self-write protection, allowlist-hardened escalation policies, Cedar/Rego Policy-as-Code, MCP pinning + `$SECRET:<NAME>` Secret Broker, Rust native shim + OS sandboxing, OTel GenAI + Audit UI + CI PR gate.
-- **Phase II — Multi-Host Interoperability *(Implemented & Expanding)*:** Turnkey adapters/installers for Claude Code, Codex CLI, Google Antigravity, OpenClaw (HTTP/1.1 keep-alive + DLP), Qoder Desktop/CLI, Hermes FastMCP, DeepSeek Harness, and Cursor.
+- **Phase II — Multi-Host Interoperability *(Implemented & Expanding)*:** Turnkey 1-command native hook adapters/installers for Claude Code, Codex CLI, Google Antigravity, OpenClaw (HTTP/1.1 keep-alive + DLP), Qoder Desktop/CLI, Hermes FastMCP, DeepSeek Harness, Cursor, Devin, Cline (VS Code & CLI), and MiniMax Code (`mcode`).
 - **Phase III — Large-Diff Performance & Engine Modularization *(Planned)*:** Single-pass shell tokenization (eliminating duplicate `shlex` scans), cross-turn AST caching for 400+ line diffs, and decomposing `layered_decision_engine.py` into focused sub-modules (policy, shell, AST, paths, journal).
 - **Phase IV — Validated Multi-Agent Efficiency Benchmarks *(In Research)*:** Large-$N$ multi-harness A/B harnesses measuring $E = \text{Verified successful tasks} / \text{Total computational cost}$ with verified hook telemetry and adaptive policy calibration from audited outcomes.
 
