@@ -62,13 +62,14 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
 
 def _build_generic_hook_bundle(host: str, *, profile: str, shadow: bool, auto_allow: bool) -> Dict[str, Any]:
     py = sys.executable.replace("\\", "/")
-    extra = f"--host {host} --profile {profile} --log-decisions"
+    extra = f"--host {host} --profile {profile} --log-decisions --session-state auto"
     if shadow:
         extra += " --shadow"
     if auto_allow:
         extra += " --auto-allow"
     pre_cmd = f'"{py}" -m aetheris_microbrains.hook {extra}'
-    post_cmd = f'"{py}" -m aetheris_microbrains.hook --event post-tool-use {extra}'
+    post_extra = f"{extra} --replace-tool-output" if host in {"claude", "qoder"} else extra
+    post_cmd = f'"{py}" -m aetheris_microbrains.hook --event post-tool-use {post_extra}'
     if host == "cursor":
         return {
             "version": 1,
@@ -77,22 +78,50 @@ def _build_generic_hook_bundle(host: str, *, profile: str, shadow: bool, auto_al
                 "afterShellExecution": [{"command": post_cmd}],
             },
         }
+    pre_hook: Dict[str, Any] = {"type": "command", "command": pre_cmd}
+    post_hook: Dict[str, Any] = {"type": "command", "command": post_cmd}
+    if host == "qoder":
+        pre_hook["timeout"] = 10
+        post_hook["timeout"] = 10
+    else:
+        pre_hook["onFailure"] = "block"
     return {
         "hooks": {
             "PreToolUse": [
                 {
                     "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*",
-                    "hooks": [{"type": "command", "command": pre_cmd, "onFailure": "block"}],
+                    "hooks": [pre_hook],
                 }
             ],
             "PostToolUse": [
                 {
                     "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*",
-                    "hooks": [{"type": "command", "command": post_cmd}],
+                    "hooks": [post_hook],
                 }
             ],
         }
     }
+
+
+def _merge_hooks_non_destructively(existing_hooks: Any, new_hooks: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge new Aetheris hook entries per-event without removing unrelated user hooks."""
+    merged: Dict[str, Any] = dict(existing_hooks) if isinstance(existing_hooks, dict) else {}
+    for event_name, new_entries in new_hooks.items():
+        if not isinstance(new_entries, list):
+            merged[event_name] = new_entries
+            continue
+        cur_list = merged.get(event_name)
+        preserved: List[Any] = []
+        if isinstance(cur_list, list):
+            for entry in cur_list:
+                try:
+                    serialized = json.dumps(entry, ensure_ascii=False)
+                except Exception:
+                    serialized = str(entry)
+                if "aetheris_microbrains.hook" not in serialized:
+                    preserved.append(entry)
+        merged[event_name] = [*preserved, *new_entries]
+    return merged
 
 
 def _install_host(args: argparse.Namespace, host: str) -> int:
@@ -170,7 +199,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         "codex": Path(".codex") / "hooks.json",
         "hermes": Path(".hermes") / "aetheris_hooks.json",
         "cursor": Path(".cursor") / "hooks.json",
-        "qoder": Path(".qoder") / "settings.json",
+        "qoder": Path(".qoder") / ("settings.local.json" if ws is not None else "settings.json"),
     }
     target = Path(args.plugin_dir) if getattr(args, "plugin_dir", None) else (base_dir / rel_map[host])
     merged_bundle = dict(bundle)
@@ -179,7 +208,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             existing = json.loads(target.read_text(encoding="utf-8"))
             if isinstance(existing, dict):
                 merged = dict(existing)
-                merged["hooks"] = bundle.get("hooks", {})
+                merged["hooks"] = _merge_hooks_non_destructively(existing.get("hooks"), bundle.get("hooks", {}))
                 if "version" in bundle:
                     merged["version"] = bundle["version"]
                 merged_bundle = merged

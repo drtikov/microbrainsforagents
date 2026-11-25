@@ -107,20 +107,52 @@ def test_qoder_installer_merge_detection_and_self_test(tmp_path, capsys):
     qoder_dir.mkdir(parents=True)
     assert "qoder" in detect_installed_hosts(tmp_path)
 
-    settings_file = qoder_dir / "settings.json"
-    settings_file.write_text(json.dumps({"theme": "dark", "model": "qoder-default"}), encoding="utf-8")
+    # Workspace install writes machine-local .qoder/settings.local.json and preserves existing hooks & settings
+    shared_settings = qoder_dir / "settings.json"
+    shared_settings.write_text(json.dumps({"shared": True}), encoding="utf-8")
+
+    local_settings = qoder_dir / "settings.local.json"
+    local_settings.write_text(
+        json.dumps({
+            "theme": "dark",
+            "model": "qoder-default",
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo custom-pre"}]}
+                ],
+                "Stop": [{"hooks": [{"type": "command", "command": "echo custom-stop"}]}],
+            },
+        }),
+        encoding="utf-8",
+    )
 
     assert cli_main(["install", "qoder", "--workspace", str(tmp_path), "--dry-run"]) == 0
     capsys.readouterr()
-    assert "hooks" not in json.loads(settings_file.read_text(encoding="utf-8"))
+    assert len(json.loads(local_settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]) == 1
 
+    # Run install twice to verify idempotency (no duplicate Aetheris entries)
+    assert cli_main(["install", "qoder", "--workspace", str(tmp_path)]) == 0
     assert cli_main(["install", "qoder", "--workspace", str(tmp_path)]) == 0
     capsys.readouterr()
-    merged = json.loads(settings_file.read_text(encoding="utf-8"))
+
+    assert json.loads(shared_settings.read_text(encoding="utf-8")) == {"shared": True}
+    merged = json.loads(local_settings.read_text(encoding="utf-8"))
     assert merged["theme"] == "dark"
     assert merged["model"] == "qoder-default"
-    assert "--host qoder" in merged["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-    assert "--host qoder" in merged["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert merged["hooks"]["Stop"][0]["hooks"][0]["command"] == "echo custom-stop"
+    assert len(merged["hooks"]["PreToolUse"]) == 2
+    assert merged["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "echo custom-pre"
+
+    pre_hook = merged["hooks"]["PreToolUse"][1]["hooks"][0]
+    post_hook = merged["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert "--host qoder" in pre_hook["command"]
+    assert "--session-state auto" in pre_hook["command"]
+    assert pre_hook["timeout"] == 10
+    assert "onFailure" not in pre_hook
+    assert "--host qoder" in post_hook["command"]
+    assert "--session-state auto" in post_hook["command"]
+    assert "--replace-tool-output" in post_hook["command"]
+    assert post_hook["timeout"] == 10
 
     assert cli_main(["install", "qoder", "--self-test"]) == 0
     out = capsys.readouterr().out
