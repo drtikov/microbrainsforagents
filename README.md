@@ -480,17 +480,17 @@ aetheris install qoder --workspace . --profile dev
 
 Microbrains works alongside any AI agent or framework:
 
-| Category | Agents & Frameworks | Integration Status | What Microbrains Does |
-| :--- | :--- | :--- | :--- |
-| **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Built-in CLI Hook / Native Rust Shim** (`python -m aetheris_microbrains.hook` / `aetheris-gate`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
-| **Qoder (Desktop & CLI)** | **Qoder Desktop**, **Qoder CLI** | **Native Hook Adapter + CLI** (`aetheris install qoder` / `--host qoder`) | Claude-compatible `PreToolUse`/`PostToolUse` gate, `.qoder/` self-protection, and optional `aetheris-mcp` tools. |
-| **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
-| **Hermes Agent** | **Hermes Agent** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
-| **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
-| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor Agent** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
-| **OpenClaw** | **OpenClaw** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
-| **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
-| **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
+| Category | Agents & Frameworks | Maturity | Integration Status | What Microbrains Does |
+| :--- | :--- | :--- | :--- | :--- |
+| **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Full E2E Tested** | **Built-in CLI Hook / Native Rust Shim** (`python -m aetheris_microbrains.hook` / `aetheris-gate`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
+| **Qoder (Desktop & CLI)** | **Qoder Desktop**, **Qoder CLI** | **Config & Contract Tested** | **Native Hook Adapter + CLI** (`aetheris install qoder` / `--host qoder`) | Claude-compatible `PreToolUse`/`PostToolUse` gate, `.qoder/` self-protection, and optional `aetheris-mcp` tools. |
+| **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Full E2E Tested** | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
+| **Hermes Agent** | **Hermes Agent** | **Full E2E Tested** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
+| **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Advisory MCP** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
+| **Autonomous Coding Agents** | **SWE-agent**, **OpenHands**, **Aider**, **Cursor** | **Python API / Partial (Cursor Shell-Only)** | **Python API / Hook Adapter** (`mb.decide(...)` / `aetheris install cursor`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
+| **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
+| **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
+| **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 
 ---
 
@@ -721,7 +721,7 @@ turn2 = session.select_for_turn("check line 20") # Reuses sticky prefix -> cache
 
 ## 🎯 Scope, Where It Fits & Alternatives
 
-* **Where Microbrains Fits:** A **pure-stdlib security core (34 modules, `aetheris verify-core`) with optional pure-NumPy Layer-2 routing (`aetheris-microbrains`)** for custom/local agents or harnesses that want polyglot AST diff checks, deferred-execution guards, secret brokering, allowlist-first `shlex` shell gating, and Top-K tool narrowing in `< 2 ms` without wiring separate cloud services.
+* **Where Microbrains Fits:** A **pure-stdlib security core (35 modules with zero runtime NumPy imports via `aetheris verify-core`, paired with `numpy>=1.22.0` in base install for out-of-the-box Layer-2 routing)** for custom/local agents or harnesses that want polyglot AST diff checks, deferred-execution guards, secret brokering, allowlist-first `shlex` shell gating, and Top-K tool narrowing without wiring separate cloud services.
 * **Established Alternatives by Component:**
 
 | Capability | Microbrains Approach | Established Specialized Alternatives |
@@ -754,7 +754,7 @@ pytest aetheris_microbrains/tests -q
 | **25-step schema & safety** | **12,312 tokens** (-81.0%), **0 missed hazards**, **0 false blocks** | Baseline: 64,800 tokens; keyword rules: 8 missed, 4 false blocks |
 | **26-step coding session** | **12/12 hazards caught**, **0** syntax/security fails, **~37,055** tokens saved *(modeled)* | **\$0.1112/session** saved; 146 → **37** error tokens (-74.7%); **16.5 ms** total gate |
 | **16-step research session** | **9,149 tokens** (-76.6%), **0/7** recovery turns, **0/4** incidents | **\$0.0896/session** saved (29,882 tokens); 8.75 ms mean / 107.79 ms p95 |
-| **Security & Adversarial** | **22/22** attacks (0/12 FP) · **100/100** adversarial (0/100 FP) · MCP poison/shadow/rug-pull | **0.384 ms** p50 / **2.545 ms** p95 · **100%** BFCL Top-1/3 (16/16) & OOD abstention (4/4) |
+| **Security & Adversarial** | **22/22** defined attacks (0/12 FP) · **100/100** adversarial (0/100 FP) · MCP poison/shadow/rug-pull *(static check; complements OS containment — see [SECURITY.md](SECURITY.md))* | **0.384 ms** p50 / **2.545 ms** p95 · **100%** BFCL Top-1/3 (16/16) & OOD abstention (4/4) |
 
 **2. Tool Routing & Cache-Sticky Selection (Honest Trade-Offs)**
 
@@ -763,6 +763,14 @@ pytest aetheris_microbrains/tests -q
 | **Tool Selection (Top-4)** | **97.4% Recall@4**, **2.6%** drop rate, 38.6% net saved, **4.526 ms** p95 | Naive keyword: 76.3% Recall@4, 43.4% net saved, 0.270 ms p95 | **+21.1 pt recall**, but -4.8 pt net savings and ~16.8× slower |
 | **Tool Advisor (32 tools)** | **100% Recall@4**, **0/120** drops, **56.7%** cache-adj. saved *(session-sticky)*, **4.979 ms** p95 | Keyword advisor: 94.2% Recall@4, 7/120 drops, 46.6% saved, 0.194 ms p95 | **+5.8 pt recall**, **+10.1 pt** cache-adj. savings, ~25.7× slower *(per-turn: only 3.9% saved)* |
 | **Colony Routing (Where it didn't win)** | **86.7%** strict / **70.0%** held-out, **0/50** missed escalations, 13/70 false esc., **1,271 µs** p95 | Tuned rules: **89.2%** strict / **100%** held-out, 4/50 missed esc., 4/70 false esc., **25.3 µs** p95 | Zero missed escalations, but less accurate and ~50× slower than tuned rules |
+
+**3. Latency by Execution Mode**
+
+| Execution Mode | What It Measures | Typical Overhead |
+| :--- | :--- | :--- |
+| **Warm in-process decision engine** | `decide()` / library evaluation (small shell/diff) | **0.07–0.70 ms** (`5.5 ms` p95 at 100-line AST diff; `31.5 ms` p95 at 480-line diff) |
+| **Warm local daemon / IPC** | `hook_daemon.py` HTTP/1.1 keep-alive or TCP + SHA256 | **~0.7–0.9 ms** (OpenClaw HTTP) / **~8.7 ms** p50 (TCP + disk log) |
+| **Cold host subprocess hook** | Full CLI spawn per tool call (when daemon/shim disabled) | **~400 ms** (Python startup) / **<15 ms** (Rust `aetheris-gate` shim) |
 
 ### 0. Micro-Benchmark: `decide()` Real-World Latency Distribution
 Measured **in-process on small payloads** across N=500 consecutive pre-flight evaluations of representative `PreToolUse` shell and diff payloads (single-threaded CPU, pure NumPy):

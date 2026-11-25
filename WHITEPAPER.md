@@ -108,8 +108,8 @@ MicroBrains sits transparently in the tool-execution critical path via native ho
 
 MicroBrains enforces strict separation between deterministic security enforcement and optional numerical/research components (verified continuously via `aetheris verify-core` -> `core_isolated=True`, `numpy_violations=[]`):
 
-- **Security-critical core (Layers 0, 1, 3 — 35 modules):** Python standard library only. Pre-flight AST inspection, shell tokenization, protected-path policies, IFC taint tracking, audit journaling, and host hook adapters carry **zero NumPy or third-party ML runtime dependencies**.
-- **Optional cognitive-routing subsystem (Layer 2):** Lightweight pure-NumPy CPU Mixture-of-Experts (`ToolRoutingMoE`), sticky `SessionToolSurface`, and split-conformal abstention gates.
+- **Security-critical core (Layers 0, 1, 3 — 35 modules):** Python standard library only. Pre-flight AST inspection, shell tokenization, protected-path policies, IFC taint tracking, audit journaling, and host hook adapters carry **zero runtime imports of NumPy or third-party ML packages** (enabling `<1 ms` warm hook imports without loading numerical stacks).
+- **Cognitive-routing subsystem (Layer 2 — default package install):** Lightweight pure-NumPy CPU Mixture-of-Experts (`ToolRoutingMoE`), sticky `SessionToolSurface`, and split-conformal abstention gates. Note that `pyproject.toml` currently includes `numpy>=1.22.0` in base dependencies so Layer-2 routing works out of the box, while the security core remains strictly NumPy-free at runtime.
 - **Optional research & server modules (49 lab modules + `[mcp]` / `[server]` / `[ast]` / `[guard-ml]`):** Isolated in separate opt-in dependency profiles so headless security hooks remain minimal and portable across LLM providers.
 
 ### 3.2 Allowlist-First, Fail-Closed Policy Evaluation
@@ -186,6 +186,14 @@ All figures below come from deterministic benchmark scripts in the repository (`
 | **32-Tool Advisor** (`08_frozen_advisor_benchmark.py`) | **100% Recall@4**, **0/120** drops, **56.7%** cache-adj. saved *(session-sticky)*, **4.979 ms** p95 | Keyword advisor: 94.2% Recall@4, 7/120 drops, 46.6% saved, 0.194 ms p95 | **+5.8 pt recall**, **+10.1 pt** cache-adj. savings, ~25.7× slower *(per-turn narrowing saved only 3.9%)* |
 | **Colony Routing** *(Negative / Mixed Result)* | 86.7% strict / 70.0% held-out, **0/50** missed esc., 13/70 false esc., 1,271 µs p95 | Tuned rules: **89.2%** strict / **100%** held-out, 4/50 missed esc., **4/70** false esc., **25.3 µs** p95 | Zero missed escalations, but lower strict accuracy and ~50× slower than tuned rules |
 | **Payload-Size Scaling** | Small shell / 10-line diff: **0.14–0.70 ms** p95 | 100-line diff: **5.5 ms** p95; 480-line diff: **31.5 ms** p95 / **90.8 ms** p99 | Still negligible vs. 5–20 s LLM turns, though `<2 ms` applies to small inputs/warm daemon HTTP (`0.7 ms`), not max-size diffs |
+
+**Latency by Execution Mode**
+
+| Execution Mode | Scope Measured | Observed Latency |
+| :--- | :--- | :--- |
+| **Warm in-process decision engine** | `decide()` / hook library call (small shell/diff) | **0.07–0.70 ms** (`31.5 ms` p95 at 480-line AST diff) |
+| **Warm local daemon / IPC** | Transport (`HTTP/1.1` or `TCP`) + SHA256 + evaluation | **~0.7–0.9 ms** (OpenClaw HTTP) / **~8.7 ms** p50 (TCP + disk log) |
+| **Cold host subprocess hook** | Full process spawn + evaluation per tool call | **~400 ms** (Python CLI) / **<15 ms** (Rust `aetheris-gate` shim) |
 
 ---
 
@@ -287,7 +295,21 @@ MicroBrains welcomes engineering review and joint empirical evaluation from team
 
 ---
 
-## 11. Conclusion
+## 11. Architectural Comparison with Existing Approaches
+
+The table below highlights structural differences between MicroBrains and established categories of agent tooling rather than claiming universal superiority outside benchmarked workloads:
+
+| Approach | Primary Mechanism | Cache / Token Impact | Structural Security Scope | Typical Per-Step Latency |
+| :--- | :--- | :--- | :--- | :--- |
+| **Rule-based harness hooks** | Regex / static allowlists per harness | None (gating only) | Misses wrapped commands & AST/diff semantics unless custom-coded | `< 1 ms` |
+| **LLM-as-a-judge guards** | Secondary foundation/guardrail LLM inference | Adds prompt + completion tokens per call | Broad semantic coverage, non-deterministic, vulnerable to prompt injection | `500–2,500 ms` |
+| **Offline static linters** (`Bandit`, `Semgrep`) | Repo/file SAST scans (`CI` / batch) | None (post-write feedback loop) | Strong static rules, but lacks live agent tool gating, IFC taint, or credential redaction | `100 ms – seconds` |
+| **Per-turn dynamic tool routers** | Embedding/keyword top-$K$ per prompt | Shrinks per-turn catalog, **invalidates KV prefix cache** (only 3.9% cache-adj. net savings in our benchmark) | Routing only (no shell/AST gate) | `0.2–5 ms` |
+| **Aetheris Microbrains** | Pre-flight AST/shlex/IFC gate + sticky `SessionToolSurface` + Rust/HTTP daemon across 8 hosts | **Sticky cluster pinning** preserves prefix caches (`56.7%` cache-adj. savings in 32-tool sim) + early syntax/hazard veto | Pre-flight syntax, secret-egress, dot-glob, MCP pinning, cron fail-closed (complements OS sandboxes) | `0.1–0.7 ms` in-process / `0.7–8.7 ms` daemon (`~400 ms` cold Python / `<15 ms` Rust) |
+
+---
+
+## 12. Conclusion
 
 Improving autonomous AI agents requires more than larger foundation models—it requires disciplined execution infrastructure around those models. Aetheris Microbrains demonstrates that a lightweight, model-independent cognitive-control layer can enforce specified structural policy boundaries, implement tested mechanisms for detecting and blocking defined secret-exfiltration paths, preserve prompt-cache prefixes via sticky tool surfaces, and integrate cleanly across multiple agent ecosystems with sub-millisecond typical overhead. While preliminary live-agent results show compelling token-reduction signals, the project commits to rigorous, multi-task empirical validation centered on **verified engineering output per unit of compute**.
 
