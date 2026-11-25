@@ -508,10 +508,23 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
     rel_map = {
         "claude": Path(".claude") / "settings.local.json",
         "codex": Path(".codex") / "hooks.json",
-        "hermes": Path(".hermes") / "aetheris_hooks.json",
         "cursor": Path(".cursor") / "hooks.json",
         "qoder": Path(".qoder") / ("settings.local.json" if ws is not None else "settings.json"),
     }
+    if host == "hermes":
+        # Hermes reads hooks from config.yaml (`agent/shell_hooks.py`), not from a
+        # host-specific JSON file — writing ~/.hermes/aetheris_hooks.json registered nothing.
+        from .hosts.hermes_config import install_hermes_hooks
+
+        target, merged = install_hermes_hooks(bundle, dry_run=bool(args.dry_run))
+        if args.dry_run:
+            print(f"DRY RUN - would merge hermes hooks into {target}:")
+            print(json.dumps(merged.get("hooks", {}), indent=2, ensure_ascii=False))
+            return 0
+        events = ", ".join(sorted(merged.get("hooks", {})))
+        print(f"Installed Aetheris Microbrains (hermes) -> {target} [{events}]")
+        print("Restart the gateway or start a new agent process so the hook registers.")
+        return 0
     if getattr(args, "plugin_dir", None):
         target = Path(args.plugin_dir)
     elif host == "devin":
