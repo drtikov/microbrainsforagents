@@ -454,7 +454,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p_inst = sub.add_parser("install", help="Install or verify hooks/bundles for an AI host")
     p_inst.add_argument("host", choices=list(SUPPORTED_HOSTS), help="Target AI host or 'auto'")
-    p_inst.add_argument("--profile", choices=["strict", "dev"], default="dev", help="Policy profile")
+    p_inst.add_argument("--profile", choices=["strict", "dev", "guardrails"], default="dev", help="Policy profile")
     p_inst.add_argument("--shadow", action="store_true", help="Observe-only shadow mode")
     p_inst.add_argument("--auto-allow", action="store_true", help="Emit explicit allow decisions")
     p_inst.add_argument("--auto-approve-escalations", action="store_true", help="Auto-approve non-credential escalations")

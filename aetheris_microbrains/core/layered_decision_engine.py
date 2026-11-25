@@ -293,7 +293,7 @@ class PolicyConfig:
     # enabled, a clean proposed Python diff importing a local project module
     # whose own source contains AST-vetoed constructs escalates (never denies).
     import_taint_enabled: bool = False
-    profile: str = "strict"  # "strict" (default) or "dev" (permits routine dev ops on non-protected files)
+    profile: str = "strict"  # "strict" (default), "dev", or "guardrails" (low-friction block-bad-first)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PolicyConfig:
@@ -345,8 +345,10 @@ class PolicyConfig:
             else:
                 kwargs[k] = v
         cfg = cls(**kwargs)
-        if cfg.profile not in {"strict", "dev"}:
-            raise ValueError(f"Invalid PolicyConfig.profile: {cfg.profile!r} (expected 'strict' or 'dev')")
+        if cfg.profile not in {"strict", "dev", "guardrails"}:
+            raise ValueError(
+                f"Invalid PolicyConfig.profile: {cfg.profile!r} (expected 'strict', 'dev', or 'guardrails')"
+            )
         if cfg.default_on_escalation_timeout not in {"deny", "escalate"}:
             raise ValueError(
                 f"Invalid PolicyConfig.default_on_escalation_timeout: {cfg.default_on_escalation_timeout!r}"
@@ -2672,19 +2674,52 @@ def _tokenize_shell_segment(seg: str) -> List[str]:
 
 
 SAFE_SHELL_COMMANDS: Set[str] = {
-    "ls", "pwd", "echo", "cat", "head", "tail", "wc", "sort", "uniq",
-    "grep", "rg", "find", "which", "where", "whoami", "date",
+    "ls", "pwd", "cd", "echo", "printf", "cat", "head", "tail", "wc", "sort", "uniq",
+    "grep", "rg", "find", "which", "where", "whoami", "id", "uname", "hostname", "date",
+    "stat", "file", "tree", "dirname", "basename", "realpath", "readlink",
+    "diff", "comm", "cmp", "nl", "less", "more", "bat", "fd", "exa", "eza",
+    "du", "df", "true", "false", "test", "[",
+    "md5sum", "sha256sum", "shasum", "cksum", "strings", "ps", "pgrep", "sleep",
+    "rev", "fold", "fmt", "paste", "expand", "unexpand",
     "clang-format", "black", "ruff", "mypy", "pytest",
     "jq", "yq", "column", "cut", "tr",
 }
 SAFE_DEV_SHELL_COMMANDS: Set[str] = {
-    "mkdir", "touch", "cp", "mv", "rm", "rmdir", "npm", "pnpm", "yarn", "cargo", "pip", "poetry",
+    "mkdir", "touch", "cp", "mv", "rm", "rmdir",
+    "npm", "pnpm", "yarn", "cargo", "pip", "poetry", "uv",
+    "flake8", "isort", "pylint", "pyright", "ty", "bandit", "tox", "nox",
+    "node", "npx", "bun", "deno", "tsc", "eslint", "prettier", "vitest", "jest",
+    "biome", "tsx", "vite", "next", "turbo", "webpack", "esbuild", "rollup", "swc",
+    "go", "gofmt", "golangci-lint", "rustc", "rustfmt", "clippy",
+    "make", "cmake", "ninja", "just", "bazel", "gradle", "gradlew", "mvn", "mvnw",
+    "dotnet", "javac", "java", "gcc", "g++", "clang", "clang++", "zig", "swift",
+    "ruby", "bundle", "rspec", "php", "composer", "mix", "elixir",
 }
 SAFE_GIT_SUBCOMMANDS: Set[str] = {
     "status", "log", "diff", "branch", "show", "rev-parse", "describe", "ls-files",
+    "rev-list", "shortlog", "blame", "grep", "ls-tree", "cat-file",
+    "for-each-ref", "symbolic-ref", "merge-base", "name-rev", "reflog", "check-ignore",
 }
 SAFE_DEV_GIT_SUBCOMMANDS: Set[str] = {
     "add", "commit", "checkout", "switch", "stash", "fetch", "pull", "merge", "tag", "clean",
+}
+_GUARDRAILS_ESCALATE_COMMANDS: Set[str] = {
+    # Network / egress
+    "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp",
+    "rsync", "ftp", "telnet", "iwr", "irm", "invoke-webrequest", "invoke-restmethod",
+    # Privilege / system / permissions
+    "sudo", "doas", "su", "chmod", "chown", "chgrp", "mount", "umount",
+    "systemctl", "service", "crontab", "at", "kill", "killall", "pkill",
+    "shutdown", "reboot", "iptables", "ufw", "useradd", "usermod", "passwd",
+    # Destructive / recursive delete / raw disk
+    "rm", "dd", "shred", "truncate", "wipefs", "fdisk", "parted", "mkfs",
+    # Shell / interpreter inline exec & wrappers
+    "sh", "bash", "zsh", "dash", "fish", "ksh", "cmd", "powershell", "pwsh",
+    "eval", "exec", "xargs", "env", "strace", "unbalanced_shell_quotes", "env_assignment",
+    # Non-allowlisted VCS / package / runtime / container / dangerous-flag tool invocations
+    "git", "pip", "pip3", "npm", "pnpm", "yarn", "python", "python3", "node",
+    "gh", "docker", "podman", "kubectl",
+    "sed", "awk", "gawk", "mawk", "nawk", "find", "rg", "sort", "yq", "clang-format", "mypy",
 }
 
 _SAFE_ANALYTICAL_TOOLS: Set[str] = {
@@ -3010,8 +3045,37 @@ def _is_safe_dev_pkg_command(exe: str, args_lower: List[str]) -> bool:
 def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Strict Layer 1 allowlist check for a parsed command executable and its arguments."""
     cfg = policy or DEFAULT_POLICY
-    is_dev = getattr(cfg, "profile", "strict") == "dev"
+    is_dev = getattr(cfg, "profile", "strict") in {"dev", "guardrails"}
     args_lower = [a.lower() for a in args]
+    if exe == "sed":
+        if _is_inplace_mutating_text_tool(exe, args):
+            return False
+        if any(
+            a_low in {"-f", "--file"} or a_low.startswith(("--file=", "-f"))
+            for a_low in args_lower
+        ):
+            return False
+        if any(
+            not a.startswith("-")
+            and (";e" in a_low or bool(re.search(r"/[a-z0-9]*e(?:$|;|\s)", a_low)))
+            for a, a_low in zip(args, args_lower)
+        ):
+            return False
+        return True
+    if exe in {"awk", "gawk", "mawk", "nawk"}:
+        if _is_inplace_mutating_text_tool(exe, args):
+            return False
+        if any(
+            a_low in {"-f", "--file"} or a_low.startswith(("--file=", "-f"))
+            for a_low in args_lower
+        ):
+            return False
+        if any(
+            not a.startswith("-") and ("getline" in a_low or "|" in a)
+            for a, a_low in zip(args, args_lower)
+        ):
+            return False
+        return True
     if exe in SAFE_SHELL_COMMANDS:
         if exe == "find" and any(
             a in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
@@ -3088,19 +3152,78 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             return not has_rec
         if exe in {"pip", "npm", "pnpm", "yarn"}:
             return _is_safe_dev_pkg_command(exe, args_lower)
+        if exe == "node":
+            if any(
+                a in {"-e", "--eval", "-p", "--print"}
+                or a.startswith(("--eval=", "--print="))
+                for a in args_lower
+            ):
+                return False
         return True
+    if exe == "gh":
+        if not args_lower:
+            return True
+        if args_lower[0] in {"status", "search", "--version"}:
+            return True
+        return tuple(args_lower[:2]) in {
+            ("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
+            ("issue", "view"), ("issue", "list"), ("issue", "status"),
+            ("run", "view"), ("run", "list"), ("repo", "view"),
+        }
+    if exe in {"docker", "podman"}:
+        if not args_lower:
+            return True
+        if args_lower[0] in {"ps", "images", "logs", "inspect", "version", "info", "stats", "top", "port"}:
+            return True
+        return tuple(args_lower[:2]) in {
+            ("network", "ls"), ("volume", "ls"), ("compose", "ps"), ("compose", "logs"),
+        }
+    if exe == "kubectl":
+        if not args_lower:
+            return True
+        return args_lower[0] in {"get", "describe", "logs", "version", "cluster-info", "api-resources", "explain", "top"}
     if exe == "git":
         if not args_lower:
             return True
         if any(
-            a in {"-c", "-o", "--output", "--open-files-in-pager", "--ext-diff", "--textconv"}
-            or a.startswith(("--exec", "--output=", "--open-files-in-pager="))
-            for a in args_lower
+            low_a in {"-o", "--output", "--open-files-in-pager", "--ext-diff", "--textconv"}
+            or low_a.startswith(("--exec", "--output=", "--open-files-in-pager="))
+            for low_a in args_lower
         ):
             return False
-        subcmd = args_lower[0]
+        idx = 0
+        while idx < len(args):
+            raw_a = args[idx]
+            low_a = args_lower[idx]
+            if raw_a == "-c" or (raw_a.startswith("-c") and len(raw_a) > 2) or low_a.startswith("--config-env"):
+                return False
+            if raw_a == "-C":
+                if idx + 1 >= len(args) or is_protected_path(args[idx + 1], cfg):
+                    return False
+                idx += 2
+            elif raw_a.startswith("-C") and len(raw_a) > 2:
+                if is_protected_path(raw_a[2:], cfg):
+                    return False
+                idx += 1
+            elif low_a in {"--git-dir", "--work-tree"}:
+                if idx + 1 >= len(args) or is_protected_path(args[idx + 1], cfg):
+                    return False
+                idx += 2
+            elif low_a.startswith(("--git-dir=", "--work-tree=")):
+                if is_protected_path(raw_a.split("=", 1)[1], cfg):
+                    return False
+                idx += 1
+            elif raw_a in {"-p", "-P"} or low_a in {"--paginate", "--no-pager", "--bare"}:
+                idx += 1
+            else:
+                break
+        sub_args = args[idx:]
+        sub_args_lower = args_lower[idx:]
+        if not sub_args_lower:
+            return True
+        subcmd = sub_args_lower[0]
         if subcmd == "branch":
-            for raw_a in args[1:]:
+            for raw_a in sub_args[1:]:
                 low_a = raw_a.lower()
                 if low_a in {"-d", "--delete", "-f", "--force", "-m", "--move", "-c", "--copy", "--unset-upstream", "--edit-description"}:
                     return False
@@ -3110,8 +3233,8 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
                     return False
             if not is_dev:
                 list_flags = {"-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"}
-                has_non_flag = any(not a.startswith("-") for a in args[1:])
-                has_list_flag = any(a.lower() in list_flags or a.lower().startswith(("--contains=", "--merged=", "--points-at=")) for a in args[1:])
+                has_non_flag = any(not a.startswith("-") for a in sub_args[1:])
+                has_list_flag = any(a.lower() in list_flags or a.lower().startswith(("--contains=", "--merged=", "--points-at=")) for a in sub_args[1:])
                 if has_non_flag and not has_list_flag:
                     return False
             return True
@@ -3119,28 +3242,28 @@ def _is_command_allowlisted(exe: str, args: List[str], policy: Optional[PolicyCo
             return True
         if is_dev and subcmd in SAFE_DEV_GIT_SUBCOMMANDS:
             if subcmd == "clean":
-                if any(a.startswith("-") and not a.startswith("--") and any(ch in a for ch in "fdxX") for a in args_lower[1:]):
+                if any(a.startswith("-") and not a.startswith("--") and any(ch in a for ch in "fdxX") for a in sub_args_lower[1:]):
                     return False
-                if any(a in {"--force", "-f", "-d", "-x", "-X"} for a in args_lower[1:]):
+                if any(a in {"--force", "-f", "-d", "-x", "-X"} for a in sub_args_lower[1:]):
                     return False
             elif subcmd == "checkout":
-                for low_a in args_lower[1:]:
+                for low_a in sub_args_lower[1:]:
                     if low_a in {"--", ".", "./", "-f", "--force", "--ours", "--theirs"}:
                         return False
                     if low_a.startswith("-") and not low_a.startswith("--") and "f" in low_a[1:]:
                         return False
             elif subcmd == "switch":
-                for raw_a in args[1:]:
+                for raw_a in sub_args[1:]:
                     low_a = raw_a.lower()
                     if low_a in {"-f", "--force", "--discard-changes"} or raw_a == "-C":
                         return False
                     if raw_a.startswith("-") and not raw_a.startswith("--") and ("f" in raw_a[1:] or "C" in raw_a[1:]):
                         return False
             elif subcmd == "stash":
-                if len(args_lower) >= 2 and args_lower[1] in {"drop", "clear"}:
+                if len(sub_args_lower) >= 2 and sub_args_lower[1] in {"drop", "clear"}:
                     return False
             elif subcmd == "tag":
-                for low_a in args_lower[1:]:
+                for low_a in sub_args_lower[1:]:
                     if low_a in {"-d", "--delete", "-f", "--force"}:
                         return False
                     if low_a.startswith("-") and not low_a.startswith("--") and ("d" in low_a[1:] or "f" in low_a[1:]):
@@ -5225,13 +5348,26 @@ def decide(
                 )
             if not sh_res.get("allowlisted", False):
                 unrec = sh_res.get("unrecognized_commands", [])
-                return _finish(
-                    "escalate",
-                    unrec[0] if unrec else "unrecognized_shell_command",
-                    ["allow", "deny"],
-                    "layer1_unrecognized_shell_command_escalate",
-                    1,
-                )
+                profile_low = str(cfg.profile or "strict").strip().lower()
+                if profile_low == "guardrails":
+                    high_risk_unrec = [
+                        cmd_tok
+                        for cmd_tok in unrec
+                        if (
+                            str(cmd_tok).lower() in _GUARDRAILS_ESCALATE_COMMANDS
+                            or str(cmd_tok).lower().startswith(("mkfs.", "powershell"))
+                        )
+                    ]
+                else:
+                    high_risk_unrec = unrec
+                if high_risk_unrec or profile_low != "guardrails":
+                    return _finish(
+                        "escalate",
+                        (high_risk_unrec[0] if high_risk_unrec else (unrec[0] if unrec else "unrecognized_shell_command")),
+                        ["allow", "deny"],
+                        "layer1_unrecognized_shell_command_escalate",
+                        1,
+                    )
 
         hunk_only_checked = False
         if diff_text is not None:
@@ -5252,7 +5388,7 @@ def decide(
                 diff_suppressed_findings.extend(diff_res["suppressed_findings"])
             if not diff_res["security_clean"]:
                 if (
-                    str(cfg.profile or "strict").strip().lower() == "dev"
+                    str(cfg.profile or "strict").strip().lower() in {"dev", "guardrails"}
                     and diff_res["findings"]
                     and all(f in _DEV_ESCALATE_ONLY_AST_FINDINGS for f in diff_res["findings"])
                 ):
@@ -5288,7 +5424,7 @@ def decide(
                         "layer1_strict_ast_allowlist_escalate",
                         1,
                     )
-            if diff_suppressed_findings and str(cfg.profile or "strict").strip().lower() != "dev":
+            if diff_suppressed_findings and str(cfg.profile or "strict").strip().lower() not in {"dev", "guardrails"}:
                 return _finish(
                     "escalate",
                     f"suppressed:{diff_suppressed_findings[0]['rule']}",

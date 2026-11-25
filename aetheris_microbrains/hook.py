@@ -315,7 +315,7 @@ def _resolve_hook_policy(
     else:
         policy = PolicyConfig()
     resolved_profile = str(profile or os.getenv("AETHERIS_PROFILE") or "").strip().lower()
-    if resolved_profile in {"strict", "dev"}:
+    if resolved_profile in {"strict", "dev", "guardrails"}:
         policy.profile = resolved_profile
     if strict_ast:
         policy.strict_ast_allowlist = True
@@ -1579,9 +1579,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--profile",
-            choices=["strict", "dev"],
+            choices=["strict", "dev", "guardrails"],
             default=str(os.getenv("AETHERIS_PROFILE") or "").strip().lower() or None,
-            help="Policy profile (strict or dev; or set AETHERIS_PROFILE)",
+            help="Policy profile (strict, dev, or guardrails; or set AETHERIS_PROFILE)",
         )
         parser.add_argument(
             "--policy",
