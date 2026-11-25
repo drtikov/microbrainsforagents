@@ -338,9 +338,11 @@ _PATH_KEYS = (
     "notebook_path",
     "path",
     "Path",
+    "target_file",
     "TargetFile",
     "AbsolutePath",
     "SearchPath",
+    "target_directory",
     "SearchDirectory",
     "DirectoryPath",
 )
@@ -397,16 +399,31 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "apply_patch",
         "replace_file_content",
         "multi_replace_file_content",
+        "strreplace",
+        "str_replace",
+        "search_replace",
     }:
         tool_name = "edit_file"
-    elif tool_lower in {"write", "write_file", "fs_write", "file_write", "repo_write", "fwrite", "write_to_file"}:
+    elif tool_lower in {"write", "write_file", "writefile", "fs_write", "file_write", "repo_write", "fwrite", "write_to_file"}:
         tool_name = "write_file"
-    elif tool_lower in {"read", "read_file", "fs_read", "file_read", "repo_read", "view_file"}:
+    elif tool_lower in {"read", "read_file", "readfile", "readlints", "read_lints", "fs_read", "file_read", "repo_read", "view_file"}:
         tool_name = "read_file"
-    elif tool_lower in {"grep", "grep_search", "search_code", "find_by_name"}:
+    elif tool_lower in {
+        "grep",
+        "ripgrep",
+        "grep_search",
+        "search_code",
+        "find_by_name",
+        "semanticsearch",
+        "semantic_search",
+        "codebasesearch",
+        "codebase_search",
+    }:
         tool_name = "search_code"
-    elif tool_lower in {"glob", "list_dir"}:
+    elif tool_lower in {"glob", "list_dir", "ls", "listdir", "filesearch"}:
         tool_name = "list_dir"
+    elif tool_lower in {"delete", "deletefile", "delete_file"}:
+        tool_name = "delete_file"
     else:
         tool_name = tool_raw
 
@@ -502,16 +519,25 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             diff = str(tool_input.get("ReplacementContent") or "")
         elif (
             diff is None
-            and ("content" in tool_input or "Content" in tool_input or "CodeContent" in tool_input)
+            and (
+                "content" in tool_input
+                or "contents" in tool_input
+                or "Content" in tool_input
+                or "CodeContent" in tool_input
+            )
             and clean_name in {"write_file", "edit_file", "repo_write", "str_replace_editor"}
         ):
             raw_c = (
                 tool_input.get("content")
                 if tool_input.get("content") is not None
                 else (
-                    tool_input.get("Content")
-                    if tool_input.get("Content") is not None
-                    else tool_input.get("CodeContent")
+                    tool_input.get("contents")
+                    if tool_input.get("contents") is not None
+                    else (
+                        tool_input.get("Content")
+                        if tool_input.get("Content") is not None
+                        else tool_input.get("CodeContent")
+                    )
                 )
             )
             diff = str(raw_c or "")

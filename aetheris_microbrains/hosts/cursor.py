@@ -98,10 +98,18 @@ def to_kernel_payload(payload: Dict[str, Any], event: str) -> Dict[str, Any]:
     t_low = t.lower()
     if t_low == "shell":
         out["tool_name"] = "Bash"
-    elif t_low == "write":
+    elif t_low in {"write", "writefile"}:
         out["tool_name"] = "Write"
-    elif t_low == "edit":
+    elif t_low in {"edit", "editfile", "strreplace", "str_replace", "search_replace"}:
         out["tool_name"] = "Edit"
+    elif t_low in {"read", "readfile", "readlints", "read_lints"}:
+        out["tool_name"] = "Read"
+    elif t_low in {"ls", "listdir", "list_dir", "glob", "filesearch"}:
+        out["tool_name"] = "Glob"
+    elif t_low in {"grep", "ripgrep", "semanticsearch", "semantic_search", "codebasesearch", "codebase_search"}:
+        out["tool_name"] = "Grep"
+    elif t_low in {"delete", "deletefile", "delete_file"}:
+        out["tool_name"] = "delete_file"
     elif t.startswith("MCP:"):
         out["tool_name"] = "mcp__" + t[4:].replace(":", "__").replace("/", "__")
     inp = payload.get("tool_input")

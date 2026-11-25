@@ -567,6 +567,21 @@ def _policy_protected_patterns(policy: Optional[PolicyConfig]) -> Tuple[str, ...
     return tuple(str(p) for p in cfg.protected_patterns) + tuple(str(p) for p in extra)
 
 
+_CURSOR_WORKSPACE_SUBDIRS: Set[str] = {"projects", "worktrees"}
+
+
+def _has_non_workspace_cursor_segment(segments: List[str], has_traversal: bool) -> bool:
+    """True when any ``.cursor`` path segment is not a workspace data dir (``projects``/``worktrees``)."""
+    for idx, seg in enumerate(segments):
+        if seg != ".cursor":
+            continue
+        if has_traversal:
+            return True
+        if idx + 2 >= len(segments) or segments[idx + 1] not in _CURSOR_WORKSPACE_SUBDIRS:
+            return True
+    return False
+
+
 @lru_cache(maxsize=4096)
 def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
     normalized = raw.replace("\\", "/").strip().lower()
@@ -659,6 +674,13 @@ def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
             for idx in range(max(0, len(raw_segments) - plen + 1)):
                 if raw_segments[idx : idx + plen] == pat_segs:
                     return True
+        elif clean_pat == ".cursor":
+            has_traversal = ".." in raw_segments
+            if (
+                _has_non_workspace_cursor_segment(norm_segments, has_traversal)
+                or _has_non_workspace_cursor_segment(raw_segments, has_traversal)
+            ):
+                return True
         elif clean_pat.startswith("."):
             if clean_pat in norm_segments or clean_pat in raw_segments:
                 return True

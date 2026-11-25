@@ -179,3 +179,76 @@ def test_cursor_cli_subprocess_and_installer(tmp_path, monkeypatch, capsys):
     iso = verify_core_isolation()
     assert iso["ok"] is True
     assert iso["numpy_violations"] == []
+
+
+def test_cursor_projects_worktrees_and_native_tools():
+    # Workspace/worktree paths under ~/.cursor/projects and ~/.cursor/worktrees must be allowed
+    for p in (
+        {"_cursor_event": "preToolUse", "tool_name": "Read", "tool_input": {"path": r"C:\Users\me\.cursor\projects\myrepo\src\app.py"}},
+        {"_cursor_event": "beforeReadFile", "file_path": r"C:\Users\me\.cursor\projects\myrepo\terminals\1.txt", "content": "ok"},
+        {"_cursor_event": "preToolUse", "tool_name": "Read", "tool_input": {"path": "~/.cursor/worktrees/myrepo/wt1/main.py"}},
+    ):
+        v = evaluate_hook_payload(p, host="cursor", profile="dev", log_decisions=False)
+        assert v["decision"] == "allow", p
+        assert v["exit_code"] == 0, p
+        assert v["hookSpecificOutput"]["permission"] == "allow", p
+
+    # Control-plane & secret paths (outside or nested inside .cursor/projects) must stay denied
+    for p in (
+        {"_cursor_event": "preToolUse", "tool_name": "Read", "tool_input": {"path": ".cursor/hooks.json"}},
+        {"_cursor_event": "beforeReadFile", "file_path": r"C:\Users\me\.cursor\projects\myrepo\.cursor\hooks.json", "content": "{}"},
+        {"_cursor_event": "beforeReadFile", "file_path": r"C:\Users\me\.cursor\projects\myrepo\.env", "content": "SECRET=1"},
+        {"_cursor_event": "beforeReadFile", "file_path": r"C:\Users\me\.cursor\projects\..\hooks.json", "content": "{}"},
+    ):
+        v = evaluate_hook_payload(p, host="cursor", profile="dev", log_decisions=False)
+        assert v["exit_code"] == 2, p
+        assert v["hookSpecificOutput"]["permission"] == "deny", p
+
+    # Safe native Cursor preToolUse tools
+    for p in (
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {"path": "src/app.py", "old_string": "x = 1", "new_string": "x = 2"},
+        },
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "Write",
+            "tool_input": {"path": "src/app.py", "contents": "x = 2\n"},
+        },
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "LS",
+            "tool_input": {"target_directory": "src"},
+        },
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "SemanticSearch",
+            "tool_input": {"query": "auth"},
+        },
+    ):
+        v = evaluate_hook_payload(p, host="cursor", profile="dev", log_decisions=False)
+        assert v["decision"] == "allow", p
+        assert v["exit_code"] == 0, p
+
+    # Malicious AST or protected path edits via StrReplace / Write(contents) remain denied
+    for p in (
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {"path": "src/app.py", "old_string": "x = 1", "new_string": "eval(user_input)"},
+        },
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "Write",
+            "tool_input": {"path": ".env", "contents": "SECRET=1\n"},
+        },
+        {
+            "_cursor_event": "preToolUse",
+            "tool_name": "Write",
+            "tool_input": {"path": ".cursor/hooks.json", "contents": "{}\n"},
+        },
+    ):
+        v = evaluate_hook_payload(p, host="cursor", profile="dev", log_decisions=False)
+        assert v["decision"] == "deny", p
+        assert v["exit_code"] == 2, p
