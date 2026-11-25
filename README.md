@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -43,6 +43,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [Cursor Integration (Native Hooks v2 + Warm Rust Shim)](#cursor-integration-native-hooks-v2--warm-rust-shim)
 - [Devin Integration (Native Hook v1 + Auto-Detect)](#devin-integration-native-hook-v1--auto-detect)
 - [Cline Integration (Native `.clinerules/hooks` + Warm Rust Shim)](#cline-integration-native-clineruleshooks--warm-rust-shim)
+- [MiniMax Code (`mcode`) Integration (Native `.minimax/hooks.json` + CLI)](#minimax-code-mcode-integration-native-minimaxhooksjson--cli)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhandshooksjson--python-securityanalyzer)
 - [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
@@ -90,6 +91,7 @@ Microbrains works alongside any AI agent or framework:
 | **Cursor** | **Cursor** | **Hook v2 Tested** | **Native Hooks v2 + CLI** (`aetheris install cursor` / `--host cursor`) | 8-event `hooks.json` (`preToolUse`/`postToolUse` matcher-scoped, `beforeShellExecution`/`afterShellExecution`, `beforeMCPExecution`/`afterMCPExecution`, `beforeReadFile`, `afterFileEdit`), `failClosed` pre-gates, `--replace-tool-output` DLP, `conversation_id` IFC, and auto `aetheris-gate` shim. |
 | **Devin** | **Devin** | **Hook & Installer Tested** | **Native Hook v1 + CLI** (`aetheris install devin` / `--host devin` / `--host auto`) | `.devin/hooks.v1.json` (`PreToolUse`/`PostToolUse` `decision: approve\|block` + exit 2), `DEVIN_PROJECT_DIR` auto-detect, structured `tool_response` DLP `additionalContext` alerts, and `.devin/` self-protection. |
 | **Cline** | **Cline** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install cline` / `--host cline`) | `.clinerules/hooks/` (`PreToolUse`/`PostToolUse` + `.ps1` scripts), `cancel: true/false`, `SEARCH/REPLACE` diff AST inspection, `contextModification` DLP warnings, and `.clinerules/` protection. |
+| **MiniMax Code (`mcode`)** | **MiniMax Code** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install mcode` / `--host mcode`) | `.minimax/hooks.json` (`PreToolUse`/`PostToolUse`, `commandWindows`, `timeout: 10`), lowercase native matcher, silent allow / `ask` / exit 2 deny, `additionalContext` DLP, and `.minimax/` protection. |
 | **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
@@ -117,7 +119,7 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <claude|cursor|devin|cline|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
+aetheris install <claude|cursor|devin|cline|mcode|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
@@ -246,6 +248,23 @@ Use Microbrains with **stock VS Code Cline** without forking or rebuilding the e
 | **SWE-bench Lite (300 GitHub issues)** | **71.7%** gold allow · **1.0%** security deny · **0** AST syntax FPs · **60/60** mutations caught | **-36.7% schema tokens · 100.0% mutation catch** |
 
 > *Note:* `.clinerules/hooks/` enforces local pre/post gating & DLP (`13/13` live smoke probes passed); schema-token narrowing (`-36.7%` to `-81.0%`) applies when paired with `narrow_tool_surface` / `aetheris-mcp-proxy`. See [Cline Benchmarks](#9-cline-local-verification--engine-benchmark-summary).
+
+---
+
+## MiniMax Code (`mcode`) Integration (Native `.minimax/hooks.json` + CLI)
+
+Native pre/post enforcement for **MiniMax Code (MCode)** (`mcode_pretooluse_v1` via [`hosts/mcode.py`](aetheris_microbrains/hosts/mcode.py)):
+
+- **1-Command Install:**
+  ```bash
+  pip install -e .
+  aetheris install mcode --self-test
+  # User-level (~/.minimax/hooks.json or $MINIMAX_DATA_DIR/hooks.json):
+  aetheris install mcode --profile guardrails
+  # Or project-level (.minimax/hooks.json):
+  aetheris install mcode --workspace . --profile guardrails
+  ```
+- **MCode-Native Details:** Uses lowercase MCode tool names (`bash|read|write|edit|grep|glob|web_fetch|web_search|task`), emits silent exit `0` on allow (so MCode's own approval prompts stay intact), `permissionDecision: "ask"` on escalations, and `exit 2` + `permissionDecision: "deny"` on blocks. Populates `commandWindows` and `timeout: 10`, strips UTF-8 BOMs from stdin, warns on PostToolUse secrets via `additionalContext` (detect-only; MCode does not replace tool outputs), and protects `.minimax/` configs. *(Enable project hooks once in Settings -> Hooks -> Project; takes effect on the next turn.)*
 
 ---
 

@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -97,6 +97,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("devin")
     if (ws / ".clinerules").exists() or (ws / ".cline").exists() or (home / "Documents" / "Cline").exists():
         detected.append("cline")
+    if (home / ".minimax").exists() or (ws / ".minimax").exists():
+        detected.append("mcode")
     return detected
 
 
@@ -175,6 +177,45 @@ def _build_generic_hook_bundle(
                     {
                         "matcher": devin_matcher,
                         "hooks": [{"type": "command", "command": post_cmd, "timeout": 10}],
+                    }
+                ],
+            }
+        }
+    if host == "mcode":
+        from .hosts.mcode import MCODE_TOOL_MATCHER
+
+        mcode_post_exe, mcode_post_args = build_hook_command(
+            "mcode", event_args=["--event", "post-tool-use"], extra_args=extra, use_rust_shim=use_rust_shim
+        )
+        mcode_post_cmd = " ".join([f'"{mcode_post_exe}"', *mcode_post_args])
+        return {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": MCODE_TOOL_MATCHER,
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "name": "Aetheris Microbrains gate",
+                                "command": pre_cmd,
+                                "commandWindows": pre_cmd,
+                                "timeout": 10,
+                            }
+                        ],
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": MCODE_TOOL_MATCHER,
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "name": "Aetheris Microbrains post-tool audit",
+                                "command": mcode_post_cmd,
+                                "commandWindows": mcode_post_cmd,
+                                "timeout": 10,
+                            }
+                        ],
                     }
                 ],
             }
@@ -397,6 +438,40 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("CLINE SELF-TEST PASSED" if ok else "CLINE SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "mcode" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        sh_deny = evaluate_hook_payload(
+            {"tool_name": "bash", "tool_input": {"command": "rm -rf /"}},
+            host="mcode",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"tool_name": "bash", "tool_input": {"command": "git status"}},
+            host="mcode",
+            log_decisions=False,
+        )
+        todo_allow = evaluate_hook_payload(
+            {"tool_name": "todowrite", "tool_input": {"todos": []}},
+            host="mcode",
+            log_decisions=False,
+        )
+        cfg_write = evaluate_hook_payload(
+            {"tool_name": "write", "tool_input": {"file_path": ".minimax/hooks.json", "content": "{}"}},
+            host="mcode",
+            log_decisions=False,
+        )
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and (sh_deny.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny"
+            and sh_allow.get("exit_code") == 0
+            and todo_allow.get("exit_code") == 0
+            and todo_allow.get("decision") == "allow"
+            and cfg_write.get("exit_code") == 2
+        )
+        print("MCODE SELF-TEST PASSED" if ok else "MCODE SELF-TEST FAILED")
+        return 0 if ok else 1
+
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload
 
@@ -528,7 +603,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
 
     no_rust = bool(getattr(args, "no_rust_shim", False))
     effective_rust_shim = False if no_rust else (
-        bool(args.use_rust_shim) or (host in {"cursor", "devin", "cline"} and bool(find_aetheris_gate()))
+        bool(args.use_rust_shim) or (host in {"cursor", "devin", "cline", "mcode"} and bool(find_aetheris_gate()))
     )
     if host == "cline":
         from .core.rust_shim import build_hook_command
@@ -613,9 +688,15 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         target = Path(args.plugin_dir)
     elif host == "devin":
         target = (ws / ".devin" / "hooks.v1.json") if ws is not None else devin_user_rel
+    elif host == "mcode":
+        minimax_data = str(os.environ.get("MINIMAX_DATA_DIR") or "").strip()
+        mcode_user = (Path(minimax_data) / "hooks.json") if minimax_data else (Path.home() / ".minimax" / "hooks.json")
+        target = (ws / ".minimax" / "hooks.json") if ws is not None else mcode_user
     else:
         target = base_dir / rel_map[host]
     merged_bundle = dict(bundle)
+    if host == "mcode" and ws is None and not getattr(args, "plugin_dir", None):
+        merged_bundle["enabled"] = True
     if target.is_file():
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
@@ -646,6 +727,11 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
                         "which can cause double evaluation unless consolidated with `--host auto`."
                     )
                     break
+    if host == "mcode":
+        print(
+            "Note: For project-level .minimax/hooks.json, enable project hooks in Settings -> Hooks -> Project; "
+            "hook changes take effect on the next turn."
+        )
     if host == "cursor":
         if effective_rust_shim:
             print(

@@ -630,6 +630,10 @@ def evaluate_hook_payload(
         from .hosts.cline import to_kernel_payload as _cline_to_kernel_payload
 
         payload = _cline_to_kernel_payload(payload)
+    elif resolved_host == "mcode" and isinstance(payload, dict):
+        from .hosts.mcode import to_kernel_payload as _mcode_to_kernel_payload
+
+        payload = _mcode_to_kernel_payload(payload)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -1155,6 +1159,10 @@ def evaluate_post_tool_use_payload(
         from .hosts.cline import to_kernel_payload as _cline_to_kernel_payload
 
         payload = _cline_to_kernel_payload(payload)
+    elif resolved_host == "mcode" and isinstance(payload, dict):
+        from .hosts.mcode import to_kernel_payload as _mcode_to_kernel_payload
+
+        payload = _mcode_to_kernel_payload(payload)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
@@ -1755,7 +1763,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
         session_state_path = _resolve_session_state_path(args.session_state)
 
-        raw = sys.stdin.read().strip()
+        raw = sys.stdin.read().lstrip("\ufeff").strip()
         if not raw and event_kind not in _LIFECYCLE_EVENTS:
             if shadow_mode:
                 _append_shadow_error_journal(
