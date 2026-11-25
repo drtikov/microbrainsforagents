@@ -239,6 +239,14 @@ Use Microbrains with **stock VS Code Cline** without forking or rebuilding the e
   Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (or `~/Documents/Cline/Rules/Hooks/` without `--workspace .`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
 - **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
 
+| Benchmark (Local Cline Env, v0.7.6) | Measured Result | Benefit |
+| :--- | :--- | :--- |
+| **Anti-evasion security (`examples/10`)** | **22/22** TPR · **0/12** FPR · `0.47 ms` p50 / `4.15 ms` p95 | **100.0% attacks blocked · 0.0% benign FP** |
+| **25-step tool-routing & gate** | `12,312` vs `64,800` tokens · **0** FN / **0** FP (baseline: 8 FN, 4 FP) · `2.24 ms` p95 | **-81.0% schema tokens · 100.0% FN/FP drop** |
+| **SWE-bench Lite (300 GitHub issues)** | **71.7%** gold allow · **1.0%** security deny · **0** AST syntax FPs · **60/60** mutations caught | **-36.7% schema tokens · 100.0% mutation catch** |
+
+> *Note:* `.clinerules/hooks/` enforces local pre/post gating & DLP (`13/13` live smoke probes passed); schema-token narrowing (`-36.7%` to `-81.0%`) applies when paired with `narrow_tool_surface` / `aetheris-mcp-proxy`. See [Cline Benchmarks](#9-cline-local-verification--engine-benchmark-summary).
+
 ---
 
 ## ZCode Integration (One-Click Marketplace Plugin + CLI Installer)
@@ -1146,6 +1154,17 @@ Measured statelessly from the repo clone through the exact invocation path used 
 | **In-process engine (`n=240`, no spawn)** | **0.35 ms** | **1.33 ms** | **0.68 ms** | **~1,462/s** |
 
 > **Scope note:** Bare `python -I -c pass` process spawn (`52–79 ms`) plus interpreter/module startup accounts for nearly all fresh-process latency while the decision itself stays `<1 ms` (`0.35 ms` p50 in-process). Under load, fresh-process runs ranged `200–320 ms` mean (up to `~600 ms` p95). In default `--session-state auto` mode, repeated identical escalations are approve-onced or flood-vetoed.
+
+### 9. Cline Local Verification & Engine Benchmark Summary
+
+Measured locally from the installed `aetheris-microbrains` v0.7.6 environment alongside `13/13` live Cline API smoke checks (`deny` on `.env`/`sk_live_`/`rm -rf /`/`curl | sh`/`eval()`, `allow` on `git status`/`README.md`, `[REDACTED_AWS_KEY]` DLP). See [Cline Integration](#cline-integration-native-clineruleshooks--warm-rust-shim) for 1-command `.clinerules/hooks/` setup.
+
+| Suite / Metric | Microbrains | Keyword Baseline / Unfiltered | Benefit |
+| :--- | ---: | ---: | :--- |
+| **25-Step Schema Tokens** | **12,312** | 64,800 | **-81.0% tokens** |
+| **25-Step Gate Accuracy** | **0 FN · 0 FP** (`2.239 ms` p95) | 8 FN · 4 FP | **100.0% fewer misses/FPs** |
+| **Anti-Evasion (`examples/10`)** | **22/22** TPR · **0/12** FPR (`0.466 ms` p50 / `4.154 ms` p95) | — | **100.0% detection · 0.0% FP** |
+| **SWE-bench Lite (300 issues)** | **71.67%** allow · **1.0%** deny · **0** syntax FPs · **60/60** caught | 100% raw schema | **-36.7% tokens · 100.0% catch** |
 
 ---
 
