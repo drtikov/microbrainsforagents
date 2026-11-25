@@ -1763,7 +1763,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
         session_state_path = _resolve_session_state_path(args.session_state)
 
-        raw = sys.stdin.read().lstrip("\ufeff").strip()
+        if hasattr(sys.stdin, "buffer") and sys.stdin.buffer is not None:
+            raw = sys.stdin.buffer.read().decode("utf-8-sig", errors="replace").strip()
+        else:
+            raw = sys.stdin.read().lstrip("\ufeff").strip()
         if not raw and event_kind not in _LIFECYCLE_EVENTS:
             if shadow_mode:
                 _append_shadow_error_journal(
