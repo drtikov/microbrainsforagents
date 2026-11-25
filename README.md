@@ -61,6 +61,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)](#openclaw-integration-native-gateway-plugin-before_tool_call--dlp)
 - [Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)](#qoder-integration-desktop--cli-pretooluseposttooluse--qoder-protection)
 - [OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)](#opencode-integration-native-opencodeplugins-esm-plugin--benchmarks)
+- [Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)](#kilo-code-integration-native-kiloplugins-esm-plugin--benchmarks)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -486,6 +487,26 @@ aetheris-daemon --http --host opencode --port 8765
 | **26-step session gating** | **12/12** hazards caught · **0/14** benign blocked · **0** syntax/security failures *(vs. 4 / 8 without gate)* |
 | **Session savings *(modeled)*** | **~37,055** input tokens saved (**~\$0.11/session**), **0/8** recovery turns, **21.7 ms** total gate (0.84 ms mean / 1.21 ms p95) |
 | **`--host opencode` adapter (4,000 checks)** | **0.320 ms** median (`p50`) · **0.560 ms** mean · **0.900 ms** `p95` (<1 ms per guarded tool call) |
+
+---
+
+## Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)
+
+Microbrains now ships first-class **Kilo Code** compatibility via the `--host kilocode` adapter, native `.kilo/plugins/aetheris-microbrains.js` ESM hooks (`tool.execute.before` / `tool.execute.after` synchronous DLP scrubbing), and Layer 0 protection for `.kilo/`, `.kilo/plugins/`, and `kilo.json(c)`:
+
+```bash
+pip install -e .
+aetheris install kilocode --self-test
+aetheris install kilocode --workspace .
+aetheris-daemon --http --host kilocode --port 8765   # optional warm HTTP daemon
+```
+
+| Benchmark Suite | Results (% Impact) |
+|---|---|
+| **26-step A/B coding session** *(14 benign + 12 hazards)* | **100%** hazards caught (**12/12** vs. 0/12) · **0%** false positives (**0/14**) · **-100%** runtime syntax failures (**0** vs. 4), security incidents (**0** vs. 8), & wasted recovery turns (**0** vs. 8) · **-74.7%** error-feedback tokens (**37** vs. 146) · **24.7 ms** total gate (**0.95 ms** mean / **1.81 ms** p95) |
+| **Session savings *(modeled)*** | **~37,055** input tokens saved/session · **~\$0.1112/session** (**~\$11.12 / 100 sessions**, Sonnet-class pricing) |
+| **Security / Anti-Evasion (48 vectors)** | **100%** attacks caught (**48/48**) · **0%** benign blocked (**0/12**) — Unicode tricks, Shell/PowerShell evasions, Python AST obfuscation, & MCP schema poisoning/rug-pull |
+| **Latency (In-Process vs. Warm HTTP Daemon)** | **Direct Python API:** **0.42 ms** p50 · **0.66 ms** p95 · **0.72 ms** mean (13.74 ms p99) · **Warm HTTP Daemon:** **5.95 ms** p50 · **23.77 ms** p95 · **10.22 ms** mean (28.41 ms p99) |
 
 ---
 
