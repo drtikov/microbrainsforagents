@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -60,6 +60,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [DeepSeek Harness (DSH) Integration (Cordis MCP Bundle)](#deepseek-harness-dsh-integration-cordis-mcp-bundle)
 - [OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)](#openclaw-integration-native-gateway-plugin-before_tool_call--dlp)
 - [Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)](#qoder-integration-desktop--cli-pretooluseposttooluse--qoder-protection)
+- [OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)](#opencode-integration-native-opencodeplugins-esm-plugin--benchmarks)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -461,6 +462,30 @@ aetheris install qoder --workspace . --profile dev
 ```
 
 *(Optional: connect `aetheris-mcp` over `stdio` or `--http --port 8080` in Qoder's MCP connector settings for the 8 on-demand `microbrain_*` audit, scrubbing, and schema-scanning tools.)*
+
+---
+
+## OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)
+
+**OpenCode** is natively supported via [`opencode-aetheris-microbrains/aetheris-microbrains.js`](opencode-aetheris-microbrains/aetheris-microbrains.js) paired with the `--host opencode` adapter in `hook.py` and `hook_daemon.py`:
+
+- **Pre/Post-Tool ESM Hooks:** `tool.execute.before` checks tool calls (`bash`, `write`, `edit`, `read`, MCP tools) over HTTP/1.1 keep-alive against `aetheris-daemon` (blocking unsafe calls or rewrites on `output.args`), while `tool.execute.after` synchronously scrubs leaked secrets from `output.output` and updates cross-turn IFC taint.
+- **Control-Plane Self-Protection:** `.opencode/`, `.opencode/plugins/`, `opencode.json`, and `opencode.jsonc` are write-protected by default.
+
+```bash
+pip install -e .
+aetheris install opencode --self-test
+aetheris install opencode --workspace .          # installs to .opencode/plugins/aetheris-microbrains.js
+aetheris-daemon --http --host opencode --port 8765
+```
+
+**Compact OpenCode Benchmarks** (`test_skill_gain_ab.py` 26-step session: 14 benign + 12 hazards incl. hardcoded keys, `rm -rf /`, `dd`, `curl | sh`, `.env` exfil, obfuscated base64 exec; plus 4,000 direct `--host opencode` adapter checks):
+
+| Benchmark | Result |
+| :--- | :--- |
+| **26-step session gating** | **12/12** hazards caught · **0/14** benign blocked · **0** syntax/security failures *(vs. 4 / 8 without gate)* |
+| **Session savings *(modeled)*** | **~37,055** input tokens saved (**~\$0.11/session**), **0/8** recovery turns, **21.7 ms** total gate (0.84 ms mean / 1.21 ms p95) |
+| **`--host opencode` adapter (4,000 checks)** | **0.320 ms** median (`p50`) · **0.560 ms** mean · **0.900 ms** `p95` (<1 ms per guarded tool call) |
 
 ---
 
