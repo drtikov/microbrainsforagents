@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -95,6 +95,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
     )
     if (ws / ".devin").exists() or devin_user.exists():
         detected.append("devin")
+    if (ws / ".clinerules").exists() or (ws / ".cline").exists() or (home / "Documents" / "Cline").exists():
+        detected.append("cline")
     return detected
 
 
@@ -359,6 +361,42 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("DEVIN SELF-TEST PASSED" if ok else "DEVIN SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "cline" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        sh_deny = evaluate_hook_payload(
+            {"preToolUse": {"toolName": "execute_command", "parameters": {"command": "rm -rf /"}}},
+            host="cline",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"preToolUse": {"toolName": "execute_command", "parameters": {"command": "git status"}}},
+            host="cline",
+            log_decisions=False,
+        )
+        cfg_write = evaluate_hook_payload(
+            {"preToolUse": {"toolName": "write_to_file", "parameters": {"path": ".clinerules/hooks/PreToolUse", "content": "exit 0"}}},
+            host="cline",
+            log_decisions=False,
+        )
+        comp = evaluate_hook_payload(
+            {"preToolUse": {"toolName": "attempt_completion", "parameters": {"result": "done"}}},
+            host="cline",
+            log_decisions=False,
+        )
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and (sh_deny.get("hookSpecificOutput") or {}).get("cancel") is True
+            and sh_allow.get("exit_code") == 0
+            and (sh_allow.get("hookSpecificOutput") or {}).get("cancel") is False
+            and cfg_write.get("exit_code") == 2
+            and (cfg_write.get("hookSpecificOutput") or {}).get("cancel") is True
+            and comp.get("exit_code") == 0
+            and (comp.get("hookSpecificOutput") or {}).get("cancel") is False
+        )
+        print("CLINE SELF-TEST PASSED" if ok else "CLINE SELF-TEST FAILED")
+        return 0 if ok else 1
+
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload
 
@@ -490,8 +528,53 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
 
     no_rust = bool(getattr(args, "no_rust_shim", False))
     effective_rust_shim = False if no_rust else (
-        bool(args.use_rust_shim) or (host in {"cursor", "devin"} and bool(find_aetheris_gate()))
+        bool(args.use_rust_shim) or (host in {"cursor", "devin", "cline"} and bool(find_aetheris_gate()))
     )
+    if host == "cline":
+        from .core.rust_shim import build_hook_command
+
+        prof = str(args.profile or "dev")
+        extra = ["--profile", prof, "--log-decisions", "--session-state", "auto"]
+        if args.shadow:
+            extra.append("--shadow")
+        if args.auto_allow:
+            extra.append("--auto-allow")
+        pre_exe, pre_args = build_hook_command(
+            "cline", event_args=["--event", "pre-tool-use"], extra_args=extra, use_rust_shim=effective_rust_shim
+        )
+        post_exe, post_args = build_hook_command(
+            "cline", event_args=["--event", "post-tool-use"], extra_args=extra, use_rust_shim=effective_rust_shim
+        )
+        hooks_dir = (
+            Path(args.plugin_dir)
+            if getattr(args, "plugin_dir", None)
+            else ((ws / ".clinerules" / "hooks") if ws is not None else (Path.home() / "Documents" / "Cline" / "Rules" / "Hooks"))
+        )
+        pre_args_str = " ".join(pre_args)
+        post_args_str = " ".join(post_args)
+        files_to_write = {
+            "PreToolUse": f'#!/usr/bin/env bash\nexec "{pre_exe}" {pre_args_str}\n',
+            "PostToolUse": f'#!/usr/bin/env bash\nexec "{post_exe}" {post_args_str}\n',
+            "PreToolUse.ps1": f'$inputJson = [Console]::In.ReadToEnd()\n$inputJson | & "{pre_exe}" {pre_args_str}\nexit $LASTEXITCODE\n',
+            "PostToolUse.ps1": f'$inputJson = [Console]::In.ReadToEnd()\n$inputJson | & "{post_exe}" {post_args_str}\nexit $LASTEXITCODE\n',
+        }
+        if args.dry_run:
+            print(f"DRY RUN - would write cline hook scripts to {hooks_dir}:")
+            for fname, body in files_to_write.items():
+                print(f"--- {hooks_dir / fname} ---")
+                print(body.rstrip())
+            return 0
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        for fname, body in files_to_write.items():
+            fpath = hooks_dir / fname
+            fpath.write_text(body, encoding="utf-8", newline="\n")
+            if not fname.endswith(".ps1"):
+                try:
+                    os.chmod(fpath, 0o755)
+                except OSError:
+                    pass
+        print(f"Installed Aetheris Microbrains (cline) -> {hooks_dir} [PreToolUse, PostToolUse (+ .ps1)]")
+        return 0
     bundle = _build_generic_hook_bundle(
         host,
         profile=str(args.profile or "dev"),

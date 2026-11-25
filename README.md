@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -42,6 +42,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [🧩 Built-in Claude Code Skill (`/microbrains`)](#-built-in-claude-code-skill-microbrains)
 - [Cursor Integration (Native Hooks v2 + Warm Rust Shim)](#cursor-integration-native-hooks-v2--warm-rust-shim)
 - [Devin Integration (Native Hook v1 + Auto-Detect)](#devin-integration-native-hook-v1--auto-detect)
+- [Cline Integration (Native `.clinerules/hooks` + Warm Rust Shim)](#cline-integration-native-clineruleshooks--warm-rust-shim)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhandshooksjson--python-securityanalyzer)
 - [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
@@ -88,6 +89,7 @@ Microbrains works alongside any AI agent or framework:
 | **Autonomous Coding Agents** | **SWE-agent**, **Aider** | **Python API** | **Python API** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
 | **Cursor** | **Cursor** | **Hook v2 Tested** | **Native Hooks v2 + CLI** (`aetheris install cursor` / `--host cursor`) | 8-event `hooks.json` (`preToolUse`/`postToolUse` matcher-scoped, `beforeShellExecution`/`afterShellExecution`, `beforeMCPExecution`/`afterMCPExecution`, `beforeReadFile`, `afterFileEdit`), `failClosed` pre-gates, `--replace-tool-output` DLP, `conversation_id` IFC, and auto `aetheris-gate` shim. |
 | **Devin** | **Devin** | **Hook & Installer Tested** | **Native Hook v1 + CLI** (`aetheris install devin` / `--host devin` / `--host auto`) | `.devin/hooks.v1.json` (`PreToolUse`/`PostToolUse` `decision: approve\|block` + exit 2), `DEVIN_PROJECT_DIR` auto-detect, structured `tool_response` DLP `additionalContext` alerts, and `.devin/` self-protection. |
+| **Cline** | **Cline** | **Hook & Installer Tested** | **Native Hooks + CLI** (`aetheris install cline` / `--host cline`) | `.clinerules/hooks/` (`PreToolUse`/`PostToolUse` + `.ps1` scripts), `cancel: true/false`, `SEARCH/REPLACE` diff AST inspection, `contextModification` DLP warnings, and `.clinerules/` protection. |
 | **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
@@ -218,6 +220,20 @@ Microbrains adds a local <2 ms safety and quality pre-flight layer in front of *
   aetheris install devin --profile guardrails
   ```
 - **Key Devin Contract Details:** Translates Devin tools (`exec`, `edit`, `write`, `apply_patch`, `get_output`, `read`, `grep`, `glob`, `webfetch`, `mcp__*`), emits `{"decision": "block"}` + exit `2` on deny, protects `.devin/` config files, runs Python with `-I` to avoid CWD shadowing, auto-selects `aetheris-gate` when installed, and supports `--host auto` (`DEVIN_PROJECT_DIR`) if you share a single `.claude/settings.local.json` install without double-firing.
+
+---
+
+## Cline Integration (Native `.clinerules/hooks` + Warm Rust Shim)
+
+Use Microbrains with **stock VS Code Cline** without forking or rebuilding the extension (`cline_hook_v1` via [`hosts/cline.py`](aetheris_microbrains/hosts/cline.py)):
+
+- **Easy 1-Command Install (POSIX + Windows `.ps1`):**
+  ```bash
+  pip install aetheris-microbrains
+  aetheris install cline --workspace . --profile guardrails
+  ```
+  Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (or `~/Documents/Cline/Rules/Hooks/` without `--workspace .`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
+- **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
 
 ---
 

@@ -626,6 +626,10 @@ def evaluate_hook_payload(
         from .hosts.devin import to_kernel_payload as _devin_to_kernel_payload
 
         payload = _devin_to_kernel_payload(payload)
+    elif resolved_host == "cline" and isinstance(payload, dict):
+        from .hosts.cline import to_kernel_payload as _cline_to_kernel_payload
+
+        payload = _cline_to_kernel_payload(payload)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -840,6 +844,11 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = {}
+        elif resolved_host == "cline":
+            perm = "allow"
+            exit_code = 0
+            host_action = "shadow_observe"
+            hook_specific = {"cancel": False}
         else:
             # Strict passive shadow mode: never block or inject host allow/deny regardless of host
             perm = None
@@ -1038,6 +1047,16 @@ def evaluate_hook_payload(
                 else ("defer_to_host_policy" if dec == "escalate" else "allow")
             )
         )
+    elif resolved_host == "cline":
+        from .hosts.cline import format_pre_response as _cline_format_pre_response
+
+        hook_specific, exit_code = _cline_format_pre_response(
+            decision=dec,
+            reason=reason,
+            shadow_mode=False,
+        )
+        perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
+        host_action = "cancel" if hook_specific.get("cancel") else ("warn" if dec == "escalate" else "allow")
     elif resolved_host == "generic":
         perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
         exit_code = 2 if dec == "deny" else 0
@@ -1132,6 +1151,10 @@ def evaluate_post_tool_use_payload(
         from .hosts.devin import to_kernel_payload as _devin_to_kernel_payload
 
         payload = _devin_to_kernel_payload(payload)
+    elif resolved_host == "cline" and isinstance(payload, dict):
+        from .hosts.cline import to_kernel_payload as _cline_to_kernel_payload
+
+        payload = _cline_to_kernel_payload(payload)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
@@ -1406,6 +1429,14 @@ def evaluate_post_tool_use_payload(
         else:
             host_specific = {}
             host_action = "clean_passthrough"
+        scrubbing_mode = "detect_and_warn"
+    elif resolved_host == "cline":
+        from .hosts.cline import format_post_response as _cline_format_post_response
+
+        host_specific = _cline_format_post_response(
+            additional_context=_post_warning_text(include_advice=True) if any_alert else None,
+        )
+        host_action = "warn_context_modification" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_warn"
     elif resolved_host in POST_CLAUDE_COMPAT_HOSTS:
         if any_alert:
@@ -1964,6 +1995,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
                 if host in HTTP_DIRECT_HSO_HOSTS or host == "cursor":
                     print("{}")
+                elif host == "cline":
+                    print(json.dumps({"cancel": False}))
                 return 0
             if host == "generic":
                 print(json.dumps(post_res, ensure_ascii=False))
@@ -1972,6 +2005,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 hso = post_res.get("hookSpecificOutput")
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
+            if host == "cline":
+                hso = post_res.get("hookSpecificOutput")
+                print(json.dumps(hso if isinstance(hso, dict) else {"cancel": False}, ensure_ascii=False))
+                return 0
             if host == "devin":
                 hso = post_res.get("hookSpecificOutput")
                 if isinstance(hso, dict) and hso:
@@ -2050,6 +2087,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
             elif host == "cursor":
                 print(json.dumps({"permission": "allow"}))
+            elif host == "cline":
+                print(json.dumps({"cancel": False}))
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
         exit_code = int(result["exit_code"])
@@ -2098,6 +2137,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             elif perm == "allow" and auto_allow:
                 print(json.dumps({"decision": "approve", "reason": result.get("reason", "allow")}, ensure_ascii=False))
             return exit_code
+        if host == "cline":
+            hso = result.get("hookSpecificOutput")
+            print(json.dumps(hso if isinstance(hso, dict) else {"cancel": False}, ensure_ascii=False))
+            return 0
         if host == "antigravity":
             hso = result.get("hookSpecificOutput")
             has_overwrite = isinstance(hso, dict) and "overwrite" in hso

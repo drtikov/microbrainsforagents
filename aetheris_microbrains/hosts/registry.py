@@ -113,6 +113,12 @@ _BUILTIN_ADAPTERS: Tuple[HostAdapter, ...] = (
         supports_replace_tool_output=False,
     ),
     HostAdapter(
+        name="cline",
+        contract="cline_hook_v1",
+        family="cline",
+        supports_replace_tool_output=False,
+    ),
+    HostAdapter(
         name="generic",
         contract="generic_v1",
         family="generic",
