@@ -102,36 +102,50 @@ def _build_generic_hook_bundle(
     if auto_allow:
         extra.append("--auto-allow")
     pre_exe, pre_args = build_hook_command(host, event_args=[], extra_args=extra, use_rust_shim=use_rust_shim)
-    post_extra = [*extra, "--replace-tool-output"] if host in {"claude", "qoder"} else list(extra)
+    post_extra = [*extra, "--replace-tool-output"] if host in {"claude", "qoder", "cursor"} else list(extra)
     post_exe, post_args = build_hook_command(
         host, event_args=["--event", "post-tool-use"], extra_args=post_extra, use_rust_shim=use_rust_shim
     )
     pre_cmd = " ".join([f'"{pre_exe}"', *pre_args])
     post_cmd = " ".join([f'"{post_exe}"', *post_args])
     if host == "cursor":
-        def _cursor_cmd(event_flag: str, cmd_extra: List[str]) -> Dict[str, Any]:
+        _cursor_tool_matcher = (
+            "Write|Edit|StrReplace|Delete|Read|Grep|Glob|LS|SemanticSearch|WebFetch|WebSearch|Task"
+        )
+
+        def _cursor_cmd(
+            event_flag: str,
+            cmd_extra: List[str],
+            *,
+            matcher: Optional[str] = None,
+            fail_closed: bool = True,
+        ) -> Dict[str, Any]:
             exe, args = build_hook_command(
                 "cursor",
                 event_args=["--event", event_flag],
                 extra_args=cmd_extra,
                 use_rust_shim=use_rust_shim,
             )
-            return {
+            entry: Dict[str, Any] = {
                 "command": " ".join([f'"{exe}"', *args]),
                 "timeout": 10,
-                "failClosed": True,
+                "failClosed": fail_closed,
             }
+            if matcher:
+                entry["matcher"] = matcher
+            return entry
 
         return {
             "version": 1,
             "hooks": {
-                "preToolUse": [_cursor_cmd("pre-tool-use", extra)],
-                "postToolUse": [_cursor_cmd("post-tool-use", post_extra)],
+                "preToolUse": [_cursor_cmd("pre-tool-use", extra, matcher=_cursor_tool_matcher)],
+                "postToolUse": [_cursor_cmd("post-tool-use", post_extra, matcher=_cursor_tool_matcher, fail_closed=False)],
                 "beforeShellExecution": [_cursor_cmd("before-shell", extra)],
-                "afterShellExecution": [_cursor_cmd("after-shell", post_extra)],
+                "afterShellExecution": [_cursor_cmd("after-shell", post_extra, fail_closed=False)],
                 "beforeMCPExecution": [_cursor_cmd("before-mcp", extra)],
-                "afterMCPExecution": [_cursor_cmd("after-mcp", post_extra)],
+                "afterMCPExecution": [_cursor_cmd("after-mcp", post_extra, fail_closed=False)],
                 "beforeReadFile": [_cursor_cmd("before-read", extra)],
+                "afterFileEdit": [_cursor_cmd("after-file-edit", post_extra, fail_closed=False)],
             },
         }
     pre_hook: Dict[str, Any] = {"type": "command", "command": pre_cmd}
@@ -442,6 +456,11 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         return 0
     _atomic_write_json(target, merged_bundle)
     print(f"Installed Aetheris Microbrains ({host}) -> {target}")
+    if host == "cursor":
+        print(
+            "Tip: for minimal prompt friction use `--profile guardrails`, and pass `--use-rust-shim` "
+            "(with `aetheris-gate`) to avoid Python cold-start latency on Cursor hooks."
+        )
     return 0
 
 

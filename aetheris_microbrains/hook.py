@@ -1539,6 +1539,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "before-read",
                 "after-shell",
                 "after-mcp",
+                "after-file-edit",
                 *sorted(_LIFECYCLE_EVENTS),
             ],
             default="pre-tool-use",
@@ -1649,7 +1650,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if event_kind in {"before-shell", "before-mcp", "before-read"}:
             cursor_cli_event = event_kind
             event_kind = "pre-tool-use"
-        elif event_kind in {"after-shell", "after-mcp"}:
+        elif event_kind in {"after-shell", "after-mcp", "after-file-edit"}:
             cursor_cli_event = event_kind
             event_kind = "post-tool-use"
         codex_escalate_deny = bool(args.codex_escalate_deny)

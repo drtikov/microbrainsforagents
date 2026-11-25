@@ -143,7 +143,7 @@ Static AST and tokenizer analysis checks syntax and paths before execution; it d
 | **Qoder (Desktop & CLI)** | `PreToolUse` / `PostToolUse` hooks (`~/.qoder/settings.json`, `.qoder/settings.local.json`) | **Full E2E Tested (Config/Contract)** | `--host qoder`, `aetheris install qoder` | Non-destructive hook merge, `.qoder/` protection, `--session-state auto`, `--replace-tool-output` |
 | **Hermes Agent** | FastMCP (`stdio` / Streamable HTTP + `GET /health`) + hooks | **Full E2E Tested** | `--host hermes`, `aetheris-mcp` | 8 MCP tools (`microbrain_health`, preflight, scrub, scan, narrow, audit, directives, verify) |
 | **DeepSeek Harness** | Cordis MCP bundle | **On-Demand MCP (Advisory)** | `aetheris install dsh` | On-demand Streamable HTTP MCP utilities (`127.0.0.1:8766/mcp`; no automatic tool hook interception) |
-| **Cursor** | `.cursor/hooks.json` (`beforeShellExecution` / `afterShellExecution`) | **Partial (Shell-Only Hook)** | `--host cursor`, `aetheris install cursor` | Shell execution pre/post CLI hook gating; file-edit/MCP interception and Cursor-live runtime remain unverified |
+| **Cursor** | `.cursor/hooks.json` (`preToolUse`, `postToolUse`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, `afterFileEdit`) | **Hook v2 Tested (Contract/Installer)** | `--host cursor`, `aetheris install cursor` | Native `cursor_hook_v2` JSON & `ask`/`deny` semantics, matcher-scoped `preToolUse`/`postToolUse`, `--replace-tool-output` DLP, `~/.cursor/projects` workspace exemption, `--use-rust-shim`; unit/subprocess/installer contracts verified (start live Cursor IDE verification with `--shadow`) |
 
 ### 4.2 Architectural Case Study: Contextual Shell Classification (Windows PowerShell)
 

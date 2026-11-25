@@ -17,6 +17,7 @@ _EVENT_ALIASES: Dict[str, str] = {
     "before-read": "beforeReadFile",
     "beforereadfile": "beforeReadFile",
     "beforetabfileread": "beforeTabFileRead",
+    "after-file-edit": "afterFileEdit",
     "afterfileedit": "afterFileEdit",
     "pre-tool-use": "preToolUse",
     "pretooluse": "preToolUse",

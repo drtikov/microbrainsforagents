@@ -158,20 +158,32 @@ def test_cursor_cli_subprocess_and_installer(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
     cfg = json.loads((cursor_dir / "hooks.json").read_text(encoding="utf-8"))
-    for ev_name in (
-        "preToolUse",
-        "postToolUse",
-        "beforeShellExecution",
-        "afterShellExecution",
-        "beforeMCPExecution",
-        "afterMCPExecution",
-        "beforeReadFile",
-    ):
+    pre_events = ("preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile")
+    post_events = ("postToolUse", "afterShellExecution", "afterMCPExecution", "afterFileEdit")
+    for ev_name in pre_events + post_events:
         assert ev_name in cfg["hooks"]
         entry = cfg["hooks"][ev_name][0]
         assert entry["timeout"] == 10
-        assert entry["failClosed"] is True
+        assert entry["failClosed"] is (ev_name in pre_events)
         assert str(fake_gate) in entry["command"]
+        if ev_name in post_events:
+            assert "--replace-tool-output" in entry["command"]
+
+    for scoped_ev in ("preToolUse", "postToolUse"):
+        matcher = cfg["hooks"][scoped_ev][0].get("matcher", "")
+        assert "StrReplace" in matcher and "Write" in matcher
+        assert "Shell" not in matcher and "MCP" not in matcher
+
+    after_edit_proc = subprocess.run(
+        [sys.executable, "-m", "aetheris_microbrains.hook", "--host", "cursor", "--event", "after-file-edit"],
+        input=json.dumps({"file_path": "src/app.py", "edits": [{"old_string": "x = 1", "new_string": "x = 2"}]}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+        check=False,
+    )
+    assert after_edit_proc.returncode == 0, after_edit_proc.stderr
 
     assert cli_main(["install", "cursor", "--self-test"]) == 0
     assert "CURSOR SELF-TEST PASSED" in capsys.readouterr().out
