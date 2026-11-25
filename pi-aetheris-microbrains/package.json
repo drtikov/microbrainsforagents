@@ -1,0 +1,11 @@
+{
+  "name": "aetheris-microbrains-pi",
+  "version": "0.7.6",
+  "type": "module",
+  "main": "./index.js",
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

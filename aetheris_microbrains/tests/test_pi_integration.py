@@ -173,19 +173,30 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
         return
     fake_tok = _make_fixture_token(("sk", "live", "ABCDEF1234567890abcdef"))
 
-    # Part 1: Fail-closed when daemon is unreachable + tool_result DLP scrubbing
+    # Part 1: Fail-closed when daemon is unreachable + session_start warning + stats persistence + tool_result DLP
     offline_script = (
-        f"import ext, {{ scrubSecretsSync }} from {json.dumps(EXTENSION_FILE.as_uri())};"
-        "const handlers = {}; const commands = {};"
-        "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
+        f"import ext from {json.dumps(EXTENSION_FILE.as_uri())};"
+        "const handlers = {}; const commands = {}; const entries = [];"
+        "const mockPi = {"
+        "  on(ev, fn) { handlers[ev] = fn; },"
+        "  registerCommand(name, def) { commands[name] = def; },"
+        "  appendEntry(type, data) { entries.push({ customType: type, data }); },"
+        "};"
         "ext(mockPi);"
-        "if (typeof handlers.tool_call !== 'function' || typeof handlers.tool_result !== 'function' || typeof commands.aetheris?.handler !== 'function') process.exit(2);"
+        "if (typeof handlers.tool_call !== 'function' || typeof handlers.tool_result !== 'function' || typeof handlers.session_start !== 'function' || typeof handlers.session_shutdown !== 'function' || typeof commands.aetheris?.handler !== 'function') process.exit(2);"
+        "const warnNotes = [];"
+        "const priorEntries = [{ type: 'custom', customType: 'aetheris-stats', data: { checked: 3, blocked: 1, approved: 1, redacted: 2 } }];"
+        "const ctxOff = { cwd: process.cwd(), sessionManager: { getSessionId: () => 'pi-sess-1', getEntries: () => priorEntries }, ui: { notify(msg, level) { warnNotes.push({ msg, level }); } } };"
+        "await handlers.session_start({ reason: 'startup' }, ctxOff);"
+        "if (!warnNotes.some((n) => n.level === 'warning' && n.msg.includes('unreachable'))) process.exit(6);"
         f"const resEvent = {{ toolName: 'bash', content: [{{ type: 'text', text: {json.dumps('KEY=' + fake_tok)} }}], details: {{ raw: {json.dumps(fake_tok)} }} }};"
-        "await handlers.tool_result(resEvent, { sessionId: 's1' });"
+        "await handlers.tool_result(resEvent, ctxOff);"
         "if (!resEvent.content[0].text.includes('[REDACTED_BY_AETHERIS]')) process.exit(3);"
         f"if (resEvent.content[0].text.includes({json.dumps(fake_tok)}) || resEvent.details.raw.includes({json.dumps(fake_tok)})) process.exit(4);"
-        "const fc = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'rm -rf /' } }, { cwd: process.cwd(), sessionId: 's1' });"
+        "const fc = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'rm -rf /' } }, ctxOff);"
         "if (!fc || fc.block !== true || !String(fc.reason).includes('fail-closed')) process.exit(5);"
+        "await handlers.session_shutdown({}, ctxOff);"
+        "if (entries.length !== 1 || entries[0].customType !== 'aetheris-stats' || entries[0].data.checked !== 4 || entries[0].data.blocked !== 2 || entries[0].data.redacted < 4) process.exit(7);"
         "console.log(JSON.stringify({ ok: true }));"
     )
     env = dict(os.environ)
@@ -196,7 +207,7 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
     assert proc_off.returncode == 0, proc_off.stderr or proc_off.stdout
     assert json.loads(proc_off.stdout.strip())["ok"] is True
 
-    # Part 2: Live HTTP daemon — allow, block, escalate (confirm true/false), and /aetheris command
+    # Part 2: Live HTTP daemon — settingsManager override, sessionManager.getSessionId(), allow, block, escalate, and /aetheris command
     token = "test-pi-node-token"
     port, t = _start_test_daemon(tmp_path, token)
     try:
@@ -204,18 +215,22 @@ def test_pi_esm_extension_smoke_with_node(tmp_path):
             f"import {{ createAetherisPiExtension }} from {json.dumps(EXTENSION_FILE.as_uri())};"
             "const handlers = {}; const commands = {};"
             "const mockPi = { on(ev, fn) { handlers[ev] = fn; }, registerCommand(name, def) { commands[name] = def; } };"
-            f"createAetherisPiExtension({{ daemonUrl: 'http://127.0.0.1:{port}', token: {json.dumps(token)}, timeoutMs: 2000 }})(mockPi);"
-            "const allowRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'git status' } }, { cwd: process.cwd(), sessionId: 's1' });"
+            "createAetherisPiExtension()(mockPi);"
+            f"const settingsCtx = {{ cwd: process.cwd(), sessionManager: {{ getSessionId: () => 'pi-sess-2', getEntries: () => [] }}, settingsManager: {{ get(k) {{ return k === 'aetheris' ? {{ daemonUrl: 'http://127.0.0.1:{port}', token: {json.dumps(token)}, timeoutMs: 2000 }} : undefined; }} }} }};"
+            "const allowRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c1', input: { command: 'git status' } }, settingsCtx);"
             "if (allowRes !== undefined) process.exit(10);"
-            "const blockRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c2', input: { command: 'rm -rf /' } }, { cwd: process.cwd(), sessionId: 's1' });"
+            "const blockRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c2', input: { command: 'rm -rf /' } }, settingsCtx);"
             "if (!blockRes || blockRes.block !== true) process.exit(11);"
+            "const shadowCtx = { ...settingsCtx, settingsManager: { get(k) { return k === 'aetheris' ? { ...settingsCtx.settingsManager.get('aetheris'), shadow: true } : undefined; } } };"
+            "const shadowRes = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c2b', input: { command: 'rm -rf /' } }, shadowCtx);"
+            "if (shadowRes !== undefined) process.exit(15);"
             "let confirmCalls = 0;"
-            "const escApprove = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c3', input: { command: 'custom_unlisted_pi_cmd --flag' } }, { cwd: process.cwd(), sessionId: 's1', ui: { async confirm() { confirmCalls += 1; return true; } } });"
+            "const escApprove = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c3', input: { command: 'custom_unlisted_pi_cmd --flag' } }, { ...settingsCtx, ui: { async confirm() { confirmCalls += 1; return true; } } });"
             "if (escApprove !== undefined || confirmCalls !== 1) process.exit(12);"
-            "const escDecline = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c4', input: { command: 'custom_unlisted_pi_cmd --other' } }, { cwd: process.cwd(), sessionId: 's1', ui: { async confirm() { confirmCalls += 1; return false; } } });"
+            "const escDecline = await handlers.tool_call({ toolName: 'bash', toolCallId: 'c4', input: { command: 'custom_unlisted_pi_cmd --other' } }, { ...settingsCtx, ui: { async confirm() { confirmCalls += 1; return false; } } });"
             "if (!escDecline || escDecline.block !== true || !String(escDecline.reason).includes('declined') || confirmCalls !== 2) process.exit(13);"
             "let notifiedMsg = ''; let notifiedLevel = '';"
-            "await commands.aetheris.handler('', { ui: { notify(msg, level) { notifiedMsg = msg; notifiedLevel = level; } } });"
+            "await commands.aetheris.handler('', { ...settingsCtx, ui: { notify(msg, level) { notifiedMsg = msg; notifiedLevel = level; } } });"
             "if (!notifiedMsg.includes('daemon=UP') || notifiedLevel !== 'info') process.exit(14);"
             "console.log(JSON.stringify({ ok: true, notifiedMsg }));"
         )

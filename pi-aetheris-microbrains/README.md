@@ -8,6 +8,7 @@ Zero-dependency Level 3 Pi extension connecting Pi's `tool_call` and `tool_resul
 - **Native Layer 3 escalation**: Uses `ctx.ui.confirm(...)` in TUI and RPC modes when Microbrains returns `escalate: true`, falling back to `blockOnEscalate` in non-interactive runs.
 - **`tool_result` synchronous DLP scrubbing**: Redacts API keys, private keys, and connection strings from `event.content` and `event.details` before the LLM sees tool output, with best-effort daemon audit logging.
 - **`/aetheris` command**: Displays live daemon health and session metrics (`checked`, `blocked`, `approved`, `redacted`) via `ctx.ui.notify`.
+- **Settings & Lifecycle Persistence**: Reads optional overrides from `.pi/settings.json` (`"aetheris": { ... }`) via `ctx.settingsManager`, checks daemon health on `session_start`, aborts in-flight requests on `session_shutdown`, and persists session metrics via `pi.appendEntry("aetheris-stats", ...)`.
 - **Fail-closed default**: Blocks tool execution when the daemon is unreachable unless `AETHERIS_FAIL_CLOSED=0` or `AETHERIS_HOOK_SHADOW=1`.
 
 ## Quick Setup
