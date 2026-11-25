@@ -1,7 +1,7 @@
 """Unified `aetheris` (`uvx aetheris-microbrains`) CLI & Multi-Host Installer (stdlib-only).
 
 Supports:
-  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|qoder|dsh|auto`)
+  - `aetheris install <host>` (`antigravity|claude|codex|hermes|cursor|openclaw|opencode|qoder|dsh|auto`)
   - `aetheris audit ...`
   - `aetheris doctor ...`
   - `aetheris mcp-proxy ...`
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "qoder", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "qoder", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -57,6 +57,13 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("openclaw")
     if (home / ".qoder").exists() or (ws / ".qoder").exists():
         detected.append("qoder")
+    if (
+        (home / ".config" / "opencode").exists()
+        or (home / ".opencode").exists()
+        or (ws / ".opencode").exists()
+        or (ws / "opencode.json").exists()
+    ):
+        detected.append("opencode")
     return detected
 
 
@@ -186,6 +193,71 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         )
         print("QODER SELF-TEST PASSED" if ok else "QODER SELF-TEST FAILED")
         return 0 if ok else 1
+
+    if host == "opencode":
+        src_plugin = Path(__file__).resolve().parents[1] / "opencode-aetheris-microbrains" / "aetheris-microbrains.js"
+        if args.self_test:
+            from .hook import evaluate_hook_payload
+
+            ok_file = src_plugin.is_file()
+            if ok_file:
+                low = src_plugin.read_text(encoding="utf-8", errors="ignore").lower()
+                if "i:\\" in low or "i:/" in low or "c:\\users\\" in low or "c:/users/" in low:
+                    ok_file = False
+            deny_v = evaluate_hook_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+                host="opencode",
+                log_decisions=False,
+            )
+            allow_v = evaluate_hook_payload(
+                {"tool_name": "Bash", "tool_input": {"command": "git status"}},
+                host="opencode",
+                log_decisions=False,
+            )
+            cfg_write = evaluate_hook_payload(
+                {"tool_name": "Write", "tool_input": {"file_path": "opencode.json", "content": "{}"}},
+                host="opencode",
+                log_decisions=False,
+            )
+            ok = (
+                ok_file
+                and deny_v.get("decision") == "deny"
+                and (deny_v.get("hookSpecificOutput") or {}).get("block") is True
+                and allow_v.get("decision") == "allow"
+                and cfg_write.get("decision") == "deny"
+            )
+            print("OPENCODE SELF-TEST PASSED" if ok else "OPENCODE SELF-TEST FAILED")
+            return 0 if ok else 1
+
+        if not src_plugin.is_file():
+            print(f"OpenCode plugin bundle missing: {src_plugin}")
+            return 1
+        if getattr(args, "plugin_dir", None):
+            target = Path(args.plugin_dir) / "aetheris-microbrains.js"
+        elif ws is not None:
+            target = ws / ".opencode" / "plugins" / "aetheris-microbrains.js"
+        else:
+            target = Path.home() / ".config" / "opencode" / "plugins" / "aetheris-microbrains.js"
+        if args.dry_run:
+            print(f"DRY RUN - would install OpenCode plugin -> {target}")
+            return 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".aetheris-microbrains.", suffix=".tmp", dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(src_plugin.read_text(encoding="utf-8"))
+                fh.flush()
+            os.replace(tmp_name, target)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        print(f"Installed OpenCode plugin -> {target}")
+        print("Start the warm HTTP daemon before launching OpenCode:")
+        print("  aetheris-daemon --http --host opencode --port 8765")
+        return 0
 
     bundle = _build_generic_hook_bundle(
         host,
