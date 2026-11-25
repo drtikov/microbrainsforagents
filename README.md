@@ -737,6 +737,25 @@ Run the full verification suite (**`570 passed, 2 skipped`** on Windows / **`566
 pytest aetheris_microbrains/tests -q
 ```
 
+### 📊 At-a-Glance Benchmark Summary (vs. Baselines)
+
+**1. Safety, Detection & Session Economics**
+
+| Benchmark / Suite | Result (With Microbrains) | Baseline Comparison / Cost |
+| :--- | :--- | :--- |
+| **25-step schema & safety** | **12,312 tokens** (-81.0%), **0 missed hazards**, **0 false blocks** | Baseline: 64,800 tokens; keyword rules: 8 missed, 4 false blocks |
+| **26-step coding session** | **12/12 hazards caught**, **0** syntax/security fails, **~37,055** tokens saved *(modeled)* | **\$0.1112/session** saved; 146 → **37** error tokens (-74.7%); **16.5 ms** total gate |
+| **16-step research session** | **9,149 tokens** (-76.6%), **0/7** recovery turns, **0/4** incidents | **\$0.0896/session** saved (29,882 tokens); 8.75 ms mean / 107.79 ms p95 |
+| **Security & Adversarial** | **22/22** attacks (0/12 FP) · **100/100** adversarial (0/100 FP) · MCP poison/shadow/rug-pull | **0.384 ms** p50 / **2.545 ms** p95 · **100%** BFCL Top-1/3 (16/16) & OOD abstention (4/4) |
+
+**2. Tool Routing & Cache-Sticky Selection (Honest Trade-Offs)**
+
+| Benchmark | Microbrains | Best Baseline | Trade-Off |
+| :--- | :--- | :--- | :--- |
+| **Tool Selection (Top-4)** | **97.4% Recall@4**, **2.6%** drop rate, 38.6% net saved, **4.526 ms** p95 | Naive keyword: 76.3% Recall@4, 43.4% net saved, 0.270 ms p95 | **+21.1 pt recall**, but -4.8 pt net savings and ~16.8× slower |
+| **Tool Advisor (32 tools)** | **100% Recall@4**, **0/120** drops, **56.7%** cache-adj. saved *(session-sticky)*, **4.979 ms** p95 | Keyword advisor: 94.2% Recall@4, 7/120 drops, 46.6% saved, 0.194 ms p95 | **+5.8 pt recall**, **+10.1 pt** cache-adj. savings, ~25.7× slower *(per-turn: only 3.9% saved)* |
+| **Colony Routing (Where it didn't win)** | **86.7%** strict / **70.0%** held-out, **0/50** missed escalations, 13/70 false esc., **1,271 µs** p95 | Tuned rules: **89.2%** strict / **100%** held-out, 4/50 missed esc., 4/70 false esc., **25.3 µs** p95 | Zero missed escalations, but less accurate and ~50× slower than tuned rules |
+
 ### 0. Micro-Benchmark: `decide()` Real-World Latency Distribution
 Measured **in-process on small payloads** across N=500 consecutive pre-flight evaluations of representative `PreToolUse` shell and diff payloads (single-threaded CPU, pure NumPy):
 
