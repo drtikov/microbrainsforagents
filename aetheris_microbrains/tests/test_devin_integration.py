@@ -10,6 +10,7 @@ from pathlib import Path
 
 from aetheris_microbrains.cli import detect_installed_hosts, main as cli_main
 from aetheris_microbrains.core.packaging_manifest import verify_core_isolation
+from aetheris_microbrains.core.rust_shim import build_hook_command
 from aetheris_microbrains.hook import evaluate_hook_payload, evaluate_post_tool_use_payload
 from aetheris_microbrains.hosts.registry import resolve_host
 
@@ -153,6 +154,9 @@ def test_devin_cli_subprocess_installer_and_claude_overlap_warning(tmp_path, mon
         assert cmd_hook["timeout"] == 10
         assert "onFailure" not in cmd_hook
         assert "async" not in cmd_hook
+
+    _py_exe, py_argv = build_hook_command("devin", event_args=[], extra_args=[], use_rust_shim=False)
+    assert py_argv[:3] == ["-I", "-m", "aetheris_microbrains.hook"]
 
     assert cli_main(["install", "devin", "--self-test"]) == 0
     assert "DEVIN SELF-TEST PASSED" in capsys.readouterr().out

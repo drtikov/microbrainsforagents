@@ -39,7 +39,7 @@ def build_hook_command(
     auto_daemon: bool = True,
     repo_root: Optional[Path] = None,
 ) -> Tuple[str, List[str]]:
-    """Build ``(executable, argv)`` preferring ``aetheris-gate --auto-daemon`` when enabled."""
+    """Build ``(executable, argv)`` preferring ``aetheris-gate --auto-daemon`` when enabled; uses ``-I`` for Python to prevent CWD shadowing."""
     if use_rust_shim:
         gate_bin = find_aetheris_gate(repo_root=repo_root)
         if gate_bin:
@@ -48,4 +48,4 @@ def build_hook_command(
             return gate_bin, args
 
     py = sys.executable.replace("\\", "/")
-    return py, ["-m", "aetheris_microbrains.hook", "--host", host, *event_args, *extra_args]
+    return py, ["-I", "-m", "aetheris_microbrains.hook", "--host", host, *event_args, *extra_args]
