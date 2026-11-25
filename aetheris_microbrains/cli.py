@@ -109,11 +109,29 @@ def _build_generic_hook_bundle(
     pre_cmd = " ".join([f'"{pre_exe}"', *pre_args])
     post_cmd = " ".join([f'"{post_exe}"', *post_args])
     if host == "cursor":
+        def _cursor_cmd(event_flag: str, cmd_extra: List[str]) -> Dict[str, Any]:
+            exe, args = build_hook_command(
+                "cursor",
+                event_args=["--event", event_flag],
+                extra_args=cmd_extra,
+                use_rust_shim=use_rust_shim,
+            )
+            return {
+                "command": " ".join([f'"{exe}"', *args]),
+                "timeout": 10,
+                "failClosed": True,
+            }
+
         return {
             "version": 1,
             "hooks": {
-                "beforeShellExecution": [{"command": pre_cmd}],
-                "afterShellExecution": [{"command": post_cmd}],
+                "preToolUse": [_cursor_cmd("pre-tool-use", extra)],
+                "postToolUse": [_cursor_cmd("post-tool-use", post_extra)],
+                "beforeShellExecution": [_cursor_cmd("before-shell", extra)],
+                "afterShellExecution": [_cursor_cmd("after-shell", post_extra)],
+                "beforeMCPExecution": [_cursor_cmd("before-mcp", extra)],
+                "afterMCPExecution": [_cursor_cmd("after-mcp", post_extra)],
+                "beforeReadFile": [_cursor_cmd("before-read", extra)],
             },
         }
     pre_hook: Dict[str, Any] = {"type": "command", "command": pre_cmd}
@@ -221,6 +239,47 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             use_rust_shim=bool(args.use_rust_shim),
             dry_run=bool(args.dry_run),
         )
+
+    if host == "cursor" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        sh_deny = evaluate_hook_payload(
+            {"_cursor_event": "beforeShellExecution", "command": "rm -rf /", "cwd": "."},
+            host="cursor",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"_cursor_event": "beforeShellExecution", "command": "git status", "cwd": "."},
+            host="cursor",
+            log_decisions=False,
+        )
+        rd_deny = evaluate_hook_payload(
+            {"_cursor_event": "beforeReadFile", "file_path": ".env", "content": "SECRET=1"},
+            host="cursor",
+            log_decisions=False,
+        )
+        rd_allow = evaluate_hook_payload(
+            {"_cursor_event": "beforeReadFile", "file_path": "src/app.py", "content": "x = 1"},
+            host="cursor",
+            log_decisions=False,
+        )
+        cfg_write = evaluate_hook_payload(
+            {"_cursor_event": "preToolUse", "tool_name": "Write", "tool_input": {"file_path": ".cursor/hooks.json", "content": "{}"}},
+            host="cursor",
+            log_decisions=False,
+        )
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and (sh_deny.get("hookSpecificOutput") or {}).get("permission") == "deny"
+            and sh_allow.get("exit_code") == 0
+            and (sh_allow.get("hookSpecificOutput") or {}).get("permission") == "allow"
+            and rd_deny.get("exit_code") == 2
+            and (rd_deny.get("hookSpecificOutput") or {}).get("permission") == "deny"
+            and rd_allow.get("exit_code") == 0
+            and cfg_write.get("exit_code") == 2
+        )
+        print("CURSOR SELF-TEST PASSED" if ok else "CURSOR SELF-TEST FAILED")
+        return 0 if ok else 1
 
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload

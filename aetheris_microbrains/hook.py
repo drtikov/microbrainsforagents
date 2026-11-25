@@ -280,6 +280,7 @@ def _extract_session_id(payload: Any) -> str:
         payload.get("session_id")
         or payload.get("sessionId")
         or payload.get("sessionKey")
+        or payload.get("conversation_id")
         or payload.get("conversationId")
         or ctx_obj.get("sessionKey")
         or ctx_obj.get("sessionId")
@@ -574,6 +575,15 @@ def evaluate_hook_payload(
     """Evaluate a PreToolUse hook payload and return host-adapted verdict + exit_code."""
     PolicyConfig, decide, is_protected_path = _load_decision_engine()
     resolved_host = resolve_host(host, default="claude")
+    cursor_event = ""
+    if resolved_host == "cursor":
+        from .hosts.cursor import infer_event as _cursor_infer_event, to_kernel_payload as _cursor_to_kernel_payload
+
+        cursor_event = _cursor_infer_event(
+            payload if isinstance(payload, dict) else {},
+            str((payload.get("_cursor_event") if isinstance(payload, dict) else "") or "pre-tool-use"),
+        )
+        payload = _cursor_to_kernel_payload(payload if isinstance(payload, dict) else {}, cursor_event)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -772,6 +782,17 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "shadow_observe"
             hook_specific = {}
+        elif resolved_host == "cursor":
+            from .hosts.cursor import format_pre_response as _cursor_format_pre_response
+
+            perm = "allow"
+            host_action = "shadow_observe"
+            hook_specific, exit_code = _cursor_format_pre_response(
+                event=cursor_event,
+                decision=dec,
+                reason=reason,
+                shadow_mode=True,
+            )
         else:
             # Strict passive shadow mode: never block or inject host allow/deny regardless of host
             perm = None
@@ -920,6 +941,27 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "defer_to_host_policy"
             hook_specific = {"hookEventName": "PreToolUse"}
+    elif resolved_host == "cursor":
+        from .hosts.cursor import format_pre_response as _cursor_format_pre_response
+
+        updated_cmd: Optional[Dict[str, Any]] = None
+        if dec == "allow" and norm.get("tool") == "execute_shell" and norm.get("cmd"):
+            wrapped_cmd = _build_sandbox_wrapped_command(
+                str(norm["cmd"]),
+                sandbox_mode=sandbox_wrap,
+                project_dir=ctx.get("project_dir"),
+            )
+            if wrapped_cmd:
+                updated_cmd = {"command": wrapped_cmd}
+        hook_specific, exit_code = _cursor_format_pre_response(
+            event=cursor_event,
+            decision=dec,
+            reason=reason,
+            updated_input=updated_cmd,
+            shadow_mode=False,
+        )
+        perm = str(hook_specific.get("permission") or ("allow" if dec == "allow" else "deny"))
+        host_action = perm
     elif resolved_host == "generic":
         perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
         exit_code = 2 if dec == "deny" else 0
@@ -1005,6 +1047,11 @@ def evaluate_post_tool_use_payload(
         PolicyConfig, _decide, _ = _load_decision_engine()
         policy = PolicyConfig.from_file(resolved_policy_path)
     resolved_host = resolve_host(host, default="claude")
+    if resolved_host == "cursor" and isinstance(payload, dict):
+        from .hosts.cursor import infer_event as _cursor_infer_event, to_kernel_payload as _cursor_to_kernel_payload
+
+        _cursor_post_ev = _cursor_infer_event(payload, str(payload.get("_cursor_event") or "post-tool-use"))
+        payload = _cursor_to_kernel_payload(payload, _cursor_post_ev)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
@@ -1255,6 +1302,20 @@ def evaluate_post_tool_use_payload(
         host_specific = {}
         host_action = "warn_logged" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_log"
+    elif resolved_host == "cursor":
+        from .hosts.cursor import format_post_response as _cursor_format_post_response
+
+        if any_alert:
+            host_specific = _cursor_format_post_response(
+                additional_context=_post_warning_text(include_advice=True),
+                redacted=redacted_output if supports_replace else None,
+            )
+            host_action = "replace_tool_output" if supports_replace else "warn_additional_context"
+            scrubbing_mode = "replace_tool_output" if supports_replace else "detect_and_warn"
+        else:
+            host_specific = {}
+            host_action = "clean_passthrough"
+            scrubbing_mode = "detect_and_warn"
     elif resolved_host in POST_CLAUDE_COMPAT_HOSTS:
         if any_alert:
             host_specific = {
@@ -1444,9 +1505,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser = argparse.ArgumentParser(description="Aetheris Microbrains PreToolUse/PostToolUse Hook")
         parser.add_argument(
             "--event",
-            choices=["pre-tool-use", "post-tool-use", *sorted(_LIFECYCLE_EVENTS)],
+            choices=[
+                "pre-tool-use",
+                "post-tool-use",
+                "before-shell",
+                "before-mcp",
+                "before-read",
+                "after-shell",
+                "after-mcp",
+                *sorted(_LIFECYCLE_EVENTS),
+            ],
             default="pre-tool-use",
-            help="Hook lifecycle event (default: pre-tool-use; supports post-tool-use and Phase 1 lifecycle events)",
+            help="Hook lifecycle event (default: pre-tool-use; supports post-tool-use, Cursor events, and Phase 1 lifecycle events)",
         )
         parser.add_argument("--strict-ast", action="store_true", help="Enable strict AST import/dynamic-call allowlist")
         parser.add_argument("--log-decisions", action="store_true", help="Persist hook decisions to journal for cross-process drift detection")
@@ -1549,6 +1619,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         sandbox_wrap = str(args.sandbox_wrap or "none")
         host = str(args.host)
         event_kind = str(args.event)
+        cursor_cli_event = ""
+        if event_kind in {"before-shell", "before-mcp", "before-read"}:
+            cursor_cli_event = event_kind
+            event_kind = "pre-tool-use"
+        elif event_kind in {"after-shell", "after-mcp"}:
+            cursor_cli_event = event_kind
+            event_kind = "post-tool-use"
         codex_escalate_deny = bool(args.codex_escalate_deny)
         profile_arg = args.profile
         policy_arg = args.policy
@@ -1677,6 +1754,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 2
             print(_format_hook_error_stdout(event_kind, err_msg))
             return 2
+        if cursor_cli_event and "_cursor_event" not in payload:
+            payload["_cursor_event"] = cursor_cli_event
 
         # A1/A3: ask the local warm evaluator daemon first; on ANY failure
         # returns None and falls back to identical in-process evaluation.
@@ -1791,11 +1870,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if post_res.get("journal_written") is False:
                     j_err = _redact_error_text(str(post_res.get("journal_error") or "unknown"))
                     print(f"shadow_journal_write_failed:{j_err}", file=sys.stderr)
-                if host in HTTP_DIRECT_HSO_HOSTS:
+                if host in HTTP_DIRECT_HSO_HOSTS or host == "cursor":
                     print("{}")
                 return 0
             if host == "generic":
                 print(json.dumps(post_res, ensure_ascii=False))
+                return int(post_res.get("exit_code", 0))
+            if host == "cursor":
+                hso = post_res.get("hookSpecificOutput")
+                print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
             if host in HTTP_DIRECT_HSO_HOSTS:
                 hso = post_res.get("hookSpecificOutput")
@@ -1823,7 +1906,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     session_state_path=session_state_path,
                 )
             if shadow_mode:
-                if host in HTTP_DIRECT_HSO_HOSTS:
+                if host in HTTP_DIRECT_HSO_HOSTS or host == "cursor":
                     print("{}")
                 return 0
             if host == "generic":
@@ -1868,6 +1951,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(_antigravity_cli_fallback_json(event_kind, shadow_mode=True))
             elif host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, shadow_mode=True))
+            elif host == "cursor":
+                print(json.dumps({"permission": "allow"}))
             # Passive shadow mode: logs to decision journal and returns control cleanly
             return 0
         exit_code = int(result["exit_code"])
@@ -1901,6 +1986,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             hso = result.get("hookSpecificOutput")
             print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
             return exit_code if host in PLUGIN_BLOCK_HOSTS else 0
+        if host == "cursor":
+            hso = result.get("hookSpecificOutput")
+            if exit_code == 2 and result.get("reason"):
+                print(result["reason"], file=sys.stderr)
+            print(json.dumps(hso if isinstance(hso, dict) else {"permission": "allow"}, ensure_ascii=False))
+            return exit_code
         if host == "antigravity":
             hso = result.get("hookSpecificOutput")
             has_overwrite = isinstance(hso, dict) and "overwrite" in hso

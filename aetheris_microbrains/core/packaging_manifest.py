@@ -29,6 +29,7 @@ CORE_SECURITY_MODULES: Tuple[str, ...] = (
     "openhands_analyzer",
     "hosts/__init__",
     "hosts/base",
+    "hosts/cursor",
     "hosts/registry",
     "core/ast_inspector",
     "core/audit_ui",

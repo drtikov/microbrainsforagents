@@ -101,8 +101,9 @@ _BUILTIN_ADAPTERS: Tuple[HostAdapter, ...] = (
     ),
     HostAdapter(
         name="cursor",
-        contract="cursor_hook_v1",
+        contract="cursor_hook_v2",
         family="cursor",
+        supports_replace_tool_output=True,
     ),
     HostAdapter(
         name="generic",
