@@ -233,14 +233,14 @@ Use Microbrains with **stock VS Code Cline and Cline CLI** without forking or re
   ```bash
   pip install -e .
   aetheris install cline --self-test
-  # Project-level (.clinerules/hooks/, shared by VS Code Cline & Cline CLI):
-  aetheris install cline --workspace . --profile guardrails
-  # Global install (writes ~/Documents/Cline/Rules/Hooks/ + ~/.cline/hooks/, honors CLINE_DIR / CLINE_HOOKS_DIR):
-  aetheris install cline --profile guardrails
-  # For Cline CLI, ensure hooks are enabled:
+  # Project-level for VS Code extension (.clinerules/hooks/):
+  aetheris install cline --target vscode --workspace . --profile guardrails
+  # Cline CLI (~/.cline/hooks/, honors CLINE_DIR / CLINE_HOOKS_DIR):
+  aetheris install cline --target cli --profile guardrails
   cline config set hooksEnabled=true
+  cline --hooks-dir ~/.cline/hooks "your prompt"
   ```
-  Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (workspace) or both `~/Documents/Cline/Rules/Hooks/` and `~/.cline/hooks/` (global, honoring `CLINE_DIR` / `CLINE_HOOKS_DIR`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
+  Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (`--target vscode`), `~/.cline/hooks/` (`--target cli`, honoring `CLINE_DIR` / `CLINE_HOOKS_DIR`), or both global paths when no `--workspace` is passed, auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
 - **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
 
 | Benchmark (Local Cline Env, v0.7.6) | Measured Result | Benefit |

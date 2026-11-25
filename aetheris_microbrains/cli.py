@@ -629,17 +629,30 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         )
         env_hooks_dir = str(os.environ.get("CLINE_HOOKS_DIR") or "").strip()
         env_cline_dir = str(os.environ.get("CLINE_DIR") or "").strip()
+        cline_target = str(getattr(args, "target", "both") or "both").strip().lower()
+        cline_cli_dir = (
+            Path(env_hooks_dir).expanduser()
+            if env_hooks_dir
+            else ((Path(env_cline_dir).expanduser() if env_cline_dir else (Path.home() / ".cline")) / "hooks")
+        )
+        vscode_dir = (
+            (ws / ".clinerules" / "hooks")
+            if ws is not None
+            else (Path.home() / "Documents" / "Cline" / "Rules" / "Hooks")
+        )
         if getattr(args, "plugin_dir", None):
             hooks_dirs = [Path(args.plugin_dir)]
-        elif ws is not None:
-            hooks_dirs = [ws / ".clinerules" / "hooks"]
-        elif env_hooks_dir:
-            hooks_dirs = [Path(env_hooks_dir).expanduser()]
+        elif cline_target == "cli":
+            hooks_dirs = [cline_cli_dir]
+        elif cline_target == "vscode":
+            hooks_dirs = [vscode_dir]
         else:
-            vscode_dir = Path.home() / "Documents" / "Cline" / "Rules" / "Hooks"
-            cline_cli_base = Path(env_cline_dir).expanduser() if env_cline_dir else (Path.home() / ".cline")
-            cline_cli_dir = cline_cli_base / "hooks"
-            hooks_dirs = [vscode_dir] if cline_cli_dir == vscode_dir else [vscode_dir, cline_cli_dir]
+            if ws is not None:
+                hooks_dirs = [vscode_dir]
+            elif env_hooks_dir:
+                hooks_dirs = [cline_cli_dir]
+            else:
+                hooks_dirs = [vscode_dir] if cline_cli_dir == vscode_dir else [vscode_dir, cline_cli_dir]
 
         pre_args_str = " ".join(pre_args)
         post_args_str = " ".join(post_args)
@@ -667,7 +680,11 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
                     except OSError:
                         pass
             print(f"Installed Aetheris Microbrains (cline) -> {hdir} [PreToolUse, PostToolUse (+ .ps1)]")
-        print("Note: For Cline CLI, ensure hooks are enabled (`cline config set hooksEnabled=true`).")
+        cli_hint_dir = cline_cli_dir if cline_target == "cli" else hooks_dirs[0]
+        print(
+            f'Note: For Cline CLI, run `cline config set hooksEnabled=true` and pass `--hooks-dir "{cli_hint_dir}"` '
+            "(or install to `~/.cline/hooks/` via `aetheris install cline --target cli`)."
+        )
         return 0
     bundle = _build_generic_hook_bundle(
         host,
@@ -782,6 +799,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_inst.add_argument("--no-rust-shim", action="store_true", help="Force Python hook invocation even when `aetheris-gate` is available")
     p_inst.add_argument("--workspace", default=None, help="Target workspace root")
     p_inst.add_argument("--plugin-dir", default=None, help="Override target plugin/config directory")
+    p_inst.add_argument(
+        "--target",
+        choices=["cli", "vscode", "both"],
+        default="both",
+        help="Install target surface for hosts with separate CLI/IDE hook paths (e.g. cline)",
+    )
     p_inst.add_argument("--dry-run", action="store_true", help="Print configuration without writing files")
     p_inst.add_argument("--self-test", action="store_true", help="Run host integration self-test")
 

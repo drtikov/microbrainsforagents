@@ -192,3 +192,28 @@ def test_cline_cli_env_dirs_and_detection(tmp_path, monkeypatch, capsys):
     cli_hooks = cline_home / "hooks"
     for fname in ("PreToolUse", "PostToolUse", "PreToolUse.ps1", "PostToolUse.ps1"):
         assert (cli_hooks / fname).is_file(), f"Missing {fname} in CLINE_DIR/hooks"
+
+
+def test_cline_target_cli_and_vscode_flags(tmp_path, monkeypatch, capsys):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    cline_home = tmp_path / "cline_home_target"
+    monkeypatch.setenv("CLINE_DIR", str(cline_home))
+    monkeypatch.delenv("CLINE_HOOKS_DIR", raising=False)
+
+    # --target cli with --workspace still writes ONLY to CLINE_DIR/hooks (never pollutes .clinerules/hooks)
+    assert cli_main(["install", "cline", "--target", "cli", "--workspace", str(ws), "--no-rust-shim"]) == 0
+    out_cli = capsys.readouterr().out
+    assert "--hooks-dir" in out_cli and "hooksEnabled=true" in out_cli
+    assert not (ws / ".clinerules" / "hooks").exists()
+    for fname in ("PreToolUse", "PostToolUse", "PreToolUse.ps1", "PostToolUse.ps1"):
+        assert (cline_home / "hooks" / fname).is_file()
+
+    # --target vscode with --workspace writes ONLY to <ws>/.clinerules/hooks
+    cline_home_vsc = tmp_path / "cline_home_vsc"
+    monkeypatch.setenv("CLINE_DIR", str(cline_home_vsc))
+    assert cli_main(["install", "cline", "--target", "vscode", "--workspace", str(ws), "--no-rust-shim"]) == 0
+    capsys.readouterr()
+    assert not (cline_home_vsc / "hooks").exists()
+    for fname in ("PreToolUse", "PostToolUse", "PreToolUse.ps1", "PostToolUse.ps1"):
+        assert (ws / ".clinerules" / "hooks" / fname).is_file()
