@@ -406,7 +406,19 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = "edit_file"
     elif tool_lower in {"write", "write_file", "writefile", "fs_write", "file_write", "repo_write", "fwrite", "write_to_file"}:
         tool_name = "write_file"
-    elif tool_lower in {"read", "read_file", "readfile", "readlints", "read_lints", "fs_read", "file_read", "repo_read", "view_file"}:
+    elif tool_lower in {
+        "read",
+        "read_file",
+        "readfile",
+        "readlints",
+        "read_lints",
+        "getdynamictools",
+        "get_dynamic_tools",
+        "fs_read",
+        "file_read",
+        "repo_read",
+        "view_file",
+    }:
         tool_name = "read_file"
     elif tool_lower in {
         "grep",

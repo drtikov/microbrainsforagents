@@ -110,7 +110,7 @@ def _build_generic_hook_bundle(
     post_cmd = " ".join([f'"{post_exe}"', *post_args])
     if host == "cursor":
         _cursor_tool_matcher = (
-            "Write|Edit|StrReplace|Delete|Read|Grep|Glob|LS|SemanticSearch|WebFetch|WebSearch|Task"
+            "Write|Edit|StrReplace|Delete|Read|Grep|Glob|LS|SemanticSearch|WebFetch|WebSearch|Task|CallDynamicTool|GetDynamicTools"
         )
 
         def _cursor_cmd(
@@ -422,12 +422,18 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print(f"  aetheris-daemon --http --host {host} --port 8765")
         return 0
 
+    from .core.rust_shim import find_aetheris_gate
+
+    no_rust = bool(getattr(args, "no_rust_shim", False))
+    effective_rust_shim = False if no_rust else (
+        bool(args.use_rust_shim) or (host == "cursor" and bool(find_aetheris_gate()))
+    )
     bundle = _build_generic_hook_bundle(
         host,
         profile=str(args.profile or "dev"),
         shadow=bool(args.shadow),
         auto_allow=bool(args.auto_allow),
-        use_rust_shim=bool(args.use_rust_shim),
+        use_rust_shim=effective_rust_shim,
     )
     base_dir = ws if ws is not None else Path.home()
     rel_map = {
@@ -457,10 +463,16 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
     _atomic_write_json(target, merged_bundle)
     print(f"Installed Aetheris Microbrains ({host}) -> {target}")
     if host == "cursor":
-        print(
-            "Tip: for minimal prompt friction use `--profile guardrails`, and pass `--use-rust-shim` "
-            "(with `aetheris-gate`) to avoid Python cold-start latency on Cursor hooks."
-        )
+        if effective_rust_shim:
+            print(
+                "Tip: warm `aetheris-gate --auto-daemon` shim was auto-selected (override with `--no-rust-shim`); "
+                "use `--profile guardrails` for minimal friction and `--shadow` while verifying live Cursor hooks."
+            )
+        else:
+            print(
+                "Tip: use `--profile guardrails` for minimal friction, and build/install `aetheris-gate` "
+                "(or pass `--use-rust-shim`) to avoid Python cold-start latency on Cursor hooks."
+            )
     return 0
 
 
@@ -478,6 +490,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_inst.add_argument("--auto-allow", action="store_true", help="Emit explicit allow decisions")
     p_inst.add_argument("--auto-approve-escalations", action="store_true", help="Auto-approve non-credential escalations")
     p_inst.add_argument("--use-rust-shim", action="store_true", help="Use native Rust `aetheris-gate` shim when available")
+    p_inst.add_argument("--no-rust-shim", action="store_true", help="Force Python hook invocation even when `aetheris-gate` is available")
     p_inst.add_argument("--workspace", default=None, help="Target workspace root")
     p_inst.add_argument("--plugin-dir", default=None, help="Override target plugin/config directory")
     p_inst.add_argument("--dry-run", action="store_true", help="Print configuration without writing files")

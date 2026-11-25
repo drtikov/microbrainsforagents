@@ -103,7 +103,7 @@ def to_kernel_payload(payload: Dict[str, Any], event: str) -> Dict[str, Any]:
         out["tool_name"] = "Write"
     elif t_low in {"edit", "editfile", "strreplace", "str_replace", "search_replace"}:
         out["tool_name"] = "Edit"
-    elif t_low in {"read", "readfile", "readlints", "read_lints"}:
+    elif t_low in {"read", "readfile", "readlints", "read_lints", "getdynamictools", "get_dynamic_tools"}:
         out["tool_name"] = "Read"
     elif t_low in {"ls", "listdir", "list_dir", "glob", "filesearch"}:
         out["tool_name"] = "Glob"

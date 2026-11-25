@@ -172,6 +172,7 @@ def test_cursor_cli_subprocess_and_installer(tmp_path, monkeypatch, capsys):
     for scoped_ev in ("preToolUse", "postToolUse"):
         matcher = cfg["hooks"][scoped_ev][0].get("matcher", "")
         assert "StrReplace" in matcher and "Write" in matcher
+        assert "CallDynamicTool" in matcher and "GetDynamicTools" in matcher
         assert "Shell" not in matcher and "MCP" not in matcher
 
     after_edit_proc = subprocess.run(
@@ -264,3 +265,44 @@ def test_cursor_projects_worktrees_and_native_tools():
         v = evaluate_hook_payload(p, host="cursor", profile="dev", log_decisions=False)
         assert v["decision"] == "deny", p
         assert v["exit_code"] == 2, p
+
+
+def test_cursor_auto_rust_shim_and_dynamic_tools(tmp_path, monkeypatch, capsys):
+    fake_gate = tmp_path / ("aetheris-gate.exe" if os.name == "nt" else "aetheris-gate")
+    fake_gate.write_text("stub", encoding="utf-8")
+    monkeypatch.setenv("AETHERIS_GATE_BIN", str(fake_gate))
+
+    # Without --use-rust-shim, Cursor installer still auto-selects aetheris-gate when present
+    assert cli_main(["install", "cursor", "--workspace", str(tmp_path)]) == 0
+    capsys.readouterr()
+    cfg_auto = json.loads((tmp_path / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+    assert str(fake_gate) in cfg_auto["hooks"]["preToolUse"][0]["command"]
+    assert "--auto-daemon" in cfg_auto["hooks"]["preToolUse"][0]["command"]
+
+    # --no-rust-shim forces Python invocation even when aetheris-gate is available
+    ws_py = tmp_path / "py_only"
+    ws_py.mkdir()
+    assert cli_main(["install", "cursor", "--workspace", str(ws_py), "--no-rust-shim"]) == 0
+    capsys.readouterr()
+    cfg_py = json.loads((ws_py / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+    assert "-m aetheris_microbrains.hook" in cfg_py["hooks"]["preToolUse"][0]["command"]
+    assert str(fake_gate) not in cfg_py["hooks"]["preToolUse"][0]["command"]
+
+    # GetDynamicTools discovery is read-only allowed; CallDynamicTool stays gated (fail-closed deny on preToolUse)
+    get_dyn = evaluate_hook_payload(
+        {"_cursor_event": "preToolUse", "tool_name": "GetDynamicTools", "tool_input": {}},
+        host="cursor",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert get_dyn["decision"] == "allow"
+    assert get_dyn["exit_code"] == 0
+
+    call_dyn = evaluate_hook_payload(
+        {"_cursor_event": "preToolUse", "tool_name": "CallDynamicTool", "tool_input": {"name": "custom_tool"}},
+        host="cursor",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert call_dyn["exit_code"] == 2
+    assert call_dyn["hookSpecificOutput"]["permission"] == "deny"
