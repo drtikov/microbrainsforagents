@@ -30,6 +30,7 @@ CORE_SECURITY_MODULES: Tuple[str, ...] = (
     "hosts/__init__",
     "hosts/base",
     "hosts/cursor",
+    "hosts/devin",
     "hosts/registry",
     "core/ast_inspector",
     "core/audit_ui",

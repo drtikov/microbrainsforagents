@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, FrozenSet, Optional, Tuple
 
 from .base import HostAdapter
@@ -106,6 +107,12 @@ _BUILTIN_ADAPTERS: Tuple[HostAdapter, ...] = (
         supports_replace_tool_output=True,
     ),
     HostAdapter(
+        name="devin",
+        contract="devin_hook_v1",
+        family="devin",
+        supports_replace_tool_output=False,
+    ),
+    HostAdapter(
         name="generic",
         contract="generic_v1",
         family="generic",
@@ -119,6 +126,8 @@ for _adapter in _BUILTIN_ADAPTERS:
 def get_host_adapter(host: Optional[str], default: str = "claude") -> HostAdapter:
     """Return the registered ``HostAdapter`` for ``host``, falling back to ``default``."""
     key = str(host or default).strip().lower()
+    if key == "auto":
+        key = "devin" if str(os.environ.get("DEVIN_PROJECT_DIR") or "").strip() else default
     if key in HOST_REGISTRY:
         return HOST_REGISTRY[key]
     return HOST_REGISTRY[default]
@@ -140,5 +149,5 @@ PLUGIN_BLOCK_HOSTS: FrozenSet[str] = frozenset(k for k, v in HOST_REGISTRY.items
 HTTP_DIRECT_HSO_HOSTS: FrozenSet[str] = frozenset(k for k, v in HOST_REGISTRY.items() if v.returns_hso_directly_http)
 REPLACE_OUTPUT_HOSTS: FrozenSet[str] = frozenset(k for k, v in HOST_REGISTRY.items() if v.supports_replace_tool_output)
 POST_CLAUDE_COMPAT_HOSTS: FrozenSet[str] = frozenset(
-    k for k, v in HOST_REGISTRY.items() if v.family in {"claude_compat", "codex", "cursor"}
+    k for k, v in HOST_REGISTRY.items() if v.family in {"claude_compat", "codex", "cursor", "devin"}
 )

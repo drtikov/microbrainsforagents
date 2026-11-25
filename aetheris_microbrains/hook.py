@@ -622,6 +622,10 @@ def evaluate_hook_payload(
             str((payload.get("_cursor_event") if isinstance(payload, dict) else "") or "pre-tool-use"),
         )
         payload = _cursor_to_kernel_payload(payload if isinstance(payload, dict) else {}, cursor_event)
+    elif resolved_host == "devin" and isinstance(payload, dict):
+        from .hosts.devin import to_kernel_payload as _devin_to_kernel_payload
+
+        payload = _devin_to_kernel_payload(payload)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -831,6 +835,11 @@ def evaluate_hook_payload(
                 reason=reason,
                 shadow_mode=True,
             )
+        elif resolved_host == "devin":
+            perm = "allow"
+            exit_code = 0
+            host_action = "shadow_observe"
+            hook_specific = {}
         else:
             # Strict passive shadow mode: never block or inject host allow/deny regardless of host
             perm = None
@@ -1000,6 +1009,35 @@ def evaluate_hook_payload(
         )
         perm = str(hook_specific.get("permission") or ("allow" if dec == "allow" else "deny"))
         host_action = perm
+    elif resolved_host == "devin":
+        from .hosts.devin import format_pre_response as _devin_format_pre_response
+
+        updated_cmd: Optional[Dict[str, Any]] = None
+        if dec == "allow" and norm.get("tool") == "execute_shell" and norm.get("cmd"):
+            wrapped_cmd = _build_sandbox_wrapped_command(
+                str(norm["cmd"]),
+                sandbox_mode=sandbox_wrap,
+                project_dir=ctx.get("project_dir"),
+            )
+            if wrapped_cmd:
+                updated_cmd = {"command": wrapped_cmd}
+        hook_specific, exit_code = _devin_format_pre_response(
+            decision=dec,
+            reason=reason,
+            updated_input=updated_cmd,
+            auto_approve_escalations=auto_approve_escalations,
+            shadow_mode=False,
+        )
+        perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
+        host_action = (
+            "block"
+            if exit_code == 2
+            else (
+                "approve"
+                if hook_specific.get("decision") == "approve"
+                else ("defer_to_host_policy" if dec == "escalate" else "allow")
+            )
+        )
     elif resolved_host == "generic":
         perm = "allow" if dec == "allow" else ("deny" if dec == "deny" else "ask")
         exit_code = 2 if dec == "deny" else 0
@@ -1090,6 +1128,10 @@ def evaluate_post_tool_use_payload(
 
         _cursor_post_ev = _cursor_infer_event(payload, str(payload.get("_cursor_event") or "post-tool-use"))
         payload = _cursor_to_kernel_payload(payload, _cursor_post_ev)
+    elif resolved_host == "devin" and isinstance(payload, dict):
+        from .hosts.devin import to_kernel_payload as _devin_to_kernel_payload
+
+        payload = _devin_to_kernel_payload(payload)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(
@@ -1354,6 +1396,17 @@ def evaluate_post_tool_use_payload(
             host_specific = {}
             host_action = "clean_passthrough"
             scrubbing_mode = "detect_and_warn"
+    elif resolved_host == "devin":
+        from .hosts.devin import format_post_response as _devin_format_post_response
+
+        if any_alert:
+            devin_env = _devin_format_post_response(additional_context=_post_warning_text(include_advice=True))
+            host_specific = devin_env.get("hookSpecificOutput") if isinstance(devin_env, dict) else {}
+            host_action = "warn_additional_context"
+        else:
+            host_specific = {}
+            host_action = "clean_passthrough"
+        scrubbing_mode = "detect_and_warn"
     elif resolved_host in POST_CLAUDE_COMPAT_HOSTS:
         if any_alert:
             host_specific = {
@@ -1581,9 +1634,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         parser.add_argument(
             "--host",
-            choices=list(list_hosts()),
+            choices=[*list(list_hosts()), "auto"],
             default=host,
-            help="Host contract format (registered in aetheris_microbrains.hosts)",
+            help="Host contract format (registered in aetheris_microbrains.hosts, or 'auto')",
         )
         parser.add_argument(
             "--codex-escalate-deny",
@@ -1656,7 +1709,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         auto_daemon = bool(args.auto_daemon or os.getenv("AETHERIS_AUTO_DAEMON") == "1")
         approvals_path = str(args.approvals_path or os.getenv("AETHERIS_APPROVALS_PATH") or "").strip() or None
         sandbox_wrap = str(args.sandbox_wrap or "none")
-        host = str(args.host)
+        host = resolve_host(str(args.host), default="claude")
         event_kind = str(args.event)
         cursor_cli_event = ""
         if event_kind in {"before-shell", "before-mcp", "before-read"}:
@@ -1919,6 +1972,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 hso = post_res.get("hookSpecificOutput")
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
                 return int(post_res.get("exit_code", 0))
+            if host == "devin":
+                hso = post_res.get("hookSpecificOutput")
+                if isinstance(hso, dict) and hso:
+                    print(_format_hook_stdout(hso))
+                return 0
             if host in HTTP_DIRECT_HSO_HOSTS:
                 hso = post_res.get("hookSpecificOutput")
                 print(json.dumps(hso if isinstance(hso, dict) else {}, ensure_ascii=False))
@@ -2030,6 +2088,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             if exit_code == 2 and result.get("reason"):
                 print(result["reason"], file=sys.stderr)
             print(json.dumps(hso if isinstance(hso, dict) else {"permission": "allow"}, ensure_ascii=False))
+            return exit_code
+        if host == "devin":
+            hso = result.get("hookSpecificOutput")
+            if exit_code == 2 and result.get("reason"):
+                print(result["reason"], file=sys.stderr)
+            if isinstance(hso, dict) and hso:
+                print(json.dumps(hso, ensure_ascii=False))
+            elif perm == "allow" and auto_allow:
+                print(json.dumps({"decision": "approve", "reason": result.get("reason", "allow")}, ensure_ascii=False))
             return exit_code
         if host == "antigravity":
             hso = result.get("hookSpecificOutput")

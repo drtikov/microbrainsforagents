@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -88,6 +88,13 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("zcode")
     if (home / ".openhands").exists() or (ws / ".openhands").exists():
         detected.append("openhands")
+    devin_user = (
+        (Path(os.environ["APPDATA"]) / "devin")
+        if os.name == "nt" and os.environ.get("APPDATA")
+        else (home / ".config" / "devin")
+    )
+    if (ws / ".devin").exists() or devin_user.exists():
+        detected.append("devin")
     return detected
 
 
@@ -147,6 +154,28 @@ def _build_generic_hook_bundle(
                 "beforeReadFile": [_cursor_cmd("before-read", extra)],
                 "afterFileEdit": [_cursor_cmd("after-file-edit", post_extra, fail_closed=False)],
             },
+        }
+    if host == "devin":
+        devin_matcher = (
+            "^(exec|get_output|write_to_process|kill_shell|edit|write|apply_patch|"
+            "notebook_edit|notebook_read|read|grep|glob|webfetch|run_subagent|"
+            "todo_write|skill|exit_plan_mode|mcp__.*)$"
+        )
+        return {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": devin_matcher,
+                        "hooks": [{"type": "command", "command": pre_cmd, "timeout": 10}],
+                    }
+                ],
+                "PostToolUse": [
+                    {
+                        "matcher": devin_matcher,
+                        "hooks": [{"type": "command", "command": post_cmd, "timeout": 10}],
+                    }
+                ],
+            }
         }
     pre_hook: Dict[str, Any] = {"type": "command", "command": pre_cmd}
     post_hook: Dict[str, Any] = {"type": "command", "command": post_cmd}
@@ -295,6 +324,41 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("CURSOR SELF-TEST PASSED" if ok else "CURSOR SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "devin" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        sh_deny = evaluate_hook_payload(
+            {"hook_event_name": "PreToolUse", "tool_name": "exec", "tool_input": {"command": "rm -rf /"}},
+            host="devin",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"hook_event_name": "PreToolUse", "tool_name": "exec", "tool_input": {"command": "git status"}},
+            host="devin",
+            log_decisions=False,
+        )
+        get_out = evaluate_hook_payload(
+            {"hook_event_name": "PreToolUse", "tool_name": "get_output", "tool_input": {"shell_id": "1"}},
+            host="devin",
+            log_decisions=False,
+        )
+        cfg_write = evaluate_hook_payload(
+            {"hook_event_name": "PreToolUse", "tool_name": "write", "tool_input": {"file_path": ".devin/hooks.v1.json", "content": "{}"}},
+            host="devin",
+            log_decisions=False,
+        )
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and (sh_deny.get("hookSpecificOutput") or {}).get("decision") == "block"
+            and sh_allow.get("exit_code") == 0
+            and get_out.get("exit_code") == 0
+            and get_out.get("decision") == "allow"
+            and cfg_write.get("exit_code") == 2
+            and (cfg_write.get("hookSpecificOutput") or {}).get("decision") == "block"
+        )
+        print("DEVIN SELF-TEST PASSED" if ok else "DEVIN SELF-TEST FAILED")
+        return 0 if ok else 1
+
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload
 
@@ -426,7 +490,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
 
     no_rust = bool(getattr(args, "no_rust_shim", False))
     effective_rust_shim = False if no_rust else (
-        bool(args.use_rust_shim) or (host == "cursor" and bool(find_aetheris_gate()))
+        bool(args.use_rust_shim) or (host in {"cursor", "devin"} and bool(find_aetheris_gate()))
     )
     bundle = _build_generic_hook_bundle(
         host,
@@ -436,6 +500,11 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         use_rust_shim=effective_rust_shim,
     )
     base_dir = ws if ws is not None else Path.home()
+    devin_user_rel = (
+        Path(os.environ["APPDATA"]) / "devin" / "config.json"
+        if os.name == "nt" and os.environ.get("APPDATA")
+        else Path.home() / ".config" / "devin" / "config.json"
+    )
     rel_map = {
         "claude": Path(".claude") / "settings.local.json",
         "codex": Path(".codex") / "hooks.json",
@@ -443,7 +512,12 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         "cursor": Path(".cursor") / "hooks.json",
         "qoder": Path(".qoder") / ("settings.local.json" if ws is not None else "settings.json"),
     }
-    target = Path(args.plugin_dir) if getattr(args, "plugin_dir", None) else (base_dir / rel_map[host])
+    if getattr(args, "plugin_dir", None):
+        target = Path(args.plugin_dir)
+    elif host == "devin":
+        target = (ws / ".devin" / "hooks.v1.json") if ws is not None else devin_user_rel
+    else:
+        target = base_dir / rel_map[host]
     merged_bundle = dict(bundle)
     if target.is_file():
         try:
@@ -462,6 +536,19 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         return 0
     _atomic_write_json(target, merged_bundle)
     print(f"Installed Aetheris Microbrains ({host}) -> {target}")
+    if host == "devin":
+        for claude_cfg in (base_dir / ".claude" / "settings.local.json", base_dir / ".claude" / "settings.json"):
+            if claude_cfg.is_file():
+                try:
+                    raw_claude = claude_cfg.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    raw_claude = ""
+                if "aetheris_microbrains" in raw_claude or "aetheris-gate" in raw_claude:
+                    print(
+                        f"Warning: {claude_cfg} also defines Aetheris hooks; Devin auto-loads .claude/ hooks, "
+                        "which can cause double evaluation unless consolidated with `--host auto`."
+                    )
+                    break
     if host == "cursor":
         if effective_rust_shim:
             print(
