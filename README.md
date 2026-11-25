@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -29,7 +29,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
             ├── ❓ Escalate: Ambiguous / Unrecognized command or sensitive file read
             │       ↳ Escalates ("ask") to human supervisor. Fails closed on timeout.
             │
-            └── ✅ Allow: Verified safe according to policy profile (strict / dev)
+            └── ✅ Allow: Verified safe according to policy profile (strict / dev / guardrails)
                     ↳ Forwarded to execution environment.
 ```
 
@@ -66,6 +66,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [OMP (Oh My Pi) Integration (Zero-npm-Dep Extension + Benchmarks)](#omp-oh-my-pi-integration-zero-npm-dep-extension--benchmarks)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhands-hooksjson--python-securityanalyzer)
+- [Cursor Integration (Native Hooks v2 + Warm Rust Shim)](#cursor-integration-native-hooks-v2--warm-rust-shim)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -616,6 +617,24 @@ conversation.set_confirmation_policy(
 
 ---
 
+## Cursor Integration (Native Hooks v2 + Warm Rust Shim)
+
+Microbrains ships a first-class native **Cursor** (`cursor_hook_v2`) adapter and non-destructive `hooks.json` installer ([`hosts/cursor.py`](aetheris_microbrains/hosts/cursor.py)):
+
+- **Recommended Quick Install (user-level `~/.cursor/hooks.json`, shadow-first):**
+  ```bash
+  # 1. Start in observe-only shadow mode and verify live events in Cursor's Hooks output channel
+  aetheris install cursor --profile guardrails --shadow
+
+  # 2. Switch on active enforcement once verified (add `--workspace .` for project-local or cloud agents)
+  aetheris install cursor --profile guardrails
+  ```
+- **8 Native Cursor Hook Events:** Installs `preToolUse`, `postToolUse`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, and `afterFileEdit`. `preToolUse` and `postToolUse` use a matcher (`Write|Edit|StrReplace|Delete|Read|Grep|Glob|LS|SemanticSearch|WebFetch|WebSearch|Task|CallDynamicTool|GetDynamicTools`) so `Shell` and `MCP:*` are not double-gated and keep native interactive `"ask"` prompts on `beforeShellExecution`/`beforeMCPExecution`.
+- **Fail-Closed Pre-Gates + Fail-Open Post-Hook DLP:** Pre-events set `failClosed: true` while post/audit events (`postToolUse`, `afterShellExecution`, `afterMCPExecution`, `afterFileEdit`) set `failClosed: false` and pass `--replace-tool-output` for `updated_mcp_tool_output` secret redaction.
+- **Cursor-Safe Paths & Warm Latency:** Exempts Cursor's workspace/worktree data dirs (`~/.cursor/projects/...`, `~/.cursor/worktrees/...`) from control-plane blocks while keeping `.cursor/hooks.json`, `.cursor/mcp.json`, and `.env` protected, scopes cross-turn IFC via `conversation_id`, and auto-selects `aetheris-gate --auto-daemon` whenever available (override with `--no-rust-shim`).
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -640,7 +659,7 @@ Microbrains works alongside any AI agent or framework:
 | **Hermes Agent** | **Hermes Agent** | **Full E2E Tested** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
 | **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Advisory MCP** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
 | **Autonomous Coding Agents** | **SWE-agent**, **Aider** | **Python API** | **Python API** (`mb.decide(...)`) | Catches syntax errors, leaked credentials, and dangerous shell commands before tests run. |
-| **Cursor** | **Cursor** | **Hook v2 Tested** | **Native Hooks v2 + CLI** (`aetheris install cursor` / `--host cursor`) | Native `hooks.json` (`preToolUse`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `postToolUse`), `failClosed: true`, `conversation_id` IFC, and `--use-rust-shim`. |
+| **Cursor** | **Cursor** | **Hook v2 Tested** | **Native Hooks v2 + CLI** (`aetheris install cursor` / `--host cursor`) | 8-event `hooks.json` (`preToolUse`/`postToolUse` matcher-scoped, `beforeShellExecution`/`afterShellExecution`, `beforeMCPExecution`/`afterMCPExecution`, `beforeReadFile`, `afterFileEdit`), `failClosed` pre-gates, `--replace-tool-output` DLP, `conversation_id` IFC, and auto `aetheris-gate` shim. |
 | **OpenClaw** | **OpenClaw** | **Full E2E Tested** | **Native Gateway Plugin** (`openclaw-aetheris-microbrains/` / `aetheris install openclaw`) | Typed `before_tool_call` gate (`block`/`requireApproval`), `tool_result_persist` DLP scrubber, and managed daemon. |
 | **OpenCode** | **OpenCode** | **Config & Plugin Tested** | **Native Plugin + CLI** (`opencode-aetheris-microbrains/` / `aetheris install opencode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host opencode` daemon, `.opencode/` protection, and secret scrubbing. |
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
