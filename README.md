@@ -63,6 +63,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)](#opencode-integration-native-opencodeplugins-esm-plugin--benchmarks)
 - [Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)](#kilo-code-integration-native-kiloplugins-esm-plugin--benchmarks)
 - [Pi Coding Agent Integration (Zero-npm-Dep Native Extension + Benchmarks)](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks)
+- [OMP (Oh My Pi) Integration (Zero-npm-Dep Extension + Benchmarks)](#omp-oh-my-pi-integration-zero-npm-dep-extension--benchmarks)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -539,6 +540,31 @@ pi                                                   # auto-spawns loopback daem
 
 ---
 
+## OMP (Oh My Pi) Integration (Zero-npm-Dep Extension + Benchmarks)
+
+Give **OMP (`oh-my-pi`)** local pre-flight guardrails, secret scrubbing, and **56–81% cache-adjusted token savings** via a **zero-npm-dependency native extension** (`omp-aetheris-microbrains/index.js`):
+
+- **Auto-discovered & auto-spawning:** Installs into `.omp/extensions/` or `~/.omp/agent/extensions/`, auto-starts the loopback HTTP daemon (`AETHERIS_AUTO_START=1`) on first check, and shuts it down cleanly on `session_shutdown`.
+- **Interactive gating & post-tool DLP:** `tool_call` pre-flight blocking + `ctx.ui.confirm()` Layer 3 escalation; `tool_result` synchronous scrubbing (Stripe, AWS, GitHub PAT, PEM, Base64-wrapped keys, real DB URIs — intentionally ignoring placeholder passwords like `pass`/`changeme`) + `<system>` prompt-injection flagging.
+- **Self-protection & commands:** Guards `.omp/`, `.omp/extensions/`, `.omp/settings.json`, and `omp.json(c)` against tampering; supports `.omp/settings.json` (`"aetheris"`), branch-aware `aetheris-stats` persistence, `/reload`, `/aetheris`, and `/aetheris-config`.
+
+```bash
+pip install -e .
+aetheris install omp --self-test
+aetheris install omp --workspace .                    # or omit --workspace for ~/.omp/agent/extensions/
+omp                                                   # auto-spawns loopback daemon (or: aetheris-daemon --http --host omp --port 8765)
+```
+
+| Benchmark Suite | Results (OMP + Microbrains) |
+|---|---|
+| **Warmed HTTP Daemon (`--host omp`) vs. In-Process** | **HTTP Daemon:** **1.41–4.25 ms** p50 · **3.16–6.93 ms** p95 (`bash-safe` `2.15/3.16 ms`, `write-file` `2.24/4.45 ms`, `read-file` `1.85/4.16 ms`) · **In-Process:** **0.2–0.4 ms** p50 / **0.5–0.8 ms** p95 |
+| **Security (22 Attack Vectors)** | **100%** intercepted (**22/22** — **72.7%** hard-blocked `16/22`, **27.3%** escalated `6/22`, **0%** missed) |
+| **Benign Operations (12 Cases)** | **0%** false deny (**0/12** — **83.3%** allowed `10/12`, **16.7%** escalated `2/12`: `npm test`, `git add .`) |
+| **Post-Tool DLP & Prompt Injection** | **100%** real secret redaction (Stripe, AWS, GitHub PAT, PEM, Base64-Stripe, real DB URI; placeholder DB passwords skipped) + `<system>` injection flagged |
+| **Simulated 20-Step OMP Session *(modeled)*** | **0/8** hazards executed (vs. 8/8) · **0** recovery turns wasted (vs. 24–40) · **60,000 → 9,600** tool-schema tokens (**56–81%** cache-adjusted net savings, **~60 ms** total gate) |
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -994,6 +1020,20 @@ Headline local CPU results for Pi (`v0.84.2`) paired with Microbrains (`v0.7.6`)
 | Warm Loopback HTTP Daemon *(Pi extension transport)* | **~6 ms** | **~24 ms** *(vs. ~400 ms cold spawn)* |
 
 > **Scope note:** Sub-millisecond numbers are **in-process engine measurements** on small payloads; full multi-hundred-line AST diffs take `~5.5–31.5 ms` p95 in-process, and the warm localhost HTTP daemon adds loopback transport overhead (`~6 ms` p50 / `~10 ms` mean / `~24 ms` p95 on Windows). Token/dollar figures (**-81.0%** prefill tokens; **~\$0.079/loop** at \$1.50/M input) are local CPU benchmark estimates, not live LLM invoice measurements.
+
+### 7. OMP (Oh My Pi) Benchmark Summary (Warm HTTP Daemon)
+
+OMP (`oh-my-pi`) paired with Microbrains achieves **100%** attack interception (`22/22`), **0%** benign false denies (`0/12`), **56–81%** modeled cache-adjusted token savings (`60,000 → 9,600` Top-4 sticky schema tokens over a simulated 20-step session), and sub-5 ms typical `p95` overhead on the warmed HTTP daemon (`<1 ms` in-process). See [OMP (Oh My Pi) Integration](#omp-oh-my-pi-integration-zero-npm-dep-extension--benchmarks) for 1-command setup (`aetheris install omp --workspace .`).
+
+| Mode & Tool Type | p50 | p95 | Avg |
+| --- | ---: | ---: | ---: |
+| **Warmed HTTP Daemon** — `bash-safe` | **2.15 ms** | **3.16 ms** | 2.25 ms |
+| **Warmed HTTP Daemon** — `bash-dangerous` | **1.96 ms** | **3.36 ms** | 2.13 ms |
+| **Warmed HTTP Daemon** — `bash-escalate` | **4.25 ms** | **6.93 ms** | 4.66 ms |
+| **Warmed HTTP Daemon** — `write-file` | **2.24 ms** | **4.45 ms** | 2.69 ms |
+| **Warmed HTTP Daemon** — `write-protected` | **1.41 ms** | **5.01 ms** | 1.79 ms |
+| **Warmed HTTP Daemon** — `read-file` | **1.85 ms** | **4.16 ms** | 2.21 ms |
+| **In-Process Python API** *(all tool types)* | **0.2–0.4 ms** | **0.5–0.8 ms** | 0.3–1.2 ms |
 
 ---
 
