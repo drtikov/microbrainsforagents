@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/.zcode-plugin/hooks/zcode_gate.py",
+              "--session-state",
+              "auto",
+              "--log-decisions"
+            ],
+            "timeoutMs": 10000,
+            "statusMessage": "Aetheris pre-flight gate"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|Read|Grep|WebFetch|WebSearch|mcp__.*",
+        "hooks": [
+          {
+            "type": "process",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/.zcode-plugin/hooks/zcode_gate.py",
+              "--event",
+              "post-tool-use",
+              "--session-state",
+              "auto",
+              "--log-decisions"
+            ],
+            "timeoutMs": 10000,
+            "statusMessage": "Aetheris post-tool audit"
+          }
+        ]
+      }
+    ]
+  }
+}

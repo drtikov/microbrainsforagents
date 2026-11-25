@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -64,6 +64,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)](#kilo-code-integration-native-kiloplugins-esm-plugin--benchmarks)
 - [Pi Coding Agent Integration (Zero-npm-Dep Native Extension + Benchmarks)](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks)
 - [OMP (Oh My Pi) Integration (Zero-npm-Dep Extension + Benchmarks)](#omp-oh-my-pi-integration-zero-npm-dep-extension--benchmarks)
+- [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer](#️-scope-threat-model--defense-in-depth-disclaimer)
 - [🤝 Compatible Agent Ecosystems](#-compatible-agent-ecosystems)
 - [💡 Key Benefits & Architectural Features](#-key-benefits--architectural-features)
@@ -565,6 +566,22 @@ omp                                                   # auto-spawns loopback dae
 
 ---
 
+## ZCode Integration (One-Click Marketplace Plugin + CLI Installer)
+
+Install **Aetheris Microbrains** inside **ZCode** in one click via the root `marketplace.json` + `.zcode-plugin/` bundle, or pin a specific Python environment via `aetheris install zcode`:
+
+- **Route A — One-Click Plugin Marketplace (Zero Config Editing):** Open **ZCode → Settings → Plugin Marketplace → Add**, paste `https://github.com/drtikov/microbrainsforagents`, and install **Aetheris Microbrains**. ZCode auto-enables `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), the `microbrains` skill, and `/mb:audit`, `/mb:doctor`, and `/mb:preflight` commands.
+- **Route B — Pinned CLI / User-Scope Installer:** `pip install -e .` and run `aetheris install zcode --workspace .` (or `python -m aetheris_microbrains.install_zcode --user` for all workspaces) to pin `sys.executable` into `.zcode/config.json` / `~/.zcode/cli/config.json` with `hooks.enabled: true`.
+- **Contract & Layer 0 Protection:** `--host zcode` emits strict ZCode `PreToolUse` JSON (`permissionDecision: allow|ask|deny`, exit `2` on block, reason on `stderr`) and write-protects `.zcode/`, `.zcode/config.json`, `.zcode/cli/config.json`, and `.zcode-plugin/`.
+
+```bash
+pip install -e .
+aetheris install zcode --self-test
+aetheris install zcode --workspace .
+```
+
+---
+
 ## ⚠️ Scope, Threat Model & Defense-in-Depth Disclaimer
 
 > [!IMPORTANT]
@@ -594,6 +611,7 @@ Microbrains works alongside any AI agent or framework:
 | **Kilo Code** | **Kilo Code** | **Config & Plugin Tested** | **Native Plugin + CLI** (`kilocode-aetheris-microbrains/` / `aetheris install kilocode`) | ESM `tool.execute.before` / `tool.execute.after` plugin blocking via `--host kilocode` daemon, `.kilo/` protection, and secret scrubbing. |
 | **Pi Coding Agent** | **Pi** | **Config & Extension Tested** | **Native Extension + CLI** (`pi-aetheris-microbrains/` / `aetheris install pi`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` status command, and `.pi/` protection. |
 | **OMP (Oh My Pi)** | **OMP (`oh-my-pi`)** | **Config & Extension Tested** | **Native Extension + CLI** (`omp-aetheris-microbrains/` / `aetheris install omp`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` & `/aetheris-config`, and `.omp/` protection. |
+| **ZCode** | **ZCode** | **Bundle & Contract Tested** | **Marketplace Plugin + CLI** (`.zcode-plugin/` / `aetheris install zcode`) | One-click Marketplace `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), `microbrains` skill, `/mb:audit`/`doctor`/`preflight`, and `.zcode/` protection. |
 | **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 

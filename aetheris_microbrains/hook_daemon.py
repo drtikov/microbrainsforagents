@@ -674,8 +674,8 @@ def serve_http(
     auth_value = str(token or os.getenv("AETHERIS_DAEMON_TOKEN") or "").strip() or secrets.token_hex(16)
     daemon_flags = dict(flags or {})
     http_host_flag = str(daemon_flags.get("host") or "claude").strip().lower()
-    if http_host_flag not in {"claude", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder"}:
-        print(f"hook HTTP daemon requires host='claude', 'openclaw', 'opencode', 'kilocode', 'pi', 'omp', or 'qoder' (got '{http_host_flag}')")
+    if http_host_flag not in {"claude", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode"}:
+        print(f"hook HTTP daemon requires host='claude', 'openclaw', 'opencode', 'kilocode', 'pi', 'omp', 'qoder', or 'zcode' (got '{http_host_flag}')")
         return 2
     cache = VerdictCache()
     target = Path(state_path) if state_path else get_daemon_state_path()
@@ -835,7 +835,7 @@ def serve_http(
                 return
             req_flags = dict(daemon_flags)
             req_host_hdr = str(self.headers.get("X-Aetheris-Host") or "").strip().lower()
-            if req_host_hdr in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "cursor", "generic"}:
+            if req_host_hdr in {"claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"}:
                 req_flags["host"] = req_host_hdr
             effective_host = str(req_flags.get("host") or "claude").strip().lower()
             req = {"event": ev, "payload": payload, "flags": req_flags}
@@ -912,7 +912,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--max-requests", type=int, default=None, help="Stop after N requests (testing)")
     parser.add_argument(
         "--host",
-        choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "cursor", "generic"],
+        choices=["claude", "codex", "hermes", "antigravity", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "cursor", "generic"],
         default="claude",
         help="Default host output adapter (override per HTTP request via X-Aetheris-Host)",
     )

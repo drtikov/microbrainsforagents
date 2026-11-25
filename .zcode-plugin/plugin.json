@@ -1,0 +1,15 @@
+{
+  "name": "aetheris-microbrains",
+  "version": "0.7.6",
+  "description": "Deterministic sub-2ms pre-flight security gate for ZCode: AST lint, secret-egress veto, protected-path guard, shell vetoes, context hygiene, and a forensic decision journal, wired as PreToolUse/PostToolUse plugin hooks plus /mb:* commands and a microbrains skill.",
+  "author": {
+    "name": "Dmitry Tikov",
+    "email": "drtikov@gmail.com"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/drtikov/microbrainsforagents",
+  "repository": "https://github.com/drtikov/microbrainsforagents",
+  "skills": "./.zcode-plugin/skills",
+  "commands": "./.zcode-plugin/commands",
+  "hooks": "./.zcode-plugin/hooks/hooks.json"
+}
