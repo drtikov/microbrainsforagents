@@ -98,7 +98,7 @@ def test_cursor_host_flag_accepted_by_cli_and_hook(monkeypatch, capsys):
         log_decisions=False,
     )
     assert res["host"] == "cursor"
-    assert res["host_contract"] == "cursor_hook_v1"
+    assert res["host_contract"] == "cursor_hook_v2"
     assert res["decision"] == "deny"
 
 
