@@ -117,7 +117,7 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <antigravity|claude|codex|hermes|cursor|dsh|auto>  # Configure host hooks/plugins
+aetheris install <claude|cursor|devin|cline|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
@@ -229,8 +229,12 @@ Use Microbrains with **stock VS Code Cline** without forking or rebuilding the e
 
 - **Easy 1-Command Install (POSIX + Windows `.ps1`):**
   ```bash
-  pip install aetheris-microbrains
+  pip install -e .
+  aetheris install cline --self-test
+  # Project-level (.clinerules/hooks/):
   aetheris install cline --workspace . --profile guardrails
+  # Or global (~/Documents/Cline/Rules/Hooks/ across all VS Code workspaces):
+  aetheris install cline --profile guardrails
   ```
   Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (or `~/Documents/Cline/Rules/Hooks/` without `--workspace .`), auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
 - **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
