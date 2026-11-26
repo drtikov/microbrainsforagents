@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "ouroboros", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -106,6 +106,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("cline")
     if (home / ".minimax").exists() or (ws / ".minimax").exists():
         detected.append("mcode")
+    if (home / ".ouroboros").exists() or (ws / ".ouroboros").exists() or (ws / "ouroboros" / "tools").is_dir():
+        detected.append("ouroboros")
     return detected
 
 
@@ -479,6 +481,53 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("MCODE SELF-TEST PASSED" if ok else "MCODE SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "ouroboros" and args.self_test:
+        from .hook import evaluate_hook_payload
+        from .ouroboros_gate import OuroborosMicrobrainsGate, wrap_ouroboros_registry
+
+        sh_deny = evaluate_hook_payload(
+            {"tool_name": "run_command", "tool_input": {"command": "rm -rf /"}},
+            host="ouroboros",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"tool_name": "run_command", "tool_input": {"command": "git status"}},
+            host="ouroboros",
+            log_decisions=False,
+        )
+        patch_deny = evaluate_hook_payload(
+            {"tool_name": "apply_patch", "tool_input": {"path": "app.py", "patch": "import os\nos.system('rm -rf /')"}},
+            host="ouroboros",
+            log_decisions=False,
+        )
+        read_ask = evaluate_hook_payload(
+            {"tool_name": "read_file", "tool_input": {"path": ".env"}},
+            host="ouroboros",
+            log_decisions=False,
+        )
+
+        class _DummyOuroborosRegistry:
+            def execute(self, name: str, tool_args: dict) -> str:
+                return f"ran:{name}:{tool_args}"
+
+        dummy = _DummyOuroborosRegistry()
+        wrap_ouroboros_registry(dummy, gate=OuroborosMicrobrainsGate(profile="dev"))
+        blocked_out = dummy.execute("run_command", {"command": "rm -rf /"})
+        allowed_out = dummy.execute("run_command", {"command": "git status"})
+
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and sh_deny.get("host_contract") == "ouroboros_registry_v1"
+            and sh_allow.get("exit_code") == 0
+            and patch_deny.get("exit_code") == 2
+            and read_ask.get("decision") == "escalate"
+            and isinstance(blocked_out, str)
+            and blocked_out.startswith("MICROBRAINS_DENY")
+            and str(allowed_out).startswith("ran:run_command:")
+        )
+        print("OUROBOROS SELF-TEST PASSED" if ok else "OUROBOROS SELF-TEST FAILED")
+        return 0 if ok else 1
+
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload
 
@@ -685,6 +734,20 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
             f'Note: For Cline CLI, run `cline config set hooksEnabled=true` and pass `--hooks-dir "{cli_hint_dir}"` '
             "(or install to `~/.cline/hooks/` via `aetheris install cline --target cli`)."
         )
+        return 0
+    if host == "ouroboros":
+        prof = str(args.profile or "dev")
+        snippet = (
+            "from aetheris_microbrains.ouroboros_gate import wrap_ouroboros_registry\n"
+            f'wrap_ouroboros_registry(registry, profile="{prof}", wrap_schemas=True)'
+        )
+        if args.dry_run:
+            print("DRY RUN - Ouroboros integrates in-process on ToolRegistry (no hook config file needed):")
+            print(snippet)
+            return 0
+        print("Ouroboros integrates directly in Python on ouroboros.tools.registry.ToolRegistry:")
+        print(snippet)
+        print("Verify anytime with: aetheris install ouroboros --self-test")
         return 0
     bundle = _build_generic_hook_bundle(
         host,

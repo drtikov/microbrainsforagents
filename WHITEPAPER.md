@@ -36,7 +36,7 @@ Crucially, these failures stem from the **surrounding execution architecture**, 
 
 - Can deterministic local analysis intercept syntax, supply-chain, and policy failures in sub-millisecond time before tools run?
 - Can session-sticky tool routing preserve LLM prompt-cache prefixes while still shrinking tool-schema bloat?
-- Can one control plane govern heterogeneous coding harnesses (`Claude Code`, `Codex CLI`, `Google Antigravity`, `OpenClaw`, `Qoder`, `Hermes`, `DeepSeek Harness`, `Cursor`, `Devin`, `Cline`, `MiniMax Code`) without altering foundation models?
+- Can one control plane govern heterogeneous coding harnesses (`Claude Code`, `Codex CLI`, `Google Antigravity`, `OpenClaw`, `Qoder`, `Hermes`, `DeepSeek Harness`, `Cursor`, `Devin`, `Cline`, `MiniMax Code`, `Ouroboros`) without altering foundation models?
 - Can safety mechanisms remain resistant to evasion (shell wrappers, obfuscated globs, self-tampering) and fail closed?
 - Can an external control layer measurably increase *verified successful engineering output per unit of compute*?
 
@@ -147,6 +147,7 @@ Static AST and tokenizer analysis checks syntax and paths before execution; it d
 | **Devin** | `.devin/hooks.v1.json` / `%APPDATA%\devin\config.json` (`PreToolUse` / `PostToolUse`) | **Hook & Installer Tested (Contract)** | `--host devin` / `--host auto`, `aetheris install devin` | Native `devin_hook_v1` (`decision: block` + exit 2, ask -> host permission deferral), `DEVIN_PROJECT_DIR` auto-detection, structured `tool_response` DLP `additionalContext`, `.devin/` protection, and `.claude/` overlap warning |
 | **Cline (VS Code & CLI)** | `.clinerules/hooks/`, `~/Documents/Cline/Rules/Hooks/`, `~/.cline/hooks/` (`PreToolUse` / `PostToolUse` + `.ps1`) | **Hook & Installer Tested (Contract)** | `--host cline`, `aetheris install cline` | Native `cline_hook_v1` (`cancel: true/false`, `errorMessage`, `contextModification`), `CLINE_DIR`/`CLINE_HOOKS_DIR` support, SEARCH/REPLACE diff AST inspection, `postToolUse.result` DLP, `.clinerules/`/`.cline/` protection, and POSIX + Windows scripts |
 | **MiniMax Code (`mcode`)** | `.minimax/hooks.json` / `$MINIMAX_DATA_DIR/hooks.json` (`PreToolUse` / `PostToolUse`) | **Hook & Installer Tested (Contract)** | `--host mcode`, `aetheris install mcode` | Native `mcode_pretooluse_v1` (`permissionDecision`, exit 2 + stderr, `commandWindows`, `timeout: 10`), lowercase native matcher, `PostToolUse` `additionalContext` DLP, UTF-8 BOM stdin strip, and `.minimax/` protection |
+| **Ouroboros** | In-process `ToolRegistry` (`execute` / `execute_result` / `schemas`) | **SDK & Registry Tested** | `--host ouroboros`, `wrap_ouroboros_registry` | Native `ouroboros_registry_v1` tool/arg mapping (`run_command`, `apply_patch`, `edit_batch`, `read_file`), reentrancy-safe pre-flight gate, PostToolUse DLP redaction, and MoE schema narrowing |
 
 ### 4.2 Architectural Case Study: Contextual Shell Classification (Windows PowerShell)
 
@@ -272,7 +273,7 @@ To test H1–H3 rigorously without selection bias or safety degradation, we prop
 ## 8. Development Roadmap (Implemented vs. Planned)
 
 - **Phase I — Foundation & Security Core *(Largely Implemented)*:** Pure-stdlib 35-module security core (`verify-core`), 4-layer structural AST/shell/taint engine, gate self-write protection, allowlist-hardened escalation policies, Cedar/Rego Policy-as-Code, MCP pinning + `$SECRET:<NAME>` Secret Broker, Rust native shim + OS sandboxing, OTel GenAI + Audit UI + CI PR gate.
-- **Phase II — Multi-Host Interoperability *(Implemented & Expanding)*:** Turnkey 1-command native hook adapters/installers for Claude Code, Codex CLI, Google Antigravity, OpenClaw (HTTP/1.1 keep-alive + DLP), Qoder Desktop/CLI, Hermes FastMCP, DeepSeek Harness, Cursor, Devin, Cline (VS Code & CLI), and MiniMax Code (`mcode`).
+- **Phase II — Multi-Host Interoperability *(Implemented & Expanding)*:** Turnkey 1-command native hook adapters/installers and SDK wrappers for Claude Code, Codex CLI, Google Antigravity, OpenClaw (HTTP/1.1 keep-alive + DLP), Qoder Desktop/CLI, Hermes FastMCP, DeepSeek Harness, Cursor, Devin, Cline (VS Code & CLI), MiniMax Code (`mcode`), and Ouroboros (`ToolRegistry`).
 - **Phase III — Large-Diff Performance & Engine Modularization *(Planned)*:** Single-pass shell tokenization (eliminating duplicate `shlex` scans), cross-turn AST caching for 400+ line diffs, and decomposing `layered_decision_engine.py` into focused sub-modules (policy, shell, AST, paths, journal).
 - **Phase IV — Validated Multi-Agent Efficiency Benchmarks *(In Research)*:** Large-$N$ multi-harness A/B harnesses measuring $E = \text{Verified successful tasks} / \text{Total computational cost}$ with verified hook telemetry and adaptive policy calibration from audited outcomes.
 

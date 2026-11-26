@@ -634,6 +634,10 @@ def evaluate_hook_payload(
         from .hosts.mcode import to_kernel_payload as _mcode_to_kernel_payload
 
         payload = _mcode_to_kernel_payload(payload)
+    elif resolved_host == "ouroboros" and isinstance(payload, dict):
+        from .hosts.ouroboros import to_kernel_payload as _ouroboros_to_kernel_payload
+
+        payload = _ouroboros_to_kernel_payload(payload)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -1163,6 +1167,10 @@ def evaluate_post_tool_use_payload(
         from .hosts.mcode import to_kernel_payload as _mcode_to_kernel_payload
 
         payload = _mcode_to_kernel_payload(payload)
+    elif resolved_host == "ouroboros" and isinstance(payload, dict):
+        from .hosts.ouroboros import to_kernel_payload as _ouroboros_to_kernel_payload
+
+        payload = _ouroboros_to_kernel_payload(payload)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(

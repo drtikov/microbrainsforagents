@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **Ouroboros**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -46,6 +46,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [MiniMax Code (`mcode`) Integration (Native `.minimax/hooks.json` + CLI)](#minimax-code-mcode-integration-native-minimaxhooksjson--cli)
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhandshooksjson--python-securityanalyzer)
+- [Ouroboros Integration (`ToolRegistry` 2-Line Drop-In Gate)](#ouroboros-integration-toolregistry-2-line-drop-in-gate)
 - [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
 - [🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)](#-google-antigravity-integration-native-plugin-hooks--mcp--skill--rules)
 - [🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)](#-hermes-agent-integration-fastmcp--lifecycle-hooks)
@@ -99,6 +100,7 @@ Microbrains works alongside any AI agent or framework:
 | **OMP (Oh My Pi)** | **OMP (`oh-my-pi`)** | **Config & Extension Tested** | **Native Extension + CLI** (`omp-aetheris-microbrains/` / `aetheris install omp`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` & `/aetheris-config`, and `.omp/` protection. |
 | **ZCode** | **ZCode** | **Bundle & Contract Tested** | **Marketplace Plugin + CLI** (`.zcode-plugin/` / `aetheris install zcode`) | One-click Marketplace `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), `microbrains` skill, `/mb:audit`/`doctor`/`preflight`, and `.zcode/` protection. |
 | **OpenHands** | **OpenHands** | **Hook & SDK Tested** | **Hook Installer + SDK Analyzer** (`.openhands/hooks.json` + `AetherisSecurityAnalyzer` / `aetheris install openhands`) | `PreToolUse`/`PostToolUse` gating for `terminal`/`file_editor`, Python SDK `SecurityAnalyzerBase` (`LOW`/`MEDIUM`/`HIGH`), and `.openhands/` protection. |
+| **Ouroboros** | **Ouroboros** (`razzant/ouroboros`) | **SDK & Registry Tested** | **Python Registry Wrapper + CLI** (`wrap_ouroboros_registry` / `aetheris install ouroboros --self-test`) | 2-line drop-in wrapper on `ToolRegistry` (`execute`/`execute_result`/`schemas`), native tool mapping (`run_command`, `apply_patch`, `edit_batch`, `read_file`), and PostToolUse DLP scrubbing. |
 | **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 
@@ -119,7 +121,7 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <claude|cursor|devin|cline|mcode|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
+aetheris install <claude|cursor|devin|cline|mcode|ouroboros|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
@@ -316,6 +318,29 @@ conversation.set_confirmation_policy(
     ConfirmRisky(threshold=SecurityRisk.MEDIUM, analyzer=AetherisSecurityAnalyzer())
 )
 ```
+
+---
+
+## Ouroboros Integration (`ToolRegistry` 2-Line Drop-In Gate)
+
+For **Ouroboros** (`razzant/ouroboros`), attach Microbrains directly in-process to `ToolRegistry` in two lines with zero hook-process spawn overhead (`ouroboros_registry_v1` via [`hosts/ouroboros.py`](aetheris_microbrains/hosts/ouroboros.py) and [`ouroboros_gate.py`](aetheris_microbrains/ouroboros_gate.py)):
+
+```python
+from aetheris_microbrains.ouroboros_gate import wrap_ouroboros_registry
+
+wrap_ouroboros_registry(registry, profile="dev", wrap_schemas=True)
+```
+
+Verify the Ouroboros adapter and registry gate anytime:
+
+```bash
+aetheris install ouroboros --self-test
+```
+
+What it protects out of the box:
+- **Native tool & arg normalization:** Maps `run_command`, `run_script`, `read_file`, `list_files`, `write_file`, `edit_text`, `apply_patch`, `edit_batch`, `search_code`, `query_code`, `web_search`, `browse_page`, `browser_action`, and read-only/control tools (`plan_task`, `update_focus`, `finish_task`) directly onto the Microbrains kernel.
+- **Reentrancy-safe `execute` + `execute_result` gating & DLP:** Intercepts destructive commands, `.env` reads, and malicious patches pre-flight, and redacts secrets from tool outputs post-flight.
+- **Optional MoE schema narrowing:** Calls `OuroborosMicrobrainsGate.narrow_schemas(...)` on Ouroboros OpenAI-style tool schemas with `always_include` preservation.
 
 ---
 
