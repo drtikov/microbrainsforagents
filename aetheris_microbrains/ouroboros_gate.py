@@ -49,6 +49,7 @@ class OuroborosMicrobrainsGate:
         strict_ast: bool = False,
         session_state_path: Optional[str] = None,
         journal_path: Optional[str] = None,
+        tool_aliases: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.profile = profile
         self.policy_path = policy_path
@@ -62,9 +63,18 @@ class OuroborosMicrobrainsGate:
         self.strict_ast = strict_ast
         self.session_state_path = session_state_path
         self.journal_path = journal_path
+        self.tool_aliases: Dict[str, str] = (
+            {str(k).strip().lower(): str(v).strip() for k, v in tool_aliases.items() if str(k).strip() and str(v).strip()}
+            if tool_aliases
+            else {}
+        )
         self.last_verdict: Optional[Dict[str, Any]] = None
         self.last_post_verdict: Optional[Dict[str, Any]] = None
         self._tl = threading.local()
+
+    def _resolve_tool_name(self, name: str) -> str:
+        raw = str(name or "").strip()
+        return self.tool_aliases.get(raw.lower(), raw)
 
     def check_pre(self, name: str, args: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         """Evaluate an Ouroboros tool call before execution."""
@@ -73,7 +83,7 @@ class OuroborosMicrobrainsGate:
         payload: Dict[str, Any] = {
             "hook_event_name": "PreToolUse",
             "session_id": self.session_id,
-            "tool_name": str(name or ""),
+            "tool_name": self._resolve_tool_name(name),
             "tool_input": dict(args or {}),
         }
         if self.cwd:
@@ -131,7 +141,7 @@ class OuroborosMicrobrainsGate:
         payload: Dict[str, Any] = {
             "hook_event_name": "PostToolUse",
             "session_id": self.session_id,
-            "tool_name": str(name or ""),
+            "tool_name": self._resolve_tool_name(name),
             "tool_input": dict(args or {}),
             "tool_response": raw_text,
         }

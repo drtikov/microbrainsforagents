@@ -328,7 +328,7 @@ For **Ouroboros** (`razzant/ouroboros`), attach Microbrains directly in-process 
 ```python
 from aetheris_microbrains.ouroboros_gate import wrap_ouroboros_registry
 
-wrap_ouroboros_registry(registry, profile="dev", wrap_schemas=True)
+wrap_ouroboros_registry(registry, profile="dev")
 ```
 
 Verify the Ouroboros adapter and registry gate anytime:
@@ -338,9 +338,9 @@ aetheris install ouroboros --self-test
 ```
 
 What it protects out of the box:
-- **Native tool & arg normalization:** Maps `run_command`, `run_script`, `read_file`, `list_files`, `write_file`, `edit_text`, `apply_patch`, `edit_batch`, `search_code`, `query_code`, `web_search`, `browse_page`, `browser_action`, and read-only/control tools (`plan_task`, `update_focus`, `finish_task`) directly onto the Microbrains kernel.
+- **Native + fork tool normalization:** Maps upstream (`run_command`, `run_script`, `read_file`, `list_files`, `write_file`, `edit_text`, `apply_patch`, `edit_batch`, `search_code`, `query_code`, `web_search`, `browse_page`, `browser_action`, `plan_task`, `update_focus`, `finish_task`) and common fork names (`run_shell`, `str_replace_editor`, `repo_read`, `repo_write`) onto the Microbrains kernel — or pass custom names via `tool_aliases={"my_shell": "Bash"}`.
+- **Preserves LLM prefix prompt caching by default:** `wrap_schemas` defaults to `False` so `registry.schemas()` stays bit-identical across long prompt-cached sessions (e.g., 680k-token contexts); MoE schema narrowing (`OuroborosMicrobrainsGate.narrow_schemas(...)`) is strictly opt-in.
 - **Reentrancy-safe `execute` + `execute_result` gating & DLP:** Intercepts destructive commands, `.env` reads, and malicious patches pre-flight, and redacts secrets from tool outputs post-flight.
-- **Optional MoE schema narrowing:** Calls `OuroborosMicrobrainsGate.narrow_schemas(...)` on Ouroboros OpenAI-style tool schemas with `always_include` preservation.
 
 ---
 

@@ -203,3 +203,100 @@ def test_ouroboros_cli_self_test_and_detect(tmp_path: Path, capsys):
 def test_ouroboros_preserves_pure_stdlib_core_isolation():
     report = verify_core_isolation()
     assert report["ok"] is True, report
+
+
+def test_ouroboros_fork_tool_names_custom_aliases_and_cache_preservation():
+    # 1. `run_shell`: blocks dangerous shell, allows benign shell
+    deny_shell = evaluate_hook_payload(
+        {"tool_name": "run_shell", "tool_input": {"command": "rm -rf /"}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert deny_shell["decision"] == "deny"
+    assert deny_shell["exit_code"] == 2
+
+    allow_shell = evaluate_hook_payload(
+        {"tool_name": "run_shell", "tool_input": {"command": "git status"}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert allow_shell["decision"] == "allow"
+    assert allow_shell["exit_code"] == 0
+
+    # 2. `str_replace_editor`: view `.env` escalates, malicious str_replace denies
+    view_env = evaluate_hook_payload(
+        {"tool_name": "str_replace_editor", "tool_input": {"command": "view", "path": ".env"}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert view_env["decision"] == "escalate"
+
+    bad_edit = evaluate_hook_payload(
+        {
+            "tool_name": "str_replace_editor",
+            "tool_input": {"command": "str_replace", "path": "app.py", "old_str": "x = 1", "new_str": "import os\nos.system('id')"},
+        },
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert bad_edit["decision"] == "deny"
+    assert bad_edit["exit_code"] == 2
+
+    # 3. `repo_read`: `.env` escalates, `README.md` allows
+    repo_env = evaluate_hook_payload(
+        {"tool_name": "repo_read", "tool_input": {"path": ".env"}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert repo_env["decision"] == "escalate"
+
+    repo_readme = evaluate_hook_payload(
+        {"tool_name": "repo_read", "tool_input": {"path": "README.md"}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert repo_readme["decision"] == "allow"
+    assert repo_readme["exit_code"] == 0
+
+    # 4. Custom `tool_aliases` and default `wrap_schemas=False` preserves `schemas()` untouched
+    class _ForkRegistry:
+        def execute(self, name: str, args: dict) -> str:
+            return f"ok:{name}"
+
+        def schemas(self) -> list[dict]:
+            return [
+                {"type": "function", "function": {"name": "fork_exec", "description": "Shell"}},
+                {"type": "function", "function": {"name": "fork_read", "description": "Read"}},
+                {"type": "function", "function": {"name": "repo_read", "description": "Repo read"}},
+            ]
+
+    reg = _ForkRegistry()
+    orig_schemas_fn = reg.schemas
+    orig_schemas_list = reg.schemas()
+    wrap_ouroboros_registry(
+        reg,
+        profile="dev",
+        tool_aliases={"fork_exec": "Bash", "fork_read": "Read"},
+    )
+    # Prompt cache safety: schemas() must remain unwrapped in __dict__ and output unchanged.
+    assert "schemas" not in reg.__dict__
+    assert reg.schemas == orig_schemas_fn
+    assert reg.schemas() == orig_schemas_list
+
+    blocked_custom = reg.execute("fork_exec", {"command": "rm -rf /"})
+    assert blocked_custom.startswith("MICROBRAINS_DENY")
+    allowed_custom = reg.execute("fork_exec", {"command": "git status"})
+    assert allowed_custom == "ok:fork_exec"
+    esc_custom = reg.execute("fork_read", {"path": ".env"})
+    assert esc_custom.startswith("MICROBRAINS_ESCALATE")
+
+
+def test_ouroboros_preserves_pure_stdlib_core_isolation():
+    report = verify_core_isolation()
+    assert report["ok"] is True, report

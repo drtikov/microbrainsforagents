@@ -739,7 +739,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         prof = str(args.profile or "dev")
         snippet = (
             "from aetheris_microbrains.ouroboros_gate import wrap_ouroboros_registry\n"
-            f'wrap_ouroboros_registry(registry, profile="{prof}", wrap_schemas=True)'
+            f'wrap_ouroboros_registry(registry, profile="{prof}")'
         )
         if args.dry_run:
             print("DRY RUN - Ouroboros integrates in-process on ToolRegistry (no hook config file needed):")

@@ -378,7 +378,7 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tool_raw, tool_input = _extract_tool_and_input(payload)
 
     tool_lower = tool_raw.lower()
-    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "execute_bash", "run_command", "terminal"}:
+    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "execute_bash", "run_command", "run_shell", "terminal"}:
         tool_name = "execute_shell"
     elif tool_lower in {"file_editor", "str_replace_editor"}:
         subcmd = str(tool_input.get("command") or "").strip().lower()

@@ -9,17 +9,20 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 OUROBOROS_TOOL_ALIASES: Dict[str, str] = {
     # Shell & script execution
     "run_command": "Bash",
+    "run_shell": "Bash",
     "run_script": "Bash",
     "start_service": "Bash",
     "stop_service": "Bash",
     "bash": "Bash",
     # File inspection & listing
     "read_file": "Read",
+    "repo_read": "Read",
     "read": "Read",
     "list_files": "Glob",
     "glob": "Glob",
     # File writes & edits
     "write_file": "Write",
+    "repo_write": "Write",
     "write": "Write",
     "edit_text": "Edit",
     "apply_patch": "Edit",
@@ -88,12 +91,21 @@ def _coalesce_edit_batch(edits: Iterable[Any]) -> str:
     return "\n".join(snippets)
 
 
-def to_kernel_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+def to_kernel_payload(
+    payload: Dict[str, Any],
+    *,
+    tool_aliases: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
     """Translate an Ouroboros ``ToolRegistry`` call payload onto Microbrains' kernel schema."""
     out = dict(payload or {})
     raw = str(out.get("tool_name") or out.get("toolName") or out.get("tool") or "").strip()
     raw_low = raw.lower()
-    canonical = OUROBOROS_TOOL_ALIASES.get(raw_low, raw)
+    custom_aliases = (
+        {str(k).strip().lower(): str(v).strip() for k, v in tool_aliases.items() if str(k).strip() and str(v).strip()}
+        if tool_aliases
+        else {}
+    )
+    canonical = custom_aliases.get(raw_low) or OUROBOROS_TOOL_ALIASES.get(raw_low, raw)
     if canonical and canonical != raw:
         out["tool_name"] = canonical
 
