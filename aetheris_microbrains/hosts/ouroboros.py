@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 # Ouroboros native tool names (aligned with `razzant/ouroboros` ToolRegistry)
@@ -78,6 +79,16 @@ OUROBOROS_TOOL_ALIASES: Dict[str, str] = {
 }
 
 
+def _coerce_shell_command(val: Any) -> Optional[str]:
+    """Coerce string or argv token list/tuple into a shell command string."""
+    if isinstance(val, str):
+        return val
+    if isinstance(val, (list, tuple)):
+        tokens = [str(tok) for tok in val if tok is not None]
+        return shlex.join(tokens) if tokens else ""
+    return None
+
+
 def _coalesce_edit_batch(edits: Iterable[Any]) -> str:
     snippets: List[str] = []
     for item in edits:
@@ -115,8 +126,10 @@ def to_kernel_payload(
         raw_input = alt if isinstance(alt, dict) else {}
     ti = dict(raw_input)
 
-    if not ti.get("command") and ti.get("cmd"):
-        ti["command"] = ti["cmd"]
+    raw_cmd = ti.get("command") if ti.get("command") else ti.get("cmd")
+    coerced_cmd = _coerce_shell_command(raw_cmd)
+    if coerced_cmd is not None:
+        ti["command"] = coerced_cmd
     if raw_low == "run_script" and not ti.get("command"):
         script_body = ti.get("script") or ti.get("code") or ti.get("content")
         if isinstance(script_body, str) and script_body:

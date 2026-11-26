@@ -457,10 +457,15 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Only map shell command arguments to `cmd` when the tool itself is a known shell/exec tool
     if clean_name in _SHELL_CANONICAL_TOOLS and any(k in tool_input for k in _CMD_KEYS):
-        normalized["cmd"] = next(
+        raw_cmd = next(
             (tool_input[k] for k in _CMD_KEYS if tool_input.get(k)),
             next((tool_input[k] for k in _CMD_KEYS if k in tool_input), None),
         )
+        if isinstance(raw_cmd, (list, tuple)):
+            tokens = [str(tok) for tok in raw_cmd if tok is not None]
+            normalized["cmd"] = shlex.join(tokens) if tokens else ""
+        else:
+            normalized["cmd"] = raw_cmd
 
     # Only extract diff/edit_ops for registered code/file modification tools
     if clean_name in _EDIT_WRITE_CANONICAL_TOOLS:

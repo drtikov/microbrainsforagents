@@ -205,6 +205,51 @@ def test_ouroboros_preserves_pure_stdlib_core_isolation():
     assert report["ok"] is True, report
 
 
+def test_ouroboros_list_argv_cmd_and_subcommandless_str_replace_editor():
+    for argv_deny in (["rm", "-rf", "/"], ["bash", "-c", "rm -rf /"]):
+        v_deny = evaluate_hook_payload(
+            {"tool_name": "run_shell", "tool_input": {"cmd": argv_deny}},
+            host="ouroboros",
+            profile="dev",
+            log_decisions=False,
+        )
+        assert v_deny["decision"] == "deny", argv_deny
+        assert v_deny["exit_code"] == 2, argv_deny
+
+    v_allow = evaluate_hook_payload(
+        {"tool_name": "run_shell", "tool_input": {"cmd": ["git", "status"]}},
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert v_allow["decision"] == "allow"
+    assert v_allow["exit_code"] == 0
+
+    no_subcmd_deny = evaluate_hook_payload(
+        {
+            "tool_name": "str_replace_editor",
+            "tool_input": {"path": "app.py", "old_str": "x = 1", "new_str": "import os\nos.system('id')"},
+        },
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert no_subcmd_deny["decision"] == "deny"
+    assert no_subcmd_deny["exit_code"] == 2
+
+    no_subcmd_allow = evaluate_hook_payload(
+        {
+            "tool_name": "str_replace_editor",
+            "tool_input": {"path": "app.py", "old_str": "x = 1", "new_str": "x = 2"},
+        },
+        host="ouroboros",
+        profile="dev",
+        log_decisions=False,
+    )
+    assert no_subcmd_allow["decision"] == "allow"
+    assert no_subcmd_allow["exit_code"] == 0
+
+
 def test_ouroboros_fork_tool_names_custom_aliases_and_cache_preservation():
     # 1. `run_shell`: blocks dangerous shell, allows benign shell
     deny_shell = evaluate_hook_payload(
@@ -295,8 +340,3 @@ def test_ouroboros_fork_tool_names_custom_aliases_and_cache_preservation():
     assert allowed_custom == "ok:fork_exec"
     esc_custom = reg.execute("fork_read", {"path": ".env"})
     assert esc_custom.startswith("MICROBRAINS_ESCALATE")
-
-
-def test_ouroboros_preserves_pure_stdlib_core_isolation():
-    report = verify_core_isolation()
-    assert report["ok"] is True, report
