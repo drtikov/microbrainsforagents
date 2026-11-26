@@ -588,4 +588,5 @@ def test_ouroboros_real_loop_final_tool_messages_never_carry_secret(tmp_path: Pa
         failed = _run("c4", "repo_read", {"path": "leak.txt"})
         assert fake_tok not in failed["msg"]["content"]
         assert fake_tok not in failed["wire"]
+        assert fake_tok not in failed["trace"]
         assert "MICROBRAINS_DLP_SUPPRESSED" in failed["msg"]["content"]
