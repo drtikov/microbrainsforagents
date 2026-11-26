@@ -114,6 +114,47 @@ class OuroborosMicrobrainsGate:
             return True
         return False
 
+    def _has_secrets(self, name: str, args: Optional[Mapping[str, Any]], text: str) -> bool:
+        from .hook import evaluate_post_tool_use_payload
+
+        check = evaluate_post_tool_use_payload(
+            {
+                "hook_event_name": "PostToolUse",
+                "session_id": self.session_id,
+                "tool_name": self._resolve_tool_name(name),
+                "tool_input": dict(args or {}),
+                "tool_response": text,
+            },
+            log_decisions=False,
+            shadow_mode=False,
+            host="ouroboros",
+            policy_path=self.policy_path,
+            replace_tool_output=False,
+        )
+        return bool(check.get("secrets_found"))
+
+    def _safe_dlp_fallback(
+        self,
+        name: str,
+        args: Optional[Mapping[str, Any]],
+        redacted: Any,
+        post_verdict: Dict[str, Any],
+    ) -> OuroborosBlockedResult:
+        suppressed = (
+            f"MICROBRAINS_DLP_SUPPRESSED ({name}): "
+            "Tool output suppressed because secret redaction could not be applied safely."
+        )
+        msg = suppressed
+        if isinstance(redacted, str) and redacted and not self._has_secrets(name, args, redacted):
+            msg = redacted
+        return OuroborosBlockedResult(
+            text=msg,
+            error=msg,
+            output=msg,
+            content=msg,
+            verdict=post_verdict,
+        )
+
     def scrub_post(
         self,
         name: str,
@@ -128,21 +169,27 @@ class OuroborosMicrobrainsGate:
 
         from .hook import evaluate_post_tool_use_payload
 
+        is_object = not isinstance(output, (str, dict, list, int, float, bool)) and output is not None
+        attr_targets: List[str] = []
         raw_text: Any = output
-        attr_target: Optional[str] = None
-        if not isinstance(output, (str, dict, list, int, float, bool)) and output is not None:
-            for attr in ("text", "output", "content"):
-                val = getattr(output, attr, None)
-                if isinstance(val, str):
-                    raw_text = val
-                    attr_target = attr
-                    break
+        if is_object:
+            attr_targets = [
+                attr for attr in ("text", "output", "content") if isinstance(getattr(output, attr, None), str)
+            ]
+            if len(attr_targets) == 1:
+                raw_text = getattr(output, attr_targets[0])
+            elif attr_targets:
+                raw_text = "\n".join(getattr(output, attr) for attr in attr_targets)
+            else:
+                raw_text = str(output)
 
+        resolved_name = self._resolve_tool_name(name)
+        args_dict = dict(args or {})
         payload: Dict[str, Any] = {
             "hook_event_name": "PostToolUse",
             "session_id": self.session_id,
-            "tool_name": self._resolve_tool_name(name),
-            "tool_input": dict(args or {}),
+            "tool_name": resolved_name,
+            "tool_input": args_dict,
             "tool_response": raw_text,
         }
         if self.cwd:
@@ -160,16 +207,57 @@ class OuroborosMicrobrainsGate:
         )
         self.last_post_verdict = post_verdict
 
-        redacted = post_verdict.get("redacted_output")
-        if self.replace_tool_output and not self.shadow_mode and redacted is not None and post_verdict.get("secrets_found"):
-            if attr_target is not None:
+        if self.replace_tool_output and not self.shadow_mode and post_verdict.get("secrets_found"):
+            redacted = post_verdict.get("redacted_output")
+            if is_object:
+                if not attr_targets:
+                    return self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
                 try:
+                    updates: Dict[str, str] = {}
+                    if len(attr_targets) == 1:
+                        if not isinstance(redacted, str):
+                            return self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
+                        updates[attr_targets[0]] = redacted
+                    else:
+                        for attr in attr_targets:
+                            sub_res = evaluate_post_tool_use_payload(
+                                {
+                                    "hook_event_name": "PostToolUse",
+                                    "session_id": self.session_id,
+                                    "tool_name": resolved_name,
+                                    "tool_input": args_dict,
+                                    "tool_response": getattr(output, attr),
+                                },
+                                log_decisions=False,
+                                shadow_mode=False,
+                                host="ouroboros",
+                                policy_path=self.policy_path,
+                                replace_tool_output=True,
+                            )
+                            sub_redacted = sub_res.get("redacted_output")
+                            if sub_res.get("secrets_found") and not isinstance(sub_redacted, str):
+                                return self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
+                            updates[attr] = sub_redacted if isinstance(sub_redacted, str) else getattr(output, attr)
+
                     if dataclasses.is_dataclass(output):
-                        return dataclasses.replace(output, **{attr_target: redacted}), post_verdict
-                    setattr(output, attr_target, redacted)
+                        candidate = dataclasses.replace(output, **updates)
+                    else:
+                        for attr, val in updates.items():
+                            setattr(output, attr, val)
+                        candidate = output
+
+                    if self._has_secrets(name, args, str(candidate)):
+                        return self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
+                    return candidate, post_verdict
                 except Exception:
-                    pass
-                return output, post_verdict
+                    return self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
+
+            if redacted is None:
+                suppressed = (
+                    f"MICROBRAINS_DLP_SUPPRESSED ({name}): "
+                    "Tool output suppressed because secret redaction could not be applied safely."
+                )
+                return suppressed if isinstance(output, str) else self._safe_dlp_fallback(name, args, redacted, post_verdict), post_verdict
             return redacted, post_verdict
         return output, post_verdict
 

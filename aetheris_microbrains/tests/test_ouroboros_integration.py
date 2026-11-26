@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import sys
 from pathlib import Path
+
+import pytest
 
 from aetheris_microbrains.cli import detect_installed_hosts, main as cli_main
 from aetheris_microbrains.core.packaging_manifest import verify_core_isolation
@@ -340,3 +344,114 @@ def test_ouroboros_fork_tool_names_custom_aliases_and_cache_preservation():
     assert allowed_custom == "ok:fork_exec"
     esc_custom = reg.execute("fork_read", {"path": ".env"})
     assert esc_custom.startswith("MICROBRAINS_ESCALATE")
+
+
+def test_ouroboros_scrub_post_fails_closed_on_immutable_and_leaky_objects():
+    fake_tok = _make_fixture_token(("sk", "live", "FAILCLOSED1234567890abcd"))
+
+    class _ReadOnlyPropertyResult:
+        def __init__(self, secret_text: str) -> None:
+            self._secret_text = secret_text
+
+        @property
+        def text(self) -> str:
+            return self._secret_text
+
+        def __str__(self) -> str:
+            return f"ReadOnly({self._secret_text})"
+
+    @dataclasses.dataclass(frozen=True)
+    class _LeakyDataclassResult:
+        text: str
+        raw: str
+
+    class _StrOnlyResult:
+        def __str__(self) -> str:
+            return f"STR_ONLY_TOKEN={fake_tok}"
+
+    class _ObjRegistry:
+        def __init__(self) -> None:
+            self.mode = "readonly"
+
+        def execute_result(self, name: str, args: dict):
+            if self.mode == "readonly":
+                return _ReadOnlyPropertyResult(f"API_KEY={fake_tok}")
+            if self.mode == "leaky_dc":
+                return _LeakyDataclassResult(text=f"API_KEY={fake_tok}", raw=f"RAW={fake_tok}")
+            return _StrOnlyResult()
+
+    reg = _ObjRegistry()
+    wrap_ouroboros_registry(reg, profile="dev")
+
+    # 1. Read-only @property cannot be mutated in-place -> fails closed to OuroborosBlockedResult
+    res_ro = reg.execute_result("read_file", {"path": "README.md"})
+    assert isinstance(res_ro, OuroborosBlockedResult)
+    assert res_ro.ok is False
+    assert res_ro.blocked is True
+    assert fake_tok not in str(res_ro)
+
+    # 2. Frozen dataclass whose secondary field `.raw` still leaks secret -> post-serialization check catches & fails closed
+    reg.mode = "leaky_dc"
+    res_dc = reg.execute_result("read_file", {"path": "README.md"})
+    assert isinstance(res_dc, OuroborosBlockedResult)
+    assert res_dc.ok is False
+    assert fake_tok not in str(res_dc)
+
+    # 3. Custom object exposing secret only via __str__ -> fails closed
+    reg.mode = "str_only"
+    res_str_only = reg.execute_result("read_file", {"path": "README.md"})
+    assert isinstance(res_str_only, OuroborosBlockedResult)
+    assert res_str_only.ok is False
+    assert fake_tok not in str(res_str_only)
+
+
+def test_ouroboros_real_repo_tool_registry_e2e(tmp_path: Path):
+    repo_env = os.getenv("OUROBOROS_REPO_DIR", "").strip()
+    candidate = Path(repo_env) if repo_env else Path(r"i:\Ouroboros\repo")
+    if not (candidate / "ouroboros" / "tools" / "registry.py").is_file():
+        pytest.skip(f"Local Ouroboros checkout not present at {candidate}")
+
+    ws_repo = tmp_path / "repo"
+    ws_drive = tmp_path / "drive"
+    ws_repo.mkdir()
+    ws_drive.mkdir()
+    (ws_repo / "README.md").write_text("Ouroboros E2E OK\n", encoding="utf-8")
+    fake_tok = _make_fixture_token(("sk", "live", "REALOUROBOROS1234567890xy"))
+    (ws_repo / "leak.txt").write_text(f"API_KEY={fake_tok}\n", encoding="utf-8")
+
+    inserted = str(candidate)
+    prior_modules = {k: v for k, v in sys.modules.items() if k == "ouroboros" or k.startswith("ouroboros.")}
+    for k in list(prior_modules):
+        sys.modules.pop(k, None)
+    sys.path.insert(0, inserted)
+    try:
+        from ouroboros.tools.registry import ToolRegistry  # type: ignore[import-not-found]
+
+        reg = ToolRegistry(repo_dir=ws_repo, drive_root=ws_drive)
+        orig_schemas_fn = reg.schemas
+        orig_schemas_list = reg.schemas()
+        wrap_ouroboros_registry(reg, profile="dev")
+
+        # Prompt-cache preservation check against real ToolRegistry
+        assert "schemas" not in reg.__dict__
+        assert reg.schemas == orig_schemas_fn
+        assert len(reg.schemas()) == len(orig_schemas_list)
+
+        # 1. Benign read passes end-to-end through real ToolRegistry
+        ok_out = reg.execute("repo_read", {"path": "README.md"})
+        assert "Ouroboros E2E OK" in ok_out
+
+        # 2. Dangerous argv list shell call is denied before execution
+        blocked = reg.execute("run_shell", {"cmd": ["rm", "-rf", "/"]})
+        assert blocked.startswith("MICROBRAINS_DENY")
+
+        # 3. Secret read via real ToolRegistry is scrubbed before returning to model
+        leak_out = reg.execute("repo_read", {"path": "leak.txt"})
+        assert fake_tok not in leak_out
+    finally:
+        if inserted in sys.path:
+            sys.path.remove(inserted)
+        for k in list(sys.modules):
+            if k == "ouroboros" or k.startswith("ouroboros."):
+                sys.modules.pop(k, None)
+        sys.modules.update(prior_modules)
