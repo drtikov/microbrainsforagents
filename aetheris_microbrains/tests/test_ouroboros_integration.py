@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +21,19 @@ from aetheris_microbrains.ouroboros_gate import (
     OuroborosMicrobrainsGate,
     wrap_ouroboros_registry,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_ouroboros_pydantic_validator_registry():
+    """Ouroboros uses pydantic.v1 validators; re-importing it in one process trips the duplicate-validator guard."""
+    yield
+    try:
+        from pydantic.v1 import class_validators as _cv
+
+        for ref in [r for r in list(_cv._FUNCS) if str(r).startswith("ouroboros.")]:
+            _cv._FUNCS.discard(ref)
+    except Exception:
+        pass
 
 
 def _make_fixture_token(parts: tuple[str, ...]) -> str:
@@ -455,3 +471,121 @@ def test_ouroboros_real_repo_tool_registry_e2e(tmp_path: Path):
             if k == "ouroboros" or k.startswith("ouroboros."):
                 sys.modules.pop(k, None)
         sys.modules.update(prior_modules)
+
+
+@contextlib.contextmanager
+def _real_ouroboros_import(candidate: Path):
+    """Temporarily import the real Ouroboros checkout, restoring sys.modules/sys.path afterwards."""
+    inserted = str(candidate)
+    prior_modules = {k: v for k, v in sys.modules.items() if k == "ouroboros" or k.startswith("ouroboros.")}
+    for k in list(prior_modules):
+        sys.modules.pop(k, None)
+    sys.path.insert(0, inserted)
+    try:
+        yield
+    finally:
+        if inserted in sys.path:
+            sys.path.remove(inserted)
+        for k in list(sys.modules):
+            if k == "ouroboros" or k.startswith("ouroboros."):
+                sys.modules.pop(k, None)
+        sys.modules.update(prior_modules)
+
+
+def test_ouroboros_real_loop_final_tool_messages_never_carry_secret(tmp_path: Path, monkeypatch):
+    """Drive Ouroboros' real ``handle_tool_calls`` and inspect the assembled tool messages.
+
+    ``messages`` is the exact list the loop sends to the provider; no LLM call is made.
+    Optionally pin the upstream revision with ``OUROBOROS_REPO_REV`` (prefix of ``git rev-parse HEAD``).
+    """
+    repo_env = os.getenv("OUROBOROS_REPO_DIR", "").strip()
+    candidate = Path(repo_env) if repo_env else Path(r"i:\Ouroboros\repo")
+    if not (candidate / "ouroboros" / "loop_tool_execution.py").is_file():
+        pytest.skip(f"Local Ouroboros checkout not present at {candidate}")
+
+    pinned = os.getenv("OUROBOROS_REPO_REV", "").strip()
+    if pinned:
+        head = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        assert head.startswith(pinned), f"Ouroboros checkout {head!r} != pinned {pinned!r}"
+
+    ws_repo = tmp_path / "repo"
+    ws_drive = tmp_path / "drive"
+    (ws_drive / "logs").mkdir(parents=True)
+    ws_repo.mkdir()
+    (ws_repo / "README.md").write_text("Ouroboros LOOP OK\n", encoding="utf-8")
+    fake_tok = _make_fixture_token(("sk", "live", "LOOPMSGCHECK1234567890xy"))
+    (ws_repo / "leak.txt").write_text(f"API_KEY={fake_tok}\n", encoding="utf-8")
+
+    with _real_ouroboros_import(candidate):
+        from ouroboros.loop_tool_execution import (  # type: ignore[import-not-found]
+            StatefulToolExecutor,
+            handle_tool_calls,
+        )
+        from ouroboros.tools.registry import ToolRegistry  # type: ignore[import-not-found]
+
+        reg = ToolRegistry(repo_dir=ws_repo, drive_root=ws_drive)
+        executed: list[str] = []
+        orig_execute = reg.execute
+
+        def _spy(name, args):
+            executed.append(name)
+            return orig_execute(name, args)
+
+        reg.execute = _spy
+        wrap_ouroboros_registry(reg, profile="dev")
+
+        def _run(call_id: str, fn: str, args: dict) -> dict:
+            messages: list[dict] = []
+            trace: dict = {"tool_calls": []}
+            executor = StatefulToolExecutor()
+            try:
+                handle_tool_calls(
+                    [{"id": call_id, "type": "function", "function": {"name": fn, "arguments": json.dumps(args)}}],
+                    reg,
+                    ws_drive / "logs",
+                    "task-e2e",
+                    executor,
+                    messages,
+                    trace,
+                    lambda _msg: None,
+                )
+            finally:
+                executor.shutdown(wait=False)
+            tool_msgs = [m for m in messages if m.get("role") == "tool"]
+            assert len(tool_msgs) == 1, messages
+            assert tool_msgs[0]["tool_call_id"] == call_id
+            return {"msg": tool_msgs[0], "wire": json.dumps(messages, ensure_ascii=False), "trace": json.dumps(trace)}
+
+        # 1. Normal call: content reaches the message unchanged.
+        ok = _run("c1", "repo_read", {"path": "README.md"})
+        assert "Ouroboros LOOP OK" in ok["msg"]["content"]
+
+        # 2. Rejected call: the tool never ran, and the message carries the deny text.
+        before = list(executed)
+        denied = _run("c2", "run_shell", {"cmd": ["rm", "-rf", "/"]})
+        assert "MICROBRAINS_DENY" in denied["msg"]["content"]
+        assert "run_shell" not in executed[len(before):]
+
+        # 3. Secret in tool output: absent from the final message, the serialized wire payload, and the trace.
+        leak = _run("c3", "repo_read", {"path": "leak.txt"})
+        assert fake_tok not in leak["msg"]["content"]
+        assert fake_tok not in leak["wire"]
+        assert fake_tok not in leak["trace"]
+
+        # 4. Scrubber failure (redaction unavailable): the message must still be secret-free.
+        import aetheris_microbrains.hook as _hook
+
+        real_post = _hook.evaluate_post_tool_use_payload
+
+        def _broken_post(payload, **kw):
+            res = dict(real_post(payload, **kw))
+            res["redacted_output"] = None
+            return res
+
+        monkeypatch.setattr(_hook, "evaluate_post_tool_use_payload", _broken_post)
+        failed = _run("c4", "repo_read", {"path": "leak.txt"})
+        assert fake_tok not in failed["msg"]["content"]
+        assert fake_tok not in failed["wire"]
+        assert "MICROBRAINS_DLP_SUPPRESSED" in failed["msg"]["content"]
