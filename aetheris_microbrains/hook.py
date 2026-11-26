@@ -378,7 +378,7 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tool_raw, tool_input = _extract_tool_and_input(payload)
 
     tool_lower = tool_raw.lower()
-    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "execute_bash", "run_command", "run_shell", "terminal"}:
+    if tool_lower in {"bash", "shell", "shell_command", "exec", "exec_command", "execute_shell", "execute_bash", "run_command", "run_shell", "run_shell_command", "terminal"}:
         tool_name = "execute_shell"
     elif tool_lower in {"file_editor", "str_replace_editor"}:
         subcmd = str(tool_input.get("command") or "").strip().lower()
@@ -432,7 +432,7 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "codebase_search",
     }:
         tool_name = "search_code"
-    elif tool_lower in {"glob", "list_dir", "ls", "listdir", "filesearch"}:
+    elif tool_lower in {"glob", "list_dir", "ls", "listdir", "filesearch", "find_files", "list_directory"}:
         tool_name = "list_dir"
     elif tool_lower in {"delete", "deletefile", "delete_file"}:
         tool_name = "delete_file"

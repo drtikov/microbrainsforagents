@@ -87,6 +87,13 @@ _BUILTIN_ADAPTERS: Tuple[HostAdapter, ...] = (
         supports_replace_tool_output=True,
     ),
     HostAdapter(
+        name="qwen",
+        contract="qwen_pretooluse_v1",
+        family="claude_compat",
+        supports_http_daemon=True,
+        supports_replace_tool_output=False,
+    ),
+    HostAdapter(
         name="zcode",
         contract="zcode_pretooluse_v1",
         family="claude_compat",

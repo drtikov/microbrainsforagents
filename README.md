@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **Ouroboros**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **Ouroboros**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Qwen Code**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -85,6 +85,7 @@ Microbrains works alongside any AI agent or framework:
 | :--- | :--- | :--- | :--- | :--- |
 | **Claude Code & `PreToolUse` Hooks** | **Claude Code** (≥ 2.1.295), **Codex** | **Full E2E Tested** | **Built-in CLI Hook / Native Rust Shim** (`python -m aetheris_microbrains.hook` / `aetheris-gate`) | Pre-flight inspection on every tool call (`allow`, `ask`, or `deny`). Blocks before execution. |
 | **Qoder (Desktop & CLI)** | **Qoder Desktop**, **Qoder CLI** | **Config & Contract Tested** | **Native Hook Adapter + CLI** (`aetheris install qoder` / `--host qoder`) | Claude-compatible `PreToolUse`/`PostToolUse` gate, `.qoder/` self-protection, and optional `aetheris-mcp` tools. |
+| **Qwen Code (`qwen`)** | **Qwen Code** | **Config & Contract Tested** | **Native Hook Adapter + CLI** (`aetheris install qwen` / `--host qwen`) | `PreToolUse`/`PostToolUse` hooks in `.qwen/settings(.local).json` (`timeout: 10`), native `run_shell_command`/`read_file`/`edit` matcher, `additionalContext` DLP, and `.qwen/` protection. |
 | **Google Antigravity Native Plugin** | **Google Antigravity** (IDE, CLI, 2.0) | **Full E2E Tested** | **Native Plugin + CLI** (`aetheris install antigravity`) | Top-level JSON `PreToolUse`/`PostToolUse` gate (`deny`/`force_ask`/`ask`), MCP tools, `AGENTS.md` rules, and skill. |
 | **Hermes Agent** | **Hermes Agent** | **Full E2E Tested** | **FastMCP + Lifecycle Hooks** (`aetheris-mcp` / `--host hermes`) | Zero-port `stdio` or HTTP MCP tools plus `pre_tool_call` / `post_tool_call` gating. |
 | **DeepSeek Harness (DSH)** | **DeepSeek Harness** | **Advisory MCP** | **Cordis MCP Bundle** (`dsh-aetheris-microbrains-bundle`) | On-demand preflight, secret scrubbing, audit, and routing tools over Streamable HTTP (`127.0.0.1:8766/mcp`). |
@@ -121,7 +122,7 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <claude|cursor|devin|cline|mcode|ouroboros|zcode|openhands|codex|antigravity|hermes|qoder|openclaw|opencode|kilocode|pi|omp|dsh|auto>
+aetheris install <claude|cursor|devin|cline|mcode|ouroboros|zcode|openhands|codex|antigravity|hermes|qoder|qwen|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools

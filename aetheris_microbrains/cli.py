@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "ouroboros", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "ouroboros", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "qwen", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -57,6 +57,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("openclaw")
     if (home / ".qoder").exists() or (ws / ".qoder").exists():
         detected.append("qoder")
+    if (home / ".qwen").exists() or (ws / ".qwen").exists():
+        detected.append("qwen")
     if (
         (home / ".config" / "opencode").exists()
         or (home / ".opencode").exists()
@@ -231,22 +233,33 @@ def _build_generic_hook_bundle(
         }
     pre_hook: Dict[str, Any] = {"type": "command", "command": pre_cmd}
     post_hook: Dict[str, Any] = {"type": "command", "command": post_cmd}
-    if host == "qoder":
+    if host in ("qoder", "qwen"):
         pre_hook["timeout"] = 10
         post_hook["timeout"] = 10
     else:
         pre_hook["onFailure"] = "block"
+    pre_matcher = (
+        "run_shell_command|read_file|write_file|edit|grep_search|glob|find_files|list_directory|web_fetch|web_search|"
+        "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+        if host == "qwen"
+        else "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+    )
+    post_matcher = (
+        pre_matcher
+        if host == "qwen"
+        else "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*"
+    )
     return {
         "hooks": {
             "PreToolUse": [
                 {
-                    "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*",
+                    "matcher": pre_matcher,
                     "hooks": [pre_hook],
                 }
             ],
             "PostToolUse": [
                 {
-                    "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Grep|WebFetch|WebSearch|mcp__.*",
+                    "matcher": post_matcher,
                     "hooks": [post_hook],
                 }
             ],
@@ -555,6 +568,34 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("QODER SELF-TEST PASSED" if ok else "QODER SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "qwen" and args.self_test:
+        from .hook import evaluate_hook_payload
+
+        deny_v = evaluate_hook_payload(
+            {"tool_name": "run_shell_command", "tool_input": {"command": "rm -rf /"}},
+            host="qwen",
+            log_decisions=False,
+        )
+        allow_v = evaluate_hook_payload(
+            {"tool_name": "run_shell_command", "tool_input": {"command": "git status"}},
+            host="qwen",
+            log_decisions=False,
+        )
+        qwen_write = evaluate_hook_payload(
+            {"tool_name": "write_file", "tool_input": {"file_path": ".qwen/settings.json", "content": "{}"}},
+            host="qwen",
+            log_decisions=False,
+        )
+        ok = (
+            deny_v.get("decision") == "deny"
+            and deny_v.get("exit_code") == 2
+            and deny_v.get("host_contract") == "qwen_pretooluse_v1"
+            and allow_v.get("decision") == "allow"
+            and qwen_write.get("decision") == "deny"
+        )
+        print("QWEN SELF-TEST PASSED" if ok else "QWEN SELF-TEST FAILED")
+        return 0 if ok else 1
+
     _ESM_PLUGIN_HOSTS = {
         "opencode": (
             "opencode-aetheris-microbrains",
@@ -767,6 +808,7 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         "codex": Path(".codex") / "hooks.json",
         "cursor": Path(".cursor") / "hooks.json",
         "qoder": Path(".qoder") / ("settings.local.json" if ws is not None else "settings.json"),
+        "qwen": Path(".qwen") / ("settings.local.json" if ws is not None else "settings.json"),
     }
     if host == "hermes":
         # Hermes reads hooks from config.yaml (`agent/shell_hooks.py`), not from a
