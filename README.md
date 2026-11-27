@@ -370,6 +370,15 @@ What it protects out of the box:
 - **Native normalization & `.prime/` self-protection:** Normalizes `bash`/`edit.run`/`mcp__<conn>__<tool>` calls via `evaluate_hook_payload(..., host="prime")` and write-protects `.prime/` and `.prime/agent/settings.json` at Layer 0.
 - **Fail-closed PostToolUse DLP:** Scrubs leaked credentials from `bash`, `edit.run`, and `mcp.call_tool` outputs before returning to the REPL.
 
+**Compact Prime Agent Benchmarks** (`evaluate_hook_payload(..., host="prime")`, in-process CPU):
+
+| Benchmark Suite | Results (% Benefit) |
+|---|---|
+| **In-process latency (`--host prime`)** | **`bash`:** **0.053–0.065 ms** mean / **0.113–0.258 ms** p99 · **`edit.run`:** **0.064–0.067 ms** mean / **0.169–0.267 ms** p99 · **`mcp.call_tool`:** **0.121 ms** mean / **0.307 ms** p99 (**<0.31 ms** p99 overall) |
+| **Security catch rate** | **100%** critical threats caught (`rm -rf`, `curl \| bash`, syntax errors, `os.system`/`subprocess`, large diffs, unpinned MCP, `git push`) · **66.7%** direct deny / **33.3%** escalate on secret egress · fail-safe escalation on unlisted commands in `dev` |
+| **Error-recovery token savings *(modeled)*** | **-97.4%** recovery tokens (**~16,175** saved/session; 250 vs. 16,625) · **~\$0.05/session** at \$3/M (**~\$1,800/yr** at 100 sessions/day) |
+| **Footprint & setup** | **0.50 MB** steady / **0.93 MB** peak RSS · **~30 s** wrapper-only install (zero Prime core changes) |
+
 ---
 
 ## 🤖 Codex CLI Integration (Hooks + Skill + Plugin)
