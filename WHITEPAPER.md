@@ -239,7 +239,8 @@ $$E = \frac{\text{Verified successful tasks}}{\text{Total computational cost}}$$
 - **Phase II — Multi-Host Interoperability *(Implemented)*:** Turnkey adapters/installers and SDK wrappers across Claude Code, Codex CLI, Google Antigravity, OpenClaw, Qoder, Qwen Code, Hermes, DeepSeek Harness, Cursor, Devin, Cline, MiniMax Code (`mcode`), Ouroboros (`ToolRegistry`), and Prime Agent (`prime`).
 - **Phase III — Rust/WASM Kernel, Caching, Transactions & Subagent IAM *(Implemented in v0.8)*:** Single-pass Rust shell tokenizer (`layer1_shell.rs`) + DLP (`dlp.rs`) compiled to native `aetheris-gate` and `aetheris_gate.wasm`, SHA-256 `ASTDiffCache`, declarative 20-host `HostSpec` registry, speculative `WorkspaceTransactionManager` rollback, chained HMAC capability tokens (`capability_tokens.py`), and deterministic `repair_hint` + Clopper-Pearson threshold calibration (`repair_hints.py`).
 - **Phase IV — Fleet Attestation & Cross-Harness A/B Suite *(Implemented in v0.8)*:** Signed anti-rollback org policy bundles + hash-chained attestation (`fleet_bundle.py`) and Stage 1–4 multi-host A/B benchmark evaluator (`benchmark_harness.py`).
-- **Phase V — Live Multi-Task Validation & Hardware/WASM Runtime Enforcement *(Planned)*:** Full live-LLM SWE-bench A/B trials ($N \ge 10$ per task across Claude, Codex, Qwen, Ouroboros, Prime) measuring real `repair_hint` turn reduction and speculative-rollback token savings, plus in-process WASM execution inside browser/JS/Node agent hosts.
+- **Phase V — Universal WASM SDK, Capability Sandboxes, Policy IR, Output Compression, WorkspaceFS & Trace Replay *(Implemented in v0.9)*:** Zero-Python ESM wrapper `@aetheris/gate-wasm` (`wasm-sdk/`) + `rust-wasm` CI job; capability-compiled OS sandboxes & cross-hook checkpoints (`capability_enforcer.py`, `hook_checkpoints.py`); single-source `policy_ir.json` + `policy_ir.py` / `l0_policy.py` parity verifier; deterministic `PostToolUse` log/traceback distiller (`output_compressor.py`); split-horizon `WorkspaceFS` providers for overlays/Git blobs/Docker (`workspace_fs.py`); and counterfactual journal replay & allowlist synthesis (`trace_replay.py`, `aetheris replay`).
+- **Phase VI — Live Multi-Task SWE-bench Validation *(Planned)*:** Full live-LLM SWE-bench A/B trials ($N \ge 10$ per task across Claude, Codex, Qwen, Kimi, Ouroboros, Prime) measuring real `repair_hint`, rollback, and `PostToolUse` compression token savings.
 
 ---
 
@@ -267,8 +268,9 @@ Improving autonomous AI agents requires more than larger foundation models—it 
 # 1. Install with dev & MCP extras
 pip install -e ".[dev,mcp]"
 
-# 2. Verify pure-stdlib core isolation (62 core modules, 0 numpy violations)
+# 2. Verify pure-stdlib core isolation (69 core modules, 0 numpy violations) & policy IR parity
 python -m aetheris_microbrains.cli verify-core
+python -m aetheris_microbrains.cli policy-ir-check
 
 # 3. Run unit & integration test suites
 python -m pytest aetheris_microbrains/tests -q

@@ -128,8 +128,10 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <claude|cursor|devin|cline|mcode|ouroboros|prime|zcode|openhands|codex|antigravity|hermes|qoder|qwen|openclaw|opencode|kilocode|pi|omp|dsh|auto>
+aetheris install <claude|cursor|devin|cline|mcode|ouroboros|prime|kimi|zcode|openhands|codex|antigravity|hermes|qoder|qwen|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
+aetheris policy-ir-check                                             # Verify single-source policy_ir.json parity (Python & Rust)
+aetheris replay --journal decision_journal.jsonl --profile strict --synthesize-policy
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
 aetheris mcp-proxy --stdio --downstream srv=cmd                      # Run MCP gateway + secret broker

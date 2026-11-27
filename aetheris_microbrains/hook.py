@@ -1499,8 +1499,30 @@ def evaluate_post_tool_use_payload(
                 host_action = "warn_additional_context"
                 scrubbing_mode = "detect_and_warn"
         else:
-            host_action = "clean_passthrough"
-            scrubbing_mode = "detect_and_warn"
+            if (
+                os.getenv("AETHERIS_COMPRESS_OUTPUT") == "1"
+                and resolved_host in REPLACE_OUTPUT_HOSTS
+                and supports_replace
+                and isinstance(redacted_output, str)
+            ):
+                from .core.output_compressor import compress_tool_output
+
+                comp = compress_tool_output(redacted_output, tool_name=tool_raw)
+                if comp.get("compressed"):
+                    host_specific = {
+                        "hookEventName": "PostToolUse",
+                        "updatedToolOutput": comp["text"],
+                    }
+                    if supports_mcp_replace:
+                        host_specific["updatedMCPToolOutput"] = comp["text"]
+                    host_action = "compress_tool_output"
+                    scrubbing_mode = "compress_tool_output"
+                else:
+                    host_action = "clean_passthrough"
+                    scrubbing_mode = "detect_and_warn"
+            else:
+                host_action = "clean_passthrough"
+                scrubbing_mode = "detect_and_warn"
     elif resolved_host == "hermes":
         if any_alert:
             host_specific = {"context": _post_warning_text(include_advice=False)}

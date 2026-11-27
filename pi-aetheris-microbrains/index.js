@@ -60,6 +60,60 @@ export function scrubSecretsSync(value) {
   return { value, redacted: false, count: 0 };
 }
 
+let _wasmGateCache = new Map();
+
+export async function loadWasmGate(wasmPath = undefined) {
+  const env = typeof process !== "undefined" && process?.env ? process.env : {};
+  if (env.AETHERIS_USE_WASM !== "1") {
+    return null;
+  }
+  const cacheKey = wasmPath ? String(wasmPath) : "__default__";
+  if (_wasmGateCache.has(cacheKey)) {
+    return _wasmGateCache.get(cacheKey);
+  }
+  try {
+    const sdk = await import("../wasm-sdk/index.mjs");
+    if (typeof sdk?.loadAetherisWasm !== "function") {
+      return null;
+    }
+    const gate = await sdk.loadAetherisWasm(wasmPath);
+    _wasmGateCache.set(cacheKey, gate);
+    return gate;
+  } catch {
+    return null;
+  }
+}
+
+export async function scrubWithWasmFallback(text, wasmPath = undefined) {
+  const env = typeof process !== "undefined" && process?.env ? process.env : {};
+  if (env.AETHERIS_USE_WASM === "1" && typeof text === "string") {
+    const gate = await loadWasmGate(wasmPath);
+    if (gate && typeof gate.scrub === "function") {
+      try {
+        const res = gate.scrub(text);
+        if (res && typeof res === "object") {
+          const redacted = Boolean(res.secrets_found);
+          return {
+            value: typeof res.redacted_text === "string" ? res.redacted_text : text,
+            redacted,
+            count: redacted ? 1 : 0,
+            injectionDetected: Boolean(res.injection_detected),
+            engine: "wasm",
+          };
+        }
+      } catch {
+        // Fall back to synchronous JS scrubber on any WASM runtime failure.
+      }
+    }
+  }
+  const syncRes = scrubSecretsSync(text);
+  return {
+    ...syncRes,
+    injectionDetected: false,
+    engine: "js",
+  };
+}
+
 function _getSessionId(ctx) {
   return ctx?.sessionManager?.getSessionId?.() ?? ctx?.sessionId;
 }

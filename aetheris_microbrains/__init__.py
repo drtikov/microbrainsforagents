@@ -249,6 +249,24 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "verify_signed_fleet_bundle": (".core.fleet_bundle", "verify_signed_fleet_bundle"),
     "build_fleet_attestation": (".core.fleet_bundle", "build_fleet_attestation"),
     "run_cross_harness_ab_suite": (".core.benchmark_harness", "run_cross_harness_ab_suite"),
+    # Next-generation platform modules (v0.9 proposals)
+    "extract_capability_token": (".core.capability_enforcer", "extract_capability_token"),
+    "enforce_capability_for_hook": (".core.capability_enforcer", "enforce_capability_for_hook"),
+    "compile_sandbox_policy_from_token": (".core.capability_enforcer", "compile_sandbox_policy_from_token"),
+    "HookCheckpointStore": (".core.hook_checkpoints", "HookCheckpointStore"),
+    "load_policy_ir": (".core.policy_ir", "load_policy_ir"),
+    "render_rust_policy_tables": (".core.policy_ir", "render_rust_policy_tables"),
+    "verify_policy_ir_parity": (".core.policy_ir", "verify_policy_ir_parity"),
+    "compress_tool_output": (".core.output_compressor", "compress_tool_output"),
+    "WorkspaceReadResult": (".core.workspace_fs", "WorkspaceReadResult"),
+    "WorkspaceProvider": (".core.workspace_fs", "WorkspaceProvider"),
+    "LocalWorkspaceFS": (".core.workspace_fs", "LocalWorkspaceFS"),
+    "PayloadOverlayFS": (".core.workspace_fs", "PayloadOverlayFS"),
+    "GitBlobWorkspaceFS": (".core.workspace_fs", "GitBlobWorkspaceFS"),
+    "DockerExecWorkspaceFS": (".core.workspace_fs", "DockerExecWorkspaceFS"),
+    "resolve_workspace_provider": (".core.workspace_fs", "resolve_workspace_provider"),
+    "load_journal_entries": (".core.trace_replay", "load_journal_entries"),
+    "replay_decision_journal": (".core.trace_replay", "replay_decision_journal"),
 }
 
 __all__ = ["__version__", *list(_LAZY_EXPORTS.keys())]

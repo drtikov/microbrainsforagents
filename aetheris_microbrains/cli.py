@@ -986,6 +986,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_bm.add_argument("--profile", choices=["strict", "dev", "guardrails"], default="dev", help="Policy profile")
     p_bm.add_argument("--json", action="store_true", help="Output full benchmark report as JSON")
 
+    p_rp = sub.add_parser("replay", help="Replay decision_journal.jsonl counterfactually and optionally synthesize policy")
+    p_rp.add_argument("--journal", required=True, help="Path to decision_journal.jsonl")
+    p_rp.add_argument("--profile", choices=["strict", "dev", "guardrails"], default="strict", help="Target profile")
+    p_rp.add_argument("--host", default="", help="Optional host override for replay")
+    p_rp.add_argument("--synthesize-policy", action="store_true", help="Synthesize recurring safe allowlist bundle")
+    p_rp.add_argument("--org-id", default="local-org", help="Organization ID for synthesized policy bundle")
+    p_rp.add_argument("--key-env", default="AETHERIS_FLEET_SIGNING_KEY", help="Optional HMAC signing key env var")
+    p_rp.add_argument("--json", action="store_true", help="Output replay report as JSON")
+
+    p_ir = sub.add_parser("policy-ir-check", help="Verify single-source policy_ir.json parity across Python and Rust")
+    p_ir.add_argument("--json", action="store_true", help="Output parity report as JSON")
+
     for passthrough in ("audit", "doctor", "mcp-proxy", "pr-gate"):
         sub.add_parser(passthrough, add_help=False, help=f"Forward arguments to aetheris_microbrains.{passthrough.replace('-', '_')}")
 
@@ -1037,6 +1049,38 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"| e_ratio={agg.get('e_ratio')} | p95_ms={agg.get('latency_p95_ms')}"
             )
         return 0
+
+    if known.command == "replay":
+        from .core.trace_replay import replay_decision_journal
+
+        key_raw = str(os.environ.get(known.key_env) or "").strip()
+        rep = replay_decision_journal(
+            known.journal,
+            target_profile=known.profile,
+            host=known.host or None,
+            synthesize_policy=bool(known.synthesize_policy),
+            org_id=known.org_id,
+            hmac_key=key_raw.encode("utf-8") if key_raw else None,
+        )
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"replayed={rep.get('replayed_entries')}/{rep.get('total_entries')} | "
+                f"flips={len(rep.get('decision_flips') or [])} | newly_blocked={rep.get('newly_blocked')} | "
+                f"p95_ms={rep.get('latency_p95_ms')}"
+            )
+        return 0
+
+    if known.command == "policy-ir-check":
+        from .core.policy_ir import verify_policy_ir_parity
+
+        rep = verify_policy_ir_parity()
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print(f"policy_ir_parity={rep.get('ok')} | missing_in_ir={rep.get('missing_in_ir')} | missing_in_rust={rep.get('missing_in_rust')}")
+        return 0 if rep.get("ok") else 2
 
     if known.command == "install":
         if known.host == "auto":
