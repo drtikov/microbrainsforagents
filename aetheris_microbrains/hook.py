@@ -418,8 +418,11 @@ def _normalize_hook_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "file_read",
         "repo_read",
         "view_file",
+        "readmediafile",
     }:
         tool_name = "read_file"
+    elif tool_lower in {"fetchurl", "web_fetch", "webfetch"}:
+        tool_name = "webfetch"
     elif tool_lower in {
         "grep",
         "ripgrep",
@@ -988,7 +991,7 @@ def evaluate_hook_payload(
             exit_code = 0
             host_action = "context"
             hook_specific = {"context": f"[Aetheris Microbrains Escalation] {reason}"}
-    elif resolved_host == "codex":
+    elif resolved_host in {"codex", "kimi"}:
         if dec == "deny" or (dec == "escalate" and codex_escalate_deny):
             perm = "deny"
             exit_code = 2
@@ -1476,6 +1479,10 @@ def evaluate_post_tool_use_payload(
         )
         host_action = "warn_context_modification" if any_alert else "clean_passthrough"
         scrubbing_mode = "detect_and_warn"
+    elif resolved_host == "kimi":
+        host_specific = None
+        host_action = "warn_logged" if any_alert else "clean_passthrough"
+        scrubbing_mode = "detect_and_log"
     elif resolved_host in POST_CLAUDE_COMPAT_HOSTS:
         if any_alert:
             host_specific = {
@@ -1822,7 +1829,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if host in (PLUGIN_BLOCK_HOSTS | {"openclaw"}):
                 print(_openclaw_cli_fallback_json(event_kind, err_msg="empty_hook_payload"))
                 return 0
-            if host == "codex":
+            if host in {"codex", "kimi"}:
                 if codex_escalate_deny:
                     print("empty_hook_payload", file=sys.stderr)
                     print(
@@ -2199,7 +2206,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else:
                     print(_format_hook_stdout(result["hookSpecificOutput"]))
             return 2
-        if host == "codex" and result.get("host_action") == "defer_to_host_policy":
+        if host in {"codex", "kimi"} and result.get("host_action") == "defer_to_host_policy":
             return 0
         has_updated_input = isinstance(result.get("hookSpecificOutput"), dict) and "updatedInput" in result["hookSpecificOutput"]
         if perm == "allow" and not auto_allow and not has_updated_input:

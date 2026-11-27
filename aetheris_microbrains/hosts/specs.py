@@ -25,6 +25,7 @@ _DEVIN_TOOL_MATCHER = (
 )
 _MCODE_TOOL_MATCHER = "bash|read|write|edit|grep|glob|web_fetch|web_search|task"
 _ZCODE_TOOL_MATCHER = "Bash|Edit|Write|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+_KIMI_TOOL_MATCHER = "^(Bash|Read|Write|Edit|Grep|Glob|ReadMediaFile|FetchURL|WebSearch|mcp__.*)$"
 _OPENHANDS_TOOL_MATCHER = (
     "terminal|file_editor|execute_bash|str_replace_editor|bash|edit|write|read|mcp__.*"
 )
@@ -193,6 +194,21 @@ _SPECS_LIST: tuple[HostSpec, ...] = (
         plugin_exit_code_passthrough=False,
         returns_hso_directly_http=False,
         integration_kind="sdk",
+        uses_on_failure_block=False,
+    ),
+    HostSpec(
+        name="kimi",
+        contract="kimi_pretooluse_no_ask_v1",
+        family="claude_compat",
+        config_rel_workspace="kimi.plugin.json",
+        config_rel_user=".kimi-code/config.toml",
+        tool_matcher=_KIMI_TOOL_MATCHER,
+        timeout_sec=10,
+        supports_http_daemon=True,
+        supports_replace_tool_output=False,
+        plugin_exit_code_passthrough=False,
+        returns_hso_directly_http=False,
+        integration_kind="hook",
         uses_on_failure_block=False,
     ),
     HostSpec(

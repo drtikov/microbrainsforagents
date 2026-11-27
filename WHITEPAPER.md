@@ -163,6 +163,7 @@ All host adapters are unified under `HOST_SPECS` in [specs.py](file:///i:/github
 | **MiniMax Code (`mcode`)** | `.minimax/hooks.json` / `$MINIMAX_DATA_DIR/hooks.json` | **Hook & Installer Tested** | `--host mcode`, `aetheris install mcode` | Native `mcode_pretooluse_v1`, `commandWindows`, `PostToolUse` `additionalContext` DLP, `.minimax/` protection |
 | **Ouroboros** | In-process `ToolRegistry` (`execute` / `execute_result` / `schemas`) | **SDK & Registry Tested** | `--host ouroboros`, `wrap_ouroboros_registry` | Native `ouroboros_registry_v1` mapping (`run_command`, `apply_patch`, `edit_batch`, `read_file`), reentrancy-safe gate, PostToolUse DLP, MoE narrowing |
 | **Prime Agent (`prime`)** | In-process REPL wrappers (`rlm.bash`, `edit.run`, `mcp.call_tool`) | **SDK & Wrapper Tested** | `--host prime`, `install_prime_gate` | Sync/async REPL wrappers, `.prime/` protection, AST + shell pre-flight gate, fail-closed PostToolUse DLP |
+| **Kimi Code (`kimi`)** | Native plugin (`kimi.plugin.json`, `.kimi-plugin/hooks/kimi_gate.py`) + optional MCP | **Plugin & Contract Tested** | `--host kimi`, `/plugins install` | `kimi_pretooluse_no_ask_v1` (silent allow/defer, exit-2 deny), journal-only PostToolUse DLP, `.kimi-code/`/`.kimi-plugin/` protection |
 
 ### 4.2 Architectural Case Study: Contextual Shell Classification (Windows PowerShell)
 

@@ -338,7 +338,7 @@ pub fn emit_daemon_verdict(verdict: &JsonValue, flags: &CliFlags) -> i32 {
         .get("host_action")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if flags.host == "codex" && host_action == "defer_to_host_policy" {
+    if (flags.host == "codex" || flags.host == "kimi") && host_action == "defer_to_host_policy" {
         return 0;
     }
     let has_updated_input = hso.and_then(|v| v.get("updatedInput")).is_some();

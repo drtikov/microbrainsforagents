@@ -104,6 +104,7 @@ Microbrains works alongside any AI agent or framework:
 | **Pi Coding Agent** | **Pi** | **Config & Extension Tested** | **Native Extension + CLI** (`pi-aetheris-microbrains/` / `aetheris install pi`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` status command, and `.pi/` protection. |
 | **OMP (Oh My Pi)** | **OMP (`oh-my-pi`)** | **Config & Extension Tested** | **Native Extension + CLI** (`omp-aetheris-microbrains/` / `aetheris install omp`) | Zero-dep ESM extension: `tool_call` (`block` + `ctx.ui.confirm` escalation), `tool_result` DLP scrubbing, `/aetheris` & `/aetheris-config`, and `.omp/` protection. |
 | **ZCode** | **ZCode** | **Bundle & Contract Tested** | **Marketplace Plugin + CLI** (`.zcode-plugin/` / `aetheris install zcode`) | One-click Marketplace `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), `microbrains` skill, `/mb:audit`/`doctor`/`preflight`, and `.zcode/` protection. |
+| **Kimi Code (`kimi`)** | **Kimi Code CLI** | **Plugin & Contract Tested** | **Native Kimi Plugin + Adapter** (`kimi.plugin.json` / `.kimi-plugin/` / `--host kimi`) | One-command `/plugins install` `PreToolUse`/`PostToolUse` gate (`kimi_gate.py`), silent allow & host-defer escalation, exit-2 deny, journal-only DLP, optional `aetheris-mcp`, and `.kimi-code/`/`.kimi-plugin/` protection. |
 | **OpenHands** | **OpenHands** | **Hook & SDK Tested** | **Hook Installer + SDK Analyzer** (`.openhands/hooks.json` + `AetherisSecurityAnalyzer` / `aetheris install openhands`) | `PreToolUse`/`PostToolUse` gating for `terminal`/`file_editor`, Python SDK `SecurityAnalyzerBase` (`LOW`/`MEDIUM`/`HIGH`), and `.openhands/` protection. |
 | **Ouroboros** | **Ouroboros** (`razzant/ouroboros`) | **SDK & Registry Tested** | **Python Registry Wrapper + CLI** (`wrap_ouroboros_registry` / `aetheris install ouroboros --self-test`) | 2-line drop-in wrapper on `ToolRegistry` (`execute`/`execute_result`/`schemas`), native tool mapping (`run_command`, `apply_patch`, `edit_batch`, `read_file`), and PostToolUse DLP scrubbing. |
 | **Prime Agent (`prime`)** | **Prime Agent** | **SDK & Wrapper Tested** | **In-Process REPL Gate + CLI** (`install_prime_gate` / `aetheris install prime --self-test`) | Idempotent sync/async wrappers for `rlm.bash`, `edit.run`, and `mcp.call_tool`, `.prime/` control-plane protection, AST + shell gate, and fail-closed DLP. |
@@ -612,6 +613,40 @@ aetheris install qoder --workspace . --profile dev
 ```
 
 *(Optional: connect `aetheris-mcp` over `stdio` or `--http --port 8080` in Qoder's MCP connector settings for the 8 on-demand `microbrain_*` audit, scrubbing, and schema-scanning tools.)*
+
+---
+
+## Kimi Code Plugin Integration (`PreToolUse`/`PostToolUse` + `.kimi-code/` Protection)
+
+**Kimi Code** integrates natively via [`kimi.plugin.json`](kimi.plugin.json) and [`.kimi-plugin/hooks/kimi_gate.py`](.kimi-plugin/hooks/kimi_gate.py) paired with the `--host kimi` adapter (`kimi_pretooluse_no_ask_v1`):
+
+```text
+/plugins install https://github.com/drtikov/microbrainsforagents
+/reload
+```
+
+- **Verdict Mapping (`--host kimi`):** `allow` exits `0` silently; `deny` writes reason to `stderr` and exits `2`; `escalate` exits `0` silently (`defer_to_host_policy`, or exits `2` with `--codex-escalate-deny` for strict CI); `PostToolUse` runs secret & prompt-injection detection to the local journal without emitting unsupported output replacement fields.
+- **Control-Plane Self-Protection:** `.kimi-code/`, `.kimi-code/config.toml`, `.kimi-code/mcp.json`, `.kimi-plugin/`, and `kimi.plugin.json` are write-protected at Layer 0.
+- **Optional Advisory MCP (`~/.kimi-code/mcp.json`):** Install `pip install "aetheris-microbrains[mcp]"` and add:
+
+```json
+{
+  "mcpServers": {
+    "microbrains": {
+      "command": "aetheris-mcp",
+      "deferred": true,
+      "enabledTools": [
+        "microbrain_health",
+        "microbrain_preflight_check",
+        "microbrain_scrub_and_scan",
+        "microbrain_scan_mcp_tools",
+        "microbrain_narrow_tools",
+        "microbrain_audit_explain"
+      ]
+    }
+  }
+}
+```
 
 ---
 

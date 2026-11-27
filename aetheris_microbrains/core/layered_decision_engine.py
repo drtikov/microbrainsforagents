@@ -220,6 +220,13 @@ DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = (
     ".minimax",
     ".minimax/hooks.json",
     ".minimax-plugin/",
+    ".kimi-code/",
+    ".kimi-code",
+    ".kimi-code/config.toml",
+    ".kimi-code/mcp.json",
+    ".kimi-plugin/",
+    ".kimi-plugin",
+    "kimi.plugin.json",
     "claude.md",
     "agents.md",
     ".claude/settings.json",
@@ -274,6 +281,7 @@ _PROTECTED_EXACT_BASENAMES: Set[str] = {
     ".gitlab-ci.yml",
     ".pre-commit-config.yaml",
     ".gitmodules",
+    "kimi.plugin.json",
 }
 
 
@@ -4750,7 +4758,7 @@ def get_recent_decision_journal(limit: int = 50) -> List[Dict[str, Any]]:
     return list(_DECISION_RING_BUFFER)[-limit:]
 
 
-_AGENT_CONTROL_PLANE_SEGMENTS: Tuple[str, ...] = (".claude", ".codex", ".cursor", ".qoder", ".qwen", ".prime", ".opencode", ".kilo", ".pi", ".omp", ".zcode", ".openhands", ".devin", ".clinerules", ".cline", ".minimax", ".mcp.json", ".vscode")
+_AGENT_CONTROL_PLANE_SEGMENTS: Tuple[str, ...] = (".claude", ".codex", ".cursor", ".qoder", ".qwen", ".prime", ".opencode", ".kilo", ".pi", ".omp", ".zcode", ".openhands", ".devin", ".clinerules", ".cline", ".minimax", ".kimi-code", ".kimi-plugin", ".mcp.json", ".vscode")
 _AGENT_CREDENTIAL_SEGMENTS: Tuple[str, ...] = (
     ".env", ".ssh", ".aws", ".git", "credentials", "id_rsa", "id_ed25519", "id_ecdsa",
     "secrets", "integrity", "bible.md", "axioms", ".pem", ".key",

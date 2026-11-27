@@ -147,6 +147,13 @@ _BUILTIN_ADAPTERS: Tuple[HostAdapter, ...] = (
         supports_replace_tool_output=True,
     ),
     HostAdapter(
+        name="kimi",
+        contract="kimi_pretooluse_no_ask_v1",
+        family="claude_compat",
+        supports_http_daemon=True,
+        supports_replace_tool_output=False,
+    ),
+    HostAdapter(
         name="generic",
         contract="generic_v1",
         family="generic",

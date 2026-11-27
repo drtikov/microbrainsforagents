@@ -1,0 +1,20 @@
+{
+  "name": "aetheris-microbrains",
+  "version": "0.7.6",
+  "description": "Deterministic pre-flight shell, edit, secret and MCP safety gate for Kimi Code",
+  "skills": "./.kimi-plugin/skills/",
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "^(Bash|Read|Write|Edit|Grep|Glob|ReadMediaFile|FetchURL|WebSearch|mcp__.*)$",
+      "command": "python ./.kimi-plugin/hooks/kimi_gate.py --host kimi --profile guardrails --session-state auto --log-decisions",
+      "timeout": 10
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": "^(Bash|Read|Write|Edit|Grep|FetchURL|WebSearch|mcp__.*)$",
+      "command": "python ./.kimi-plugin/hooks/kimi_gate.py --host kimi --event post-tool-use --session-state auto --log-decisions",
+      "timeout": 10
+    }
+  ]
+}

@@ -52,6 +52,7 @@ pub fn is_supported_host(host: &str) -> bool {
             | "ouroboros"
             | "prime"
             | "qwen"
+            | "kimi"
     )
 }
 
@@ -379,6 +380,8 @@ fn is_control_plane_segment(seg: &str) -> bool {
             | ".clinerules"
             | ".cline"
             | ".minimax"
+            | ".kimi-code"
+            | ".kimi-plugin"
             | ".mcp.json"
             | ".vscode"
     )
@@ -461,6 +464,7 @@ pub fn is_protected_path(path: &str) -> bool {
         ".gitmodules",
         "claude.md",
         "agents.md",
+        "kimi.plugin.json",
     ];
     if EXACT_BASENAMES.contains(&basename) {
         return true;
@@ -494,6 +498,8 @@ pub fn is_protected_path(path: &str) -> bool {
                 | ".clinerules"
                 | ".cline"
                 | ".minimax"
+                | ".kimi-code"
+                | ".kimi-plugin"
                 | "constitution"
         ) {
             return true;
@@ -698,7 +704,7 @@ mod tests {
         ]);
         assert_eq!(flags.host, "devin");
 
-        for host in ["devin", "cline", "mcode", "ouroboros", "prime", "qwen"] {
+        for host in ["devin", "cline", "mcode", "ouroboros", "prime", "qwen", "kimi"] {
             let f = parse_cli_flags(&["--host".to_string(), host.to_string()]);
             assert_eq!(f.host, host);
         }
@@ -710,6 +716,9 @@ mod tests {
             ".minimax/hooks.json",
             ".qwen/settings.json",
             ".prime/agent/settings.json",
+            ".kimi-code/config.toml",
+            ".kimi-plugin/hooks/kimi_gate.py",
+            "kimi.plugin.json",
         ] {
             assert!(is_protected_path(p), "expected protected path: {p}");
         }
