@@ -1673,6 +1673,9 @@ def test_fable_42_audit_remediation_fixes(tmp_path, monkeypatch):
         assert val_resp.success is True
 
     # 5. Honest tree-sitter detection (bare module without grammar stays False / regex_heuristic or multilang_structural)
+    from aetheris_microbrains.core import layered_decision_engine as _lde
+
+    monkeypatch.setattr(_lde, "_TREE_SITTER_LANG_CACHE", {})
     dummy_ts = types.ModuleType("tree_sitter")
     monkeypatch.setitem(sys.modules, "tree_sitter", dummy_ts)
     ts_diff = analyze_code_diff("src/app.ts", "export const x: number = 1;\n")

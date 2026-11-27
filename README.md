@@ -121,7 +121,7 @@ cd microbrainsforagents
 pip install -e .
 ```
 
-Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`). The core 34 security modules use pure Python stdlib with zero third-party dependencies (`aetheris verify-core`).
+Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`). The core 69 security modules use pure Python stdlib with zero third-party dependencies (`aetheris verify-core`).
 
 * **Naming clarity:** Repository name is `microbrainsforagents`, `pip` package name is `aetheris-microbrains`, and the Python import package is `aetheris_microbrains`.
 
@@ -955,7 +955,7 @@ Catching broken syntax, missing variables, or leaked keys locally in 1.3 ms stop
 Shields sensitive files (`.env`, `.ssh/`, `credentials.json`), prevents destructive commands (`rm -rf`, `DROP DATABASE`), and catches hidden code execution tricks (`eval`, `base64` decode into `exec`).
 
 ### 3. ⏱️ Blazing Fast (<2 ms Latency)
-Runs strictly on the Python standard library across its **34 core security modules** (plus optional zero-dependency Rust shim `aetheris-gate`), with pure NumPy reserved for optional Layer-2 routing and lab research modules. You won't notice a sub-millisecond check when your LLM takes 5 to 20 seconds to reply.
+Runs strictly on the Python standard library across its **69 core security modules** (plus optional zero-dependency Rust shim `aetheris-gate`), with pure NumPy reserved for optional Layer-2 routing and lab research modules. You won't notice a sub-millisecond check when your LLM takes 5 to 20 seconds to reply.
 
 ### 4. 🧭 Reliable Escalations, Safe Fallbacks & Audit Trail
 - **Safe Timeout Contracts & Fail-Closed Boundaries:** When an action needs human review (`ask`), an explicit timeout is set (default: 300s). If nobody answers, it **fails closed** (`default_on_timeout: "deny"`)—silence never grants permission. Missing context (e.g. unsupplied `file_content` for ambiguous diffs) likewise degrades safely to `"ask"` rather than auto-allowing.
@@ -1039,7 +1039,7 @@ Export forensic decision events as OpenTelemetry GenAI semantic convention spans
 
 ## Packaging and Pure-Stdlib Core Isolation (`verify-core`)
 
-Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`): **34 core security modules** run strictly on the Python standard library with zero third-party dependencies (zero NumPy or experimental imports on the security decision path), while **49 lab/research modules** remain cleanly isolated. Run `aetheris verify-core` to verify isolation programmatically.
+Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`): **69 core security modules** run strictly on the Python standard library with zero third-party dependencies (zero NumPy or experimental imports on the security decision path), while **49 lab/research modules** remain cleanly isolated. Run `aetheris verify-core` to verify isolation programmatically.
 
 ---
 
