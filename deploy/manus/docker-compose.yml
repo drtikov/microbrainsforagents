@@ -5,7 +5,7 @@ services:
       dockerfile: deploy/manus/Dockerfile
     environment:
       AETHERIS_MCP_BEARER_TOKEN: ${AETHERIS_MCP_BEARER_TOKEN:?Set AETHERIS_MCP_BEARER_TOKEN before starting}
-      AETHERIS_HOME: /var/lib/aetheris
+      AETHERIS_STATE_DIR: /var/lib/aetheris
     volumes:
       - aetheris_state:/var/lib/aetheris
     expose:

@@ -74,9 +74,15 @@ def build_mcp_server(
             streamable_http_path=streamable_http_path,
             json_response=bool(json_response),
         )
-    except ModuleNotFoundError:
-        from mcp.server.mcpserver import MCPServer
-        server = MCPServer(name)
+    except (ModuleNotFoundError, ImportError) as fastmcp_exc:
+        try:
+            from mcp.server.mcpserver import MCPServer
+            server = MCPServer(name)
+        except (ModuleNotFoundError, ImportError) as fallback_exc:
+            raise ImportError(
+                "Aetheris Microbrains MCP server requires 'mcp>=1.8.0,<2.0.0' "
+                "(FastMCP with Streamable HTTP). Install with: pip install 'aetheris-microbrains[mcp]'"
+            ) from (fallback_exc or fastmcp_exc)
 
     @server.tool()
     def microbrain_health() -> str:
@@ -463,10 +469,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     transport = "streamable-http" if args.http else args.transport
     is_remote_profile = args.profile in {"manus", "remote"}
+    if is_remote_profile and transport == "sse":
+        print("Remote profiles require authenticated Streamable HTTP; SSE is unsupported.", file=sys.stderr)
+        return 1
+
     from .manus_auth import is_loopback_host, resolve_bearer_token
 
     bearer_token = resolve_bearer_token(args.auth_token_env)
-    if transport in {"streamable-http", "sse"} and is_remote_profile and not bearer_token:
+    if transport == "streamable-http" and is_remote_profile and not bearer_token:
         if not (args.allow_unauthenticated_local and is_loopback_host(args.host)):
             print(
                 f"Refusing unauthenticated {args.profile!r} HTTP server on {args.host}:{args.port}. "

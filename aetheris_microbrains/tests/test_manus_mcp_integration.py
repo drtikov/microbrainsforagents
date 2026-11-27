@@ -231,3 +231,39 @@ def test_manus_verify_project_root_confinement_and_cli_fail_closed(tmp_path: Pat
     monkeypatch.delenv("AETHERIS_MCP_BEARER_TOKEN", raising=False)
     assert mcp_main(["--http", "--profile", "manus", "--host", "0.0.0.0"]) == 1
     assert mcp_main(["--http", "--profile", "manus", "--host", "0.0.0.0", "--allow-unauthenticated-local"]) == 1
+
+
+def test_manus_rejects_remote_sse_and_docker_uses_state_dir(tmp_path: Path, monkeypatch):
+    import aetheris_microbrains.mcp_server as _ms
+    from aetheris_microbrains.core.runtime_paths import get_state_dir
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("Remote SSE must fail before constructing or running a server")
+
+    monkeypatch.setenv("AETHERIS_MCP_BEARER_TOKEN", "secret-token-for-sse-check")
+    monkeypatch.setattr(_ms, "build_mcp_server", _boom)
+    monkeypatch.setattr(_ms, "build_streamable_http_app", _boom)
+
+    assert mcp_main(["--transport", "sse", "--profile", "manus", "--host", "0.0.0.0"]) == 1
+    assert mcp_main(["--transport", "sse", "--profile", "remote", "--host", "127.0.0.1"]) == 1
+
+    # Container env var alignment: get_state_dir reads AETHERIS_STATE_DIR (not AETHERIS_HOME)
+    state_target = tmp_path / "var_lib_aetheris"
+    monkeypatch.setenv("AETHERIS_STATE_DIR", str(state_target))
+    resolved_state = get_state_dir()
+    assert resolved_state == state_target
+    resolved_state.mkdir(parents=True, exist_ok=True)
+    probe = resolved_state / "write_probe.tmp"
+    probe.write_text("ok", encoding="utf-8")
+    assert probe.read_text(encoding="utf-8") == "ok"
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dockerfile = (repo_root / "deploy" / "manus" / "Dockerfile").read_text(encoding="utf-8")
+    compose = (repo_root / "deploy" / "manus" / "docker-compose.yml").read_text(encoding="utf-8")
+    pyproject = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "AETHERIS_STATE_DIR=/var/lib/aetheris" in dockerfile
+    assert "AETHERIS_HOME" not in dockerfile
+    assert "AETHERIS_STATE_DIR: /var/lib/aetheris" in compose
+    assert "AETHERIS_HOME" not in compose
+    assert "mcp>=1.8.0,<2.0.0" in pyproject

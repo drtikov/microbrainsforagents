@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    AETHERIS_HOME=/var/lib/aetheris
+    AETHERIS_STATE_DIR=/var/lib/aetheris
 
 WORKDIR /app
 COPY pyproject.toml README.md ./
