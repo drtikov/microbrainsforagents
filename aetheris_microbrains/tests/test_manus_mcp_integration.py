@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+
+pytest.importorskip("mcp")
+TestClient = pytest.importorskip("starlette.testclient").TestClient
 
 from aetheris_microbrains.manus_auth import BearerAuthMiddleware
 from aetheris_microbrains.mcp_server import (

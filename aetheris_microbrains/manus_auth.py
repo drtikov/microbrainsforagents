@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from typing import Any, Optional
 
-from starlette.responses import JSONResponse
-
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_UNAUTHORIZED_BODY = json.dumps({"error": "unauthorized"}).encode("utf-8")
 
 
 def resolve_bearer_token(env_var: str = "AETHERIS_MCP_BEARER_TOKEN") -> Optional[str]:
@@ -70,11 +70,15 @@ class BearerAuthMiddleware:
                 and hmac.compare_digest(supplied.strip(), self.token)
             )
             if not valid:
-                response = JSONResponse(
-                    {"error": "unauthorized"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-                await response(scope, receive, send)
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(_UNAUTHORIZED_BODY)).encode("ascii")),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": _UNAUTHORIZED_BODY, "more_body": False})
                 return
         await self.app(scope, receive, send)
