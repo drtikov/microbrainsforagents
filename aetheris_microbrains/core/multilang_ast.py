@@ -61,6 +61,9 @@ _TF_WILD_RESOURCE_RE = re.compile(r"""Resource\s*[:=]\s*\[?\s*['"]\*['"]""")
 _DOCKER_REMOTE_ADD_RE = re.compile(r"(?i)^\s*ADD\s+https?://\S+")
 _DOCKER_SUID_RE = re.compile(r"\bchmod\s+(?:[ugo]*\+s|47[0-7]{2}|27[0-7]{2})\b")
 _YAML_UNSAFE_TAG_RE = re.compile(r"!!python/(?:object|apply|module|name)\b")
+_YAML_CMD_RCE_RE = re.compile(
+    r"(?im)^\s*(?:-\s*)?(?:script|run|command|cmd|exec)\s*:\s*.*?\b(?:curl|wget)\b[^#\n]*\|\s*(?:env\s+|sudo\s+)?(?:sh|bash|zsh|dash|python\d?|perl)\b"
+)
 
 _TS_GRAMMAR_BY_EXT: Dict[str, Tuple[str, str]] = {
     ".js": ("tree_sitter_javascript", "language"),
@@ -335,6 +338,8 @@ def analyze_multilang_code(
     elif lang == "yaml":
         for m in _YAML_UNSAFE_TAG_RE.finditer(stripped_src):
             raw_findings.append(("yaml_unsafe_deserialization_tag", _line_of_offset(stripped_src, m.start())))
+        for m in _YAML_CMD_RCE_RE.finditer(stripped_src):
+            raw_findings.append(("yaml_rce_pipe", _line_of_offset(stripped_src, m.start())))
 
     ts_parsed, ts_syntax_ok, ts_findings = scan_with_tree_sitter(ext_low, src)
     raw_findings.extend(ts_findings)

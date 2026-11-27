@@ -33,7 +33,7 @@ fn run_self_test() -> i32 {
         to_json_string(&obj(vec![
             ("ok", JsonValue::Bool(ok)),
             ("binary", JsonValue::Str("aetheris-gate".to_string())),
-            ("version", JsonValue::Str("0.7.7".to_string())),
+            ("version", JsonValue::Str(env!("CARGO_PKG_VERSION").to_string())),
             ("layer0_native_veto", JsonValue::Bool(ok)),
             (
                 "state_dir",

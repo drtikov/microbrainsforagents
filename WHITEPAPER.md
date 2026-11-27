@@ -51,7 +51,7 @@ MicroBrains sits transparently in the tool-execution critical path via native ho
                                │
                                ▼
           ┌────────────────────────────────────────┐
-          │   HOST AGENT HARNESS (20 HostSpecs)    │
+          │   HOST AGENT HARNESS (21 HostSpecs)    │
           │   Claude │ Codex │ Antigravity │ Qwen  │
           │   Cursor │ Cline │ Devin │ mcode │ ... │
           │   Ouroboros (SDK) │ Prime Agent (REPL) │
@@ -62,7 +62,7 @@ MicroBrains sits transparently in the tool-execution critical path via native ho
           │   HOST ADAPTERS & LOW-LATENCY TRANSPORT│
           │   • rust/aetheris-gate (Native & WASM) │
           │     L0 + L1 Shell Unwrapper + DLP      │
-          │   • hosts/specs.py (20-host registry)  │
+          │   • hosts/specs.py (21-host registry)  │
           │   • hook.py + hook_daemon.py (IPC)     │
           └────────────────────┬───────────────────┘
                                │
@@ -143,7 +143,7 @@ When an orchestrator spawns subagents, flat ambient authority is unsafe. `capabi
 
 ## 4. Implemented Capabilities & Multi-Host Matrix
 
-### 4.1 Declarative 20-Host Registry (`HostSpec`)
+### 4.1 Declarative 21-Host Registry (`HostSpec`)
 
 All host adapters are unified under `HOST_SPECS` in [specs.py](file:///i:/github%20microbrains/aetheris_microbrains/hosts/specs.py) with automated parity validation (`validate_host_specs_parity`). Key integrated platforms:
 

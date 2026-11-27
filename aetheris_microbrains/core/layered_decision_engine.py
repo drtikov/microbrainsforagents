@@ -1108,6 +1108,13 @@ class _SecurityASTVisitor(ast.NodeVisitor):
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._check_alias_assignment(node.targets, node.value)
+        for tgt in node.targets:
+            if (
+                isinstance(tgt, ast.Subscript)
+                and isinstance(tgt.value, ast.Name)
+                and tgt.value.id == "__builtins__"
+            ):
+                self._record_finding("builtins_mutation", node, "__builtins__")
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -1330,6 +1337,23 @@ class _SecurityASTVisitor(ast.NodeVisitor):
                 env_k = _const_str(node.args[0])
                 if env_k and _SENSITIVE_ENV_VAR_RE.search(env_k):
                     self.has_env_secret_read = True
+
+            if attr in {"execute", "executemany", "executescript"} and node.args:
+                sql_parts: List[str] = []
+                arg0 = node.args[0]
+                if isinstance(arg0, ast.JoinedStr):
+                    sql_parts = [v.value for v in arg0.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+                else:
+                    s_val = self._fold_str(arg0) or _const_str(arg0)
+                    if s_val:
+                        sql_parts = [s_val]
+                sql_text = " ".join(sql_parts)
+                if sql_text and re.search(
+                    r"\b(?:DROP\s+(?:DATABASE|SCHEMA|TABLE)\b|TRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"`[])",
+                    sql_text,
+                    re.IGNORECASE,
+                ):
+                    self._record_finding("python_embedded_destructive_sql", node, sql_text[:60])
 
             if attr in {"eval", "exec", "system", "popen"}:
                 sym = f"{resolved_mod}.{attr}" if resolved_mod else attr
