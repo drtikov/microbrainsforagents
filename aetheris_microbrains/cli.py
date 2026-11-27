@@ -973,6 +973,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_vc = sub.add_parser("verify-core", help="Verify stdlib-only core isolation vs lab research modules")
     p_vc.add_argument("--json", action="store_true", help="Output verification report as JSON")
 
+    p_fv = sub.add_parser("fleet-verify", help="Verify a signed fleet policy bundle and optional journal hash chain")
+    p_fv.add_argument("--bundle", required=True, help="Path to signed fleet bundle JSON")
+    p_fv.add_argument("--key-env", default="AETHERIS_FLEET_SIGNING_KEY", help="Env var holding HMAC signing key")
+    p_fv.add_argument("--min-version", type=int, default=0, help="Minimum accepted monotonic bundle version")
+    p_fv.add_argument("--journal-path", default="", help="Optional decision_journal.jsonl path for attestation")
+    p_fv.add_argument("--json", action="store_true", help="Output verification/attestation report as JSON")
+
+    p_bm = sub.add_parser("benchmark", help="Run cross-harness A/B security and Engineering Efficiency suite")
+    p_bm.add_argument("--hosts", default="claude,cursor,cline,qwen,mcode,ouroboros,prime", help="Comma-separated hosts")
+    p_bm.add_argument("--trials", type=int, default=3, help="Trials per host")
+    p_bm.add_argument("--profile", choices=["strict", "dev", "guardrails"], default="dev", help="Policy profile")
+    p_bm.add_argument("--json", action="store_true", help="Output full benchmark report as JSON")
+
     for passthrough in ("audit", "doctor", "mcp-proxy", "pr-gate"):
         sub.add_parser(passthrough, add_help=False, help=f"Forward arguments to aetheris_microbrains.{passthrough.replace('-', '_')}")
 
@@ -989,6 +1002,41 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"lab_modules={rep['lab_count']} | numpy_violations={rep['numpy_violations']}"
             )
         return 0 if rep["ok"] else 1
+
+    if known.command == "fleet-verify":
+        from .core.fleet_bundle import build_fleet_attestation, verify_signed_fleet_bundle
+
+        key = str(os.environ.get(known.key_env) or "").strip()
+        if not key:
+            print(f"Missing signing key in env var {known.key_env}", file=sys.stderr)
+            return 1
+        bundle_obj = json.loads(Path(known.bundle).read_text(encoding="utf-8"))
+        if known.journal_path:
+            rep = build_fleet_attestation(bundle_obj, journal_path=known.journal_path, signing_key=key)
+            ok = bool(rep.get("valid"))
+        else:
+            rep = verify_signed_fleet_bundle(bundle_obj, signing_key=key, min_version=known.min_version)
+            ok = bool(rep.get("valid"))
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print(f"fleet_valid={ok} | org={rep.get('org_id')} | version={rep.get('version')} | reason={rep.get('reason')}")
+        return 0 if ok else 2
+
+    if known.command == "benchmark":
+        from .core.benchmark_harness import run_cross_harness_ab_suite
+
+        host_list = [h.strip() for h in str(known.hosts or "").split(",") if h.strip()]
+        rep = run_cross_harness_ab_suite(hosts=host_list, trials=max(1, int(known.trials)), profile=known.profile)
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            agg = rep.get("aggregate", {})
+            print(
+                f"hosts={len(host_list)} | trials={known.trials} | tpr={agg.get('tpr')} | fpr={agg.get('fpr')} "
+                f"| e_ratio={agg.get('e_ratio')} | p95_ms={agg.get('latency_p95_ms')}"
+            )
+        return 0
 
     if known.command == "install":
         if known.host == "auto":

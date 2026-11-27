@@ -5,6 +5,16 @@ edition = "2021"
 description = "Native sub-millisecond Layer 0 security shim, IPC daemon client, and OS sandbox runner for Aetheris Microbrains."
 license = "Apache-2.0"
 
+[lib]
+name = "aetheris_gate"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "aetheris-gate"
+path = "src/main.rs"
+
+[dependencies]
+
 [profile.release]
 opt-level = 3
 lto = true

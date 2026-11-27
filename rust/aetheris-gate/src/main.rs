@@ -1,21 +1,17 @@
-//! `aetheris-gate`: Native sub-millisecond Layer 0 gate, warm IPC client, and OS sandbox runner.
-
-mod ipc;
-mod json;
-mod layer0;
-mod sandbox;
+//! `aetheris-gate`: Native sub-millisecond Layer 0/1 gate, DLP scrubber, warm IPC client, and OS sandbox runner.
 
 use std::env;
 use std::io::{self, Read};
 use std::process;
 
-use ipc::{
+use aetheris_gate::dlp::scrub_text_json;
+use aetheris_gate::ipc::{
     emit_daemon_verdict, fallback_python_hook, query_warm_daemon, resolve_state_dir,
     spawn_daemon_detached,
 };
-use json::{obj, parse_json, to_json_string, JsonValue};
-use layer0::{emit_veto, fast_layer0_veto, parse_cli_flags};
-use sandbox::run_sandbox_command;
+use aetheris_gate::json::{obj, parse_json, to_json_string, JsonValue};
+use aetheris_gate::layer0::{emit_veto, fast_layer0_veto, parse_cli_flags};
+use aetheris_gate::sandbox::run_sandbox_command;
 
 fn run_self_test() -> i32 {
     let mut flags = parse_cli_flags(&[
@@ -48,6 +44,17 @@ fn run_self_test() -> i32 {
     if ok { 0 } else { 1 }
 }
 
+fn run_scrub_command() -> i32 {
+    let mut raw_stdin = Vec::new();
+    if let Err(e) = io::stdin().read_to_end(&mut raw_stdin) {
+        eprintln!("aetheris-gate scrub: failed to read stdin: {e}");
+        return 2;
+    }
+    let text = String::from_utf8_lossy(&raw_stdin);
+    println!("{}", scrub_text_json(&text));
+    0
+}
+
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
 
@@ -56,6 +63,9 @@ fn main() {
     }
     if raw_args.first().map(String::as_str) == Some("sandbox") {
         process::exit(run_sandbox_command(&raw_args[1..]));
+    }
+    if raw_args.first().map(String::as_str) == Some("scrub") {
+        process::exit(run_scrub_command());
     }
 
     let flags = parse_cli_flags(&raw_args);
@@ -75,7 +85,7 @@ fn main() {
         _ => process::exit(fallback_python_hook(&raw_stdin, &raw_args)),
     };
 
-    // 1. Sub-100us native Rust Layer 0 hard veto (skipped when journal logging/shadow needs Python)
+    // 1. Sub-100us native Rust Layer 0/1 hard veto (skipped when journal logging/shadow needs Python)
     if let Some(veto) = fast_layer0_veto(&payload, &flags) {
         process::exit(emit_veto(&veto, &flags));
     }

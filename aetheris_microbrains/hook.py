@@ -1128,6 +1128,15 @@ def evaluate_hook_payload(
     if approved_via_approve_once:
         out["approved_via_approve_once"] = True
         out["original_reason_code"] = original_reason_code
+    if dec in ("deny", "escalate") and not shadow_mode:
+        try:
+            from .core.repair_hints import generate_repair_hint
+
+            repair = generate_repair_hint(payload if isinstance(payload, dict) else {}, out, allow_rewrite=False)
+            if repair is not None:
+                out["repair_hint"] = repair
+        except Exception:
+            pass
     return out
 
 

@@ -228,6 +228,27 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "scan_pr_paths": (".pr_gate", "scan_pr_paths"),
     "to_sarif_report": (".pr_gate", "to_sarif_report"),
     "format_markdown_report": (".pr_gate", "format_markdown_report"),
+    # Next-generation platform modules (v0.8 proposals)
+    "HostSpec": (".hosts.specs", "HostSpec"),
+    "HOST_SPECS": (".hosts.specs", "HOST_SPECS"),
+    "compile_hook_config_from_spec": (".hosts.specs", "compile_hook_config_from_spec"),
+    "validate_host_specs_parity": (".hosts.specs", "validate_host_specs_parity"),
+    "ASTDiffCache": (".core.ast_cache", "ASTDiffCache"),
+    "get_default_ast_cache": (".core.ast_cache", "get_default_ast_cache"),
+    "WorkspaceTransactionManager": (".core.workspace_tx", "WorkspaceTransactionManager"),
+    "run_speculative_transaction": (".core.workspace_tx", "run_speculative_transaction"),
+    "CapabilityCaveat": (".core.capability_tokens", "CapabilityCaveat"),
+    "CapabilityToken": (".core.capability_tokens", "CapabilityToken"),
+    "mint_root_capability": (".core.capability_tokens", "mint_root_capability"),
+    "attenuate_capability": (".core.capability_tokens", "attenuate_capability"),
+    "verify_capability_and_authorize": (".core.capability_tokens", "verify_capability_and_authorize"),
+    "propagate_subagent_taint": (".core.capability_tokens", "propagate_subagent_taint"),
+    "generate_repair_hint": (".core.repair_hints", "generate_repair_hint"),
+    "calibrate_thresholds_from_journal": (".core.repair_hints", "calibrate_thresholds_from_journal"),
+    "create_signed_fleet_bundle": (".core.fleet_bundle", "create_signed_fleet_bundle"),
+    "verify_signed_fleet_bundle": (".core.fleet_bundle", "verify_signed_fleet_bundle"),
+    "build_fleet_attestation": (".core.fleet_bundle", "build_fleet_attestation"),
+    "run_cross_harness_ab_suite": (".core.benchmark_harness", "run_cross_harness_ab_suite"),
 }
 
 __all__ = ["__version__", *list(_LAZY_EXPORTS.keys())]

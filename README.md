@@ -71,6 +71,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [OpenTelemetry GenAI Export and Real-Time Local Audit Web UI](#opentelemetry-genai-export-and-real-time-local-audit-web-ui)
 - [Packaging and Pure-Stdlib Core Isolation (`verify-core`)](#packaging-and-pure-stdlib-core-isolation-verify-core)
 - [CI/CD PR Gate and SARIF Reporting](#cicd-pr-gate-and-sarif-reporting)
+- [Next-Gen Runtime: Rust/WASM Core, Transactions, Subagent IAM & Fleet Attestation](#next-gen-runtime-rustwasm-core-transactions-subagent-iam--fleet-attestation)
 - [🏗️ 4-Layer Decision Architecture](#-4-layer-decision-architecture)
 - [🔬 Experimental & Research Extensions (Optional Modules)](#-experimental--research-extensions-optional-modules)
 - [🎯 Scope, Where It Fits & Alternatives](#-scope-where-it-fits--alternatives)
@@ -1007,7 +1008,20 @@ Aetheris Microbrains strictly decouples production agent security from experimen
 
 ## CI/CD PR Gate and SARIF Reporting
 
-The standalone pull request scanner `aetheris-pr-gate` (`pr_gate.py`, or `aetheris pr-gate`) inspects git diffs (`--base`/`--head`), diff files (`--diff-file`), and repository paths (`--paths`) before merging. It emits **SARIF 2.1.0** reports (`--sarif-out`) for GitHub Code Scanning and Markdown summaries for automated PR comments, with a ready-to-use GitHub Action in [`examples/github-action/`](examples/github-action/action.yml).
+The standalone pull request scanner `aetheris-pr-gate` (`pr_gate.py`, or `aetheris pr-gate`) inspects git diffs (`--base`/`--head`), diff files (`--diff-file`), and repository paths (`--paths`) before merging (including `SKILL.md` / `.mcp.json` Unicode smuggling & supply-chain scans). It emits **SARIF 2.1.0** reports (`--sarif-out`) for GitHub Code Scanning and Markdown summaries for automated PR comments, with a ready-to-use GitHub Action in [`examples/github-action/`](examples/github-action/action.yml).
+
+---
+
+## Next-Gen Runtime: Rust/WASM Core, Transactions, Subagent IAM & Fleet Attestation
+
+Microbrains v0.8 adds six production platform layers on top of the zero-NumPy stdlib security core:
+
+- **Zero-Dependency Rust Layer 1 + DLP + `wasm32` Core ([`rust/aetheris-gate/`](rust/aetheris-gate/Cargo.toml)):** Native `layer1_shell.rs` wrapper-unwrapping shell inspection, `dlp.rs` secret/injection scrubbing (`aetheris-gate scrub`), and a zero-dependency WebAssembly library (`target wasm32-unknown-unknown` exporting `aetheris_wasm_eval_pretool` and `aetheris_wasm_scrub`).
+- **Declarative `HostSpec` Compiler & `ASTDiffCache` ([`hosts/specs.py`](aetheris_microbrains/hosts/specs.py), [`core/ast_cache.py`](aetheris_microbrains/core/ast_cache.py)):** 100%-parity host specifications across all 20 registered hosts paired with a thread-safe SHA-256 LRU AST cache wired directly into `analyze_code_diff`.
+- **Transactional Workspace Checkpointing & Rollback ([`core/workspace_tx.py`](aetheris_microbrains/core/workspace_tx.py)):** Speculative pre-tool workspace snapshots (`WorkspaceTransactionManager`, `run_speculative_transaction`) that atomically restore modified/deleted files and delete rogue creations on exceptions, failed validators, or secret leaks.
+- **Cryptographic Subagent Capability Attenuation ([`core/capability_tokens.py`](aetheris_microbrains/core/capability_tokens.py)):** Non-interactive Macaroon-style HMAC-SHA256 capability chains restricting child subagent tools, globs, shell access, secret handles, and egress domains—plus upward `propagate_subagent_taint` merging.
+- **Deterministic Auto-Repair Hints & Conformal Calibration ([`core/repair_hints.py`](aetheris_microbrains/core/repair_hints.py)):** `evaluate_hook_payload` attaches `repair_hint` guidance (`line`/`col` Python syntax pinpoints, structured `Read`/`Grep`/`Glob` suggestions, `$SECRET:<NAME>` hints, `git push --force-with-lease` rewrites) alongside pure-stdlib Clopper-Pearson threshold calibration (`calibrate_thresholds_from_journal`).
+- **Signed Fleet Policy Bundles & Cross-Harness Benchmark Suite ([`core/fleet_bundle.py`](aetheris_microbrains/core/fleet_bundle.py), [`core/benchmark_harness.py`](aetheris_microbrains/core/benchmark_harness.py)):** HMAC-signed anti-rollback policy bundles attested against hash-chained `decision_journal.jsonl` logs (`aetheris fleet-verify`) and Stage 1–4 multi-harness Efficiency Ratio evaluation (`aetheris benchmark`).
 
 ---
 

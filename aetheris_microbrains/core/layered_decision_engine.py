@@ -1981,6 +1981,64 @@ def analyze_code_diff(
     policy: Optional[PolicyConfig] = None,
     allow_suppression: bool = True,
 ) -> Dict[str, Any]:
+    """Layer 1 language-aware structural diff analysis with bounded SHA-256 AST LRU caching."""
+    if not diff_text and not edit_ops:
+        return _analyze_code_diff_impl(
+            file_path, diff_text, original_source=original_source, edit_ops=edit_ops, policy=policy, allow_suppression=allow_suppression
+        )
+
+    use_cache = not edit_ops and (policy is None or (not policy.custom_rules and not policy.allowed_ast_imports))
+    if not use_cache:
+        return _analyze_code_diff_impl(
+            file_path, diff_text, original_source=original_source, edit_ops=edit_ops, policy=policy, allow_suppression=allow_suppression
+        )
+
+    from .ast_cache import get_default_ast_cache
+
+    disk_tag = ""
+    if original_source is None and file_path:
+        try:
+            p = Path(str(file_path).strip())
+            if p.is_file():
+                disk_tag = str(p.stat().st_mtime_ns)
+        except OSError:
+            disk_tag = "err"
+    pol_fp = (
+        f"{policy.profile}:{policy.strict_ast_allowlist}:{policy.allow_inline_suppression}:{disk_tag}"
+        if policy is not None
+        else f"default:{disk_tag}"
+    )
+    cache = get_default_ast_cache()
+    key = cache.make_cache_key(
+        file_path,
+        diff_text,
+        original_source=original_source,
+        allow_suppression=allow_suppression,
+        policy_fingerprint=pol_fp,
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    res = _analyze_code_diff_impl(
+        file_path,
+        diff_text,
+        original_source=original_source,
+        edit_ops=edit_ops,
+        policy=policy,
+        allow_suppression=allow_suppression,
+    )
+    cache.put(key, res)
+    return res
+
+
+def _analyze_code_diff_impl(
+    file_path: Optional[str],
+    diff_text: Optional[str],
+    original_source: Optional[str] = None,
+    edit_ops: Optional[Sequence[Dict[str, Any]]] = None,
+    policy: Optional[PolicyConfig] = None,
+    allow_suppression: bool = True,
+) -> Dict[str, Any]:
     """Layer 1 language-aware structural diff analysis.
 
     When `original_source` (or an on-disk Python file at `file_path`) is available and
