@@ -643,6 +643,10 @@ def evaluate_hook_payload(
         from .hosts.ouroboros import to_kernel_payload as _ouroboros_to_kernel_payload
 
         payload = _ouroboros_to_kernel_payload(payload)
+    elif resolved_host == "prime" and isinstance(payload, dict):
+        from .hosts.prime import to_kernel_payload as _prime_to_kernel_payload
+
+        payload = _prime_to_kernel_payload(payload)
 
     norm = _normalize_hook_payload(payload)
     policy = _resolve_hook_policy(PolicyConfig, strict_ast=strict_ast, profile=profile, policy_path=policy_path)
@@ -1176,6 +1180,10 @@ def evaluate_post_tool_use_payload(
         from .hosts.ouroboros import to_kernel_payload as _ouroboros_to_kernel_payload
 
         payload = _ouroboros_to_kernel_payload(payload)
+    elif resolved_host == "prime" and isinstance(payload, dict):
+        from .hosts.prime import to_kernel_payload as _prime_to_kernel_payload
+
+        payload = _prime_to_kernel_payload(payload)
 
     tool_call = payload.get("toolCall") if isinstance(payload.get("toolCall"), dict) else None
     tool_raw = str(

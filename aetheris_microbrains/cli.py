@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "ouroboros", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "qwen", "zcode", "openhands", "dsh", "auto")
+SUPPORTED_HOSTS = ("antigravity", "claude", "codex", "hermes", "cursor", "devin", "cline", "mcode", "ouroboros", "prime", "openclaw", "opencode", "kilocode", "pi", "omp", "qoder", "qwen", "zcode", "openhands", "dsh", "auto")
 
 
 def _atomic_write_json(target: Path, data: Dict[str, Any]) -> None:
@@ -110,6 +110,8 @@ def detect_installed_hosts(workspace: Optional[Path] = None) -> List[str]:
         detected.append("mcode")
     if (home / ".ouroboros").exists() or (ws / ".ouroboros").exists() or (ws / "ouroboros" / "tools").is_dir():
         detected.append("ouroboros")
+    if (home / ".prime").exists() or (ws / ".prime").exists():
+        detected.append("prime")
     return detected
 
 
@@ -541,6 +543,47 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("OUROBOROS SELF-TEST PASSED" if ok else "OUROBOROS SELF-TEST FAILED")
         return 0 if ok else 1
 
+    if host == "prime" and args.self_test:
+        import types as _types
+
+        from .hook import evaluate_hook_payload
+        from .prime_gate import PrimeMicrobrainsBlockedError, install_prime_gate
+
+        sh_deny = evaluate_hook_payload(
+            {"tool_name": "bash", "tool_input": {"command": "rm -rf /"}},
+            host="prime",
+            log_decisions=False,
+        )
+        sh_allow = evaluate_hook_payload(
+            {"tool_name": "bash", "tool_input": {"command": "git status"}},
+            host="prime",
+            log_decisions=False,
+        )
+        cfg_write = evaluate_hook_payload(
+            {"tool_name": "write", "tool_input": {"file_path": ".prime/agent/settings.json", "content": "{}"}},
+            host="prime",
+            log_decisions=False,
+        )
+
+        _rlm = _types.SimpleNamespace(bash=lambda command, persistent=False: f"ok:{command}")
+        install_prime_gate(rlm_mod=_rlm, profile="dev")
+        blocked_raised = False
+        try:
+            _rlm.bash("rm -rf /")
+        except PrimeMicrobrainsBlockedError:
+            blocked_raised = True
+
+        ok = (
+            sh_deny.get("exit_code") == 2
+            and sh_deny.get("host_contract") == "prime_pretooluse_v1"
+            and sh_allow.get("exit_code") == 0
+            and cfg_write.get("decision") == "deny"
+            and blocked_raised
+            and _rlm.bash("git status") == "ok:git status"
+        )
+        print("PRIME SELF-TEST PASSED" if ok else "PRIME SELF-TEST FAILED")
+        return 0 if ok else 1
+
     if host == "qoder" and args.self_test:
         from .hook import evaluate_hook_payload
 
@@ -789,6 +832,20 @@ def _install_host(args: argparse.Namespace, host: str) -> int:
         print("Ouroboros integrates directly in Python on ouroboros.tools.registry.ToolRegistry:")
         print(snippet)
         print("Verify anytime with: aetheris install ouroboros --self-test")
+        return 0
+    if host == "prime":
+        prof = str(args.profile or "dev")
+        snippet = (
+            "from aetheris_microbrains.prime_gate import install_prime_gate\n"
+            f'install_prime_gate(profile="{prof}")'
+        )
+        if args.dry_run:
+            print("DRY RUN - Prime Agent integrates in-process on REPL callables (rlm.bash, edit.run, mcp.call_tool):")
+            print(snippet)
+            return 0
+        print("Prime Agent integrates directly in Python on REPL callables (rlm.bash, edit.run, mcp.call_tool):")
+        print(snippet)
+        print("Verify anytime with: aetheris install prime --self-test")
         return 0
     bundle = _build_generic_hook_bundle(
         host,

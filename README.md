@@ -6,7 +6,7 @@
 [![Latency](https://img.shields.io/badge/Engine-%3C1ms-brightgreen.svg)](#0-micro-benchmark-decide-real-world-latency-distribution)
 [![Security Posture](https://img.shields.io/badge/Role-Defense--in--Depth-orange.svg)](SECURITY.md)
 
-**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **Ouroboros**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Qwen Code**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
+**Aetheris Microbrains** is a deterministic, sub-2ms pre-flight policy engine and cache-aware tool router for autonomous LLM coding agents (**Claude Code**, **Cursor**, **Devin**, **Cline**, **MiniMax Code**, **Ouroboros**, **Prime Agent**, **ZCode**, **Google Antigravity**, **Codex**, **OpenClaw**, **OpenCode**, **Kilo Code**, **Pi**, **OMP (Oh My Pi)**, **Qoder**, **Qwen Code**, **Hermes Agent**, **DeepSeek Harness**, **SWE-agent**, **OpenHands**).
 
 It sits directly in front of tool execution and shell invocation. By analyzing diffs via polyglot AST and structural scanners (Python, JS/TS, Go, Rust, SQL, Terraform, Dockerfile), checking supply-chain deferred execution targets, and tokenizing shell commands via wrapper-aware inspection before execution, it intercepts syntax errors, destructive commands, and secret exfiltration locally on CPU—saving expensive multi-turn error recovery loops and prompt tokens.
 
@@ -47,6 +47,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [ZCode Integration (One-Click Marketplace Plugin + CLI Installer)](#zcode-integration-one-click-marketplace-plugin--cli-installer)
 - [OpenHands Integration (`.openhands/hooks.json` + Python `SecurityAnalyzer`)](#openhands-integration-openhandshooksjson--python-securityanalyzer)
 - [Ouroboros Integration (`ToolRegistry` 2-Line Drop-In Gate)](#ouroboros-integration-toolregistry-2-line-drop-in-gate)
+- [Prime Agent Integration (Sync/Async REPL Gate)](#prime-agent-integration-syncasync-repl-gate)
 - [🤖 Codex CLI Integration (Hooks + Skill + Plugin)](#-codex-cli-integration-hooks--skill--plugin)
 - [🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)](#-google-antigravity-integration-native-plugin-hooks--mcp--skill--rules)
 - [🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)](#-hermes-agent-integration-fastmcp--lifecycle-hooks)
@@ -104,6 +105,7 @@ Microbrains works alongside any AI agent or framework:
 | **ZCode** | **ZCode** | **Bundle & Contract Tested** | **Marketplace Plugin + CLI** (`.zcode-plugin/` / `aetheris install zcode`) | One-click Marketplace `PreToolUse`/`PostToolUse` process hooks (`zcode_gate.py`), `microbrains` skill, `/mb:audit`/`doctor`/`preflight`, and `.zcode/` protection. |
 | **OpenHands** | **OpenHands** | **Hook & SDK Tested** | **Hook Installer + SDK Analyzer** (`.openhands/hooks.json` + `AetherisSecurityAnalyzer` / `aetheris install openhands`) | `PreToolUse`/`PostToolUse` gating for `terminal`/`file_editor`, Python SDK `SecurityAnalyzerBase` (`LOW`/`MEDIUM`/`HIGH`), and `.openhands/` protection. |
 | **Ouroboros** | **Ouroboros** (`razzant/ouroboros`) | **SDK & Registry Tested** | **Python Registry Wrapper + CLI** (`wrap_ouroboros_registry` / `aetheris install ouroboros --self-test`) | 2-line drop-in wrapper on `ToolRegistry` (`execute`/`execute_result`/`schemas`), native tool mapping (`run_command`, `apply_patch`, `edit_batch`, `read_file`), and PostToolUse DLP scrubbing. |
+| **Prime Agent (`prime`)** | **Prime Agent** | **SDK & Wrapper Tested** | **In-Process REPL Gate + CLI** (`install_prime_gate` / `aetheris install prime --self-test`) | Idempotent sync/async wrappers for `rlm.bash`, `edit.run`, and `mcp.call_tool`, `.prime/` control-plane protection, AST + shell gate, and fail-closed DLP. |
 | **Personal & Desktop OS Assistants** | **Goose**, **Computer Use** | **Python API** | **Python API / Adapter** | Guards `.env`, `.ssh/`, and `.git/hooks/`, blocks disk formatting, and pauses unknown actions. |
 | **Orchestrators & MCP Hosts** | **LangGraph**, **CrewAI**, **AutoGen**, **MCP Clients** | **Python API / Gateway** | **Python API / MCP Security Gateway** (`mb.narrow_tool_surface(...)` / `aetheris-mcp-proxy`) | Prunes tool schemas per turn with cluster pinning and brokers `$SECRET:<NAME>` handles out-of-band. |
 
@@ -124,7 +126,7 @@ Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `s
 ### Unified `aetheris` CLI
 
 ```bash
-aetheris install <claude|cursor|devin|cline|mcode|ouroboros|zcode|openhands|codex|antigravity|hermes|qoder|qwen|openclaw|opencode|kilocode|pi|omp|dsh|auto>
+aetheris install <claude|cursor|devin|cline|mcode|ouroboros|prime|zcode|openhands|codex|antigravity|hermes|qoder|qwen|openclaw|opencode|kilocode|pi|omp|dsh|auto>
 aetheris verify-core                                                 # Verify pure-stdlib core isolation
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
@@ -344,6 +346,29 @@ What it protects out of the box:
 - **Native + fork tool normalization:** Maps upstream (`run_command`, `run_script`, `read_file`, `list_files`, `write_file`, `edit_text`, `apply_patch`, `edit_batch`, `search_code`, `query_code`, `web_search`, `browse_page`, `browser_action`, `plan_task`, `update_focus`, `finish_task`) and common fork names (`run_shell`, `str_replace_editor`, `repo_read`, `repo_write`) onto the Microbrains kernel — or pass custom names via `tool_aliases={"my_shell": "Bash"}`.
 - **Preserves LLM prefix prompt caching by default:** `wrap_schemas` defaults to `False` so `registry.schemas()` stays bit-identical across long prompt-cached sessions (e.g., 680k-token contexts); MoE schema narrowing (`OuroborosMicrobrainsGate.narrow_schemas(...)`) is strictly opt-in.
 - **Reentrancy-safe `execute` + `execute_result` gating & DLP:** Intercepts destructive commands, `.env` reads, and malicious patches pre-flight, and redacts secrets from tool outputs post-flight.
+
+---
+
+## Prime Agent Integration (Sync/Async REPL Gate)
+
+For **Prime Agent**, attach Microbrains directly in-process to Prime's REPL callables (`rlm.bash`, `edit.run`, and `mcp.call_tool`) with sync + `async` support (`prime_pretooluse_v1` via [`hosts/prime.py`](aetheris_microbrains/hosts/prime.py) and [`prime_gate.py`](aetheris_microbrains/prime_gate.py)):
+
+```python
+from aetheris_microbrains.prime_gate import install_prime_gate
+
+install_prime_gate(profile="dev")
+```
+
+Verify the Prime Agent adapter and wrappers anytime:
+
+```bash
+aetheris install prime --self-test
+```
+
+What it protects out of the box:
+- **Sync & `async` REPL wrappers:** Wraps `rlm.bash`, `edit.run`, and `mcp.call_tool` (preserving sync vs. coroutine signatures), raising `PrimeMicrobrainsBlockedError` on `deny` and `PrimeMicrobrainsEscalatedError` on `escalate` (or logging cleanly in `shadow_mode=True`).
+- **Native normalization & `.prime/` self-protection:** Normalizes `bash`/`edit.run`/`mcp__<conn>__<tool>` calls via `evaluate_hook_payload(..., host="prime")` and write-protects `.prime/` and `.prime/agent/settings.json` at Layer 0.
+- **Fail-closed PostToolUse DLP:** Scrubs leaked credentials from `bash`, `edit.run`, and `mcp.call_tool` outputs before returning to the REPL.
 
 ---
 
