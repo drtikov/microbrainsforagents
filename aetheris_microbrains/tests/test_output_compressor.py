@@ -1,4 +1,4 @@
-"""Unit tests for Proposal 4: Deterministic PostToolUse Structural Output Compressor."""
+"""Unit tests for Deterministic PostToolUse Structural Output Compressor."""
 
 from __future__ import annotations
 

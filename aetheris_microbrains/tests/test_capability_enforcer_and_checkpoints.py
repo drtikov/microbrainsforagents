@@ -1,4 +1,4 @@
-"""Unit tests for Proposal 2: capability_enforcer and hook_checkpoints."""
+"""Unit tests for capability_enforcer and hook_checkpoints."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from aetheris_microbrains.core.capability_tokens import (
 )
 from aetheris_microbrains.core.hook_checkpoints import HookCheckpointStore
 
-ROOT_SECRET = "proposal2-unit-test-secret-key"
+ROOT_SECRET = "cap-enforcer-unit-test-secret-key"
 
 
 def _make_root_token(caveat: CapabilityCaveat | None = None) -> CapabilityToken:
