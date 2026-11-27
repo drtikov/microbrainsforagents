@@ -216,6 +216,8 @@ def _match_decoded_secret_type(decoded: str) -> str | None:
 def _redact_encoded_secret_blobs(text: str) -> Tuple[str, List[str], int]:
     """Decode wrapped/single-line base64, urlsafe-base64, and hex blobs and redact embedded secrets."""
     src = str(text or "")
+    if len(src) < 24:
+        return src, [], 0
     hits: List[str] = []
     redacted_count = 0
     out = src
@@ -280,10 +282,14 @@ def detect_encoded_secrets(text: str) -> List[str]:
 def redact_secrets(text: str) -> str:
     """Mask known, encoded, and sensitive key/value credential patterns before logging or printing."""
     out = str(text or "")
+    if len(out) < 10:
+        return out
     for pat, repl in _REDACT_PATTERNS:
         out = pat.sub(repl, out)
-    out, _enc_types, _enc_hits = _redact_encoded_secret_blobs(out)
-    out, _sens_n = _redact_sensitive_key_values(out)
+    if len(out) >= 24:
+        out, _enc_types, _enc_hits = _redact_encoded_secret_blobs(out)
+    if ":" in out or "=" in out:
+        out, _sens_n = _redact_sensitive_key_values(out)
     return out
 
 

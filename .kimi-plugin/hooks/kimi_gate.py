@@ -6,8 +6,8 @@ Kimi Code runs this adapter as a PreToolUse / PostToolUse command hook from
 ``aetheris_microbrains`` stdlib-only core (or a pre-installed package), and
 delegates to ``aetheris_microbrains.hook.main()`` with ``--host kimi``.
 
-Failure posture: if the engine cannot be imported, exits 0 with a stderr note
-(fail-open). Set ``AETHERIS_KIMI_FAIL_CLOSED=1`` to exit 2 instead.
+Failure posture: if the engine cannot be imported, exits 2 with a stderr note
+(fail-closed by default). Set ``AETHERIS_KIMI_FAIL_OPEN=1`` to exit 0 instead.
 Rust shim auto-selection is disabled by default unless
 ``AETHERIS_USE_RUST_SHIM=1`` is explicitly set.
 """
@@ -84,9 +84,12 @@ def main() -> int:
         from aetheris_microbrains.hook import main as hook_main
     except Exception as exc:
         print(f"[aetheris-microbrains] kimi gate unavailable: {exc!r}", file=sys.stderr)
-        if os.environ.get("AETHERIS_KIMI_FAIL_CLOSED", "") == "1":
-            return 2
-        return 0
+        if (
+            os.environ.get("AETHERIS_KIMI_FAIL_OPEN", "") == "1"
+            and os.environ.get("AETHERIS_KIMI_FAIL_CLOSED", "") != "1"
+        ):
+            return 0
+        return 2
     return int(hook_main(final_argv))
 
 

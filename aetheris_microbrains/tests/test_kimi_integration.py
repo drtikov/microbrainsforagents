@@ -222,3 +222,42 @@ def test_kimi_plugin_manifest_and_gate_wrapper_subprocess() -> None:
     )
     assert proc_ok.returncode == 0
     assert proc_ok.stdout.strip() == ""
+
+
+def test_plugin_shims_fail_closed_by_default_and_support_fail_open(tmp_path: Path) -> None:
+    # Run with an isolated empty PYTHONPATH and missing package via `-S` site disabled
+    empty_root = tmp_path / "empty_plugin"
+    empty_root.mkdir(parents=True)
+    for script, fail_open_var in (
+        (KIMI_GATE_SCRIPT, "AETHERIS_KIMI_FAIL_OPEN"),
+        (REPO_ROOT / ".zcode-plugin" / "hooks" / "zcode_gate.py", "AETHERIS_ZCODE_FAIL_OPEN"),
+    ):
+        env = {"SYSTEMROOT": os.environ.get("SYSTEMROOT", ""), "AETHERIS_USE_RUST_SHIM": "0"}
+        if script is KIMI_GATE_SCRIPT:
+            env["KIMI_PLUGIN_ROOT"] = str(empty_root)
+        else:
+            env["ZCODE_PLUGIN_ROOT"] = str(empty_root)
+        proc_closed = subprocess.run(
+            [sys.executable, "-S", str(script)],
+            input="{}",
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+            check=False,
+        )
+        assert proc_closed.returncode == 2
+        assert "unavailable" in proc_closed.stderr
+
+        env_open = dict(env)
+        env_open[fail_open_var] = "1"
+        proc_open = subprocess.run(
+            [sys.executable, "-S", str(script)],
+            input="{}",
+            capture_output=True,
+            text=True,
+            env=env_open,
+            timeout=15,
+            check=False,
+        )
+        assert proc_open.returncode == 0

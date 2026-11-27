@@ -589,12 +589,16 @@ class PolicyConfig:
 
 
 DEFAULT_POLICY = PolicyConfig()
+_DEFAULT_POLICY_PROTECTED_PATTERNS: Tuple[str, ...] = tuple(
+    str(p) for p in DEFAULT_POLICY.protected_patterns
+) + tuple(str(p) for p in (getattr(DEFAULT_POLICY, "extra_protected_patterns", ()) or ()))
 
 
 def _policy_protected_patterns(policy: Optional[PolicyConfig]) -> Tuple[str, ...]:
-    cfg = policy or DEFAULT_POLICY
-    extra = getattr(cfg, "extra_protected_patterns", ()) or ()
-    return tuple(str(p) for p in cfg.protected_patterns) + tuple(str(p) for p in extra)
+    if policy is None or policy is DEFAULT_POLICY:
+        return _DEFAULT_POLICY_PROTECTED_PATTERNS
+    extra = getattr(policy, "extra_protected_patterns", ()) or ()
+    return tuple(str(p) for p in policy.protected_patterns) + tuple(str(p) for p in extra)
 
 
 _CURSOR_WORKSPACE_SUBDIRS: Set[str] = {"projects", "worktrees"}
@@ -4205,6 +4209,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             "sensitive_env_vars": [],
         }
     lower_cmd = cmd.lower()
+    pipeline_blocks = _split_command_pipeline_blocks(cmd)
 
     # Check destructive SQL statements while avoiding false positives on standalone echo/grep/rg
     _SQL_TEXT_PRINT_CMDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg"}
@@ -4212,8 +4217,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     if re.search(r"\b(drop\s+database|truncate\s+table)\b", lower_cmd):
         is_destructive_sql = bool(re.match(r"^\s*(?:drop\s+database|truncate\s+table)\b", lower_cmd))
         if not is_destructive_sql:
-            pipe_blocks = _split_command_pipeline_blocks(cmd)
-            for block in pipe_blocks:
+            for block in pipeline_blocks:
                 pipe_segs = _split_unquoted_pipes(block)
                 block_exes: List[str] = []
                 for ps in pipe_segs:
@@ -4295,9 +4299,14 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     if re.search(r"\$\{?IFS\b", cmd):
         findings.append("shell_ifs_obfuscation")
 
+    # Parse pipeline blocks & subcommands once and reuse across egress, RCE, and builtin checks
+    parsed_blocks = [
+        (block, _split_unquoted_pipes(block))
+        for block in pipeline_blocks
+    ]
+
     # Inspect pipes for secret/env exfiltration (e.g. cat .env | curl ..., env | base64 | curl ...)
-    for logical_block in _split_command_pipeline_blocks(cmd):
-        pipe_segments = _split_unquoted_pipes(logical_block)
+    for _logical_block, pipe_segments in parsed_blocks:
         if len(pipe_segments) > 1:
             has_protected_read = False
             has_env_dump = False
@@ -4343,8 +4352,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # (3) xargs acting as an executor of piped input: echo path | xargs rm
     # Uses BOTH raw (pre-unwrap) and unwrapped executables so that wrapper commands
     # (sudo, env, xargs) are retained in the source/sink lists even after unwrapping.
-    for logical_block in _split_command_pipeline_blocks(cmd):
-        pipe_segments = _split_unquoted_pipes(logical_block)
+    for _logical_block, pipe_segments in parsed_blocks:
         if len(pipe_segments) > 1:
             pipe_cmds: List[str] = []
             # Also track raw (pre-unwrap) executables so that `xargs <cmd>` and `sudo <cmd>`
@@ -4409,7 +4417,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     # argument strings as shell code. Flag as RCE. Checked here (outside the pipe block)
     # so it also fires for standalone `eval "..."`, `source script`, `. ./init.sh`.
     _DIRECT_RCE_BUILTINS = {"eval", "exec", "source"}
-    for logical_block in _split_command_pipeline_blocks(cmd):
+    for logical_block, _pipe_segments in parsed_blocks:
         for sub_seg in _split_shell_subcommands(logical_block):
             toks = _tokenize_shell_segment(sub_seg)
             prem, _, _, _, _ = _unwrap_shell_prefix(toks)

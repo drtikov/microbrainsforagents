@@ -6,8 +6,8 @@ route). It bootstraps the engine — preferring a pip-installed
 ``aetheris_microbrains`` and falling back to the vendored copy at the plugin
 root — then defers to ``aetheris_microbrains.hook.main()``.
 
-Failure posture: if the engine cannot be imported, the wrapper exits 0 with a
-stderr note (fail-open). Set ``AETHERIS_ZCODE_FAIL_CLOSED=1`` to exit 2 instead.
+Failure posture: if the engine cannot be imported, the wrapper exits 2 with a
+stderr note (fail-closed by default). Set ``AETHERIS_ZCODE_FAIL_OPEN=1`` to exit 0 instead.
 Python 3.10+ stdlib is sufficient for the security gate (NumPy is optional).
 """
 
@@ -82,9 +82,12 @@ def main() -> int:
         from aetheris_microbrains.hook import main as hook_main
     except Exception as exc:
         print(f"[aetheris-microbrains] gate unavailable: {exc!r}", file=sys.stderr)
-        if os.environ.get("AETHERIS_ZCODE_FAIL_CLOSED", "") == "1":
-            return 2
-        return 0
+        if (
+            os.environ.get("AETHERIS_ZCODE_FAIL_OPEN", "") == "1"
+            and os.environ.get("AETHERIS_ZCODE_FAIL_CLOSED", "") != "1"
+        ):
+            return 0
+        return 2
     return int(hook_main(final_argv))
 
 
