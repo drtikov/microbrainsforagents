@@ -51,6 +51,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [🚀 Google Antigravity Integration (Native Plugin: Hooks + MCP + Skill + Rules)](#-google-antigravity-integration-native-plugin-hooks--mcp--skill--rules)
 - [🪽 Hermes Agent Integration (FastMCP + Lifecycle Hooks)](#-hermes-agent-integration-fastmcp--lifecycle-hooks)
 - [Qoder Integration (Desktop & CLI: `PreToolUse`/`PostToolUse` + `.qoder/` Protection)](#qoder-integration-desktop--cli-pretooluseposttooluse--qoder-protection)
+- [Qwen Code Integration (`PreToolUse`/`PostToolUse` + `.qwen/` Protection)](#qwen-code-integration-pretooluseposttooluse--qwen-protection)
 - [OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)](#openclaw-integration-native-gateway-plugin-before_tool_call--dlp)
 - [OpenCode Integration (Native `.opencode/plugins` ESM Plugin + Benchmarks)](#opencode-integration-native-opencodeplugins-esm-plugin--benchmarks)
 - [Kilo Code Integration (Native `.kilo/plugins` ESM Plugin + Benchmarks)](#kilo-code-integration-native-kiloplugins-esm-plugin--benchmarks)
@@ -576,6 +577,32 @@ aetheris install qoder --workspace . --profile dev
 ```
 
 *(Optional: connect `aetheris-mcp` over `stdio` or `--http --port 8080` in Qoder's MCP connector settings for the 8 on-demand `microbrain_*` audit, scrubbing, and schema-scanning tools.)*
+
+---
+
+## Qwen Code Integration (`PreToolUse`/`PostToolUse` + `.qwen/` Protection)
+
+**Qwen Code** integrates natively in one command via the `--host qwen` adapter (`qwen_pretooluse_v1`) and `aetheris install qwen` in `cli.py`:
+
+- **PreToolUse Gate (`--host qwen`):** Emits Qwen Code's `allow` / `ask` / `deny` (`exit 2`) JSON contract with `timeout: 10` seconds, `--session-state auto` for cross-turn IFC taint tracking, and a Qwen-native tool matcher covering `run_shell_command`, `read_file`, `write_file`, `edit`, `grep_search`, `glob`, `find_files`, `list_directory`, `web_fetch`, `web_search`, and `mcp__.*`.
+- **PostToolUse DLP Warnings:** Emits `additionalContext` security warnings whenever secrets or prompt-injection patterns appear in tool outputs (matching Qwen Code's `PostToolUse` contract without emitting unsupported `updatedToolOutput`).
+- **Built-in `.qwen/` Self-Protection:** `.qwen/`, `.qwen/settings.json`, and `.qwen/settings.local.json` are write-protected at Layer 0 so agents cannot disable hooks or tamper with configuration.
+- **Non-Destructive Installer:** Preserves existing settings and hooks while idempotently updating Aetheris entries (writes `~/.qwen/settings.json` globally, or workspace-local `.qwen/settings.local.json` with `--workspace .`; run `/hooks` inside an active Qwen Code session to reload).
+
+```bash
+pip install -e .
+aetheris install qwen --self-test
+
+# Recommended shadow pilot first (logs decisions without blocking):
+aetheris install qwen --workspace . --shadow --profile dev
+
+# Enable workspace enforcement (.qwen/settings.local.json):
+aetheris install qwen --workspace . --profile guardrails
+
+# Optional: Rust shim for sub-millisecond hook startup:
+cargo build --release --manifest-path rust/aetheris-gate/Cargo.toml
+aetheris install qwen --workspace . --use-rust-shim --profile guardrails
+```
 
 ---
 
