@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 PLUGIN_NAME = "aetheris-microbrains"
-PLUGIN_VERSION = "0.7.6"
+PLUGIN_VERSION = "0.9.0"
 
 ANTIGRAVITY_TOOL_MATCHER = (
     "run_command|edit_file|write_file|replace_file_content|"

@@ -1,6 +1,6 @@
 {
   "name": "aetheris-microbrains",
-  "version": "0.7.6",
+  "version": "0.9.0",
   "description": "Deterministic pre-flight shell, edit, secret and MCP safety gate for Kimi Code",
   "skills": "./.kimi-plugin/skills/",
   "hooks": [

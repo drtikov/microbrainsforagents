@@ -20,7 +20,7 @@ from typing import Any, Dict, Tuple
 try:
     __version__ = _importlib_metadata.version("aetheris-microbrains")
 except _importlib_metadata.PackageNotFoundError:
-    __version__ = "0.7.6"
+    __version__ = "0.9.0"
 
 _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # Hook

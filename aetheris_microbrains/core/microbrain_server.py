@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 try:
     from .. import __version__ as _PKG_VERSION
 except Exception:
-    _PKG_VERSION = "0.7.6"
+    _PKG_VERSION = "0.9.0"
 
 log = logging.getLogger("microbrain_server")
 log.setLevel(logging.INFO)

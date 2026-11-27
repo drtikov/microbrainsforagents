@@ -8,7 +8,7 @@
     {
       "name": "aetheris-microbrains",
       "source": ".",
-      "version": "0.7.6",
+      "version": "0.9.0",
       "description": "Deterministic sub-2ms pre-flight security gate and forensic decision journal for ZCode: AST lint, secret-egress veto, protected paths, shell vetoes, and context hygiene. Ships as PreToolUse/PostToolUse plugin hooks plus /mb:* commands and a microbrains skill.",
       "displayName": "Aetheris Microbrains",
       "category": "developer-tools"

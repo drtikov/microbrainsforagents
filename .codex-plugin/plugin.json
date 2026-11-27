@@ -1,6 +1,6 @@
 {
   "name": "aetheris-microbrains",
-  "version": "0.7.7",
+  "version": "0.9.0",
   "description": "Deterministic sub-2ms pre-flight AST linter, secret-egress gate, trajectory guard, and cache-aware MCP router for OpenAI Codex CLI.",
   "author": {
     "name": "Dmitry Tikov",

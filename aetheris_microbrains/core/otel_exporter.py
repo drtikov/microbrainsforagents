@@ -122,14 +122,14 @@ def build_otlp_trace_payload(
                         "service.name": svc,
                         "telemetry.sdk.name": "aetheris-microbrains-otel",
                         "telemetry.sdk.language": "python",
-                        "telemetry.sdk.version": "0.7.7",
+                        "telemetry.sdk.version": "0.9.0",
                     })
                 },
                 "scopeSpans": [
                     {
                         "scope": {
                             "name": "aetheris_microbrains.core.otel_exporter",
-                            "version": "0.7.7",
+                            "version": "0.9.0",
                         },
                         "spans": spans,
                     }

@@ -576,7 +576,7 @@ class MCPProxyGateway:
                     "subscriptions": {"listen": True},
                     "elicitation": {},
                 },
-                "serverInfo": {"name": "aetheris-mcp-proxy", "version": "0.7.7"},
+                "serverInfo": {"name": "aetheris-mcp-proxy", "version": "0.9.0"},
             })
         if method == "tools/list":
             res = self.build_tools_list_response(

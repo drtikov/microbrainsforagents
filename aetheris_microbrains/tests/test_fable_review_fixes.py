@@ -1355,9 +1355,9 @@ def test_fable_41_critic_round2_fixes(tmp_path, monkeypatch, capsys):
     from aetheris_microbrains.tools import microbrain as mb_tools
 
     # 10. Package version & server version parity
-    assert mb.__version__ == "0.7.6"
+    assert mb.__version__ == "0.9.0"
     if microbrain_server is not None:
-        assert microbrain_server.app.version == "0.7.6"
+        assert microbrain_server.app.version == "0.9.0"
 
     # 1. Atomic versioned snapshot save/load & flat-absent load & single-pointer rollback
     b = AnalyticalMicroTransformer("tmp_atomic_brain", d_model=32, n_heads=2, d_mlp=64)

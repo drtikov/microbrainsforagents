@@ -27,11 +27,11 @@ def test_zcode_manifests_and_bundle_valid():
     mkt = json.loads((REPO_ROOT / "marketplace.json").read_text(encoding="utf-8"))
     assert mkt["name"] == "aetheris-microbrains"
     assert mkt["plugins"][0]["source"] == "."
-    assert mkt["plugins"][0]["version"] == "0.7.6"
+    assert mkt["plugins"][0]["version"] == "0.9.0"
 
     plugin = json.loads((ZCODE_PLUGIN_DIR / "plugin.json").read_text(encoding="utf-8"))
     assert plugin["name"] == "aetheris-microbrains"
-    assert plugin["version"] == "0.7.6"
+    assert plugin["version"] == "0.9.0"
 
     hooks_doc = json.loads((ZCODE_PLUGIN_DIR / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     for event_name in ("PreToolUse", "PostToolUse"):

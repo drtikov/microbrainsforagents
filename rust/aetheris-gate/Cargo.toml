@@ -1,6 +1,6 @@
 [package]
 name = "aetheris-gate"
-version = "0.7.7"
+version = "0.9.0"
 edition = "2021"
 description = "Native sub-millisecond Layer 0 security shim, IPC daemon client, and OS sandbox runner for Aetheris Microbrains."
 license = "Apache-2.0"

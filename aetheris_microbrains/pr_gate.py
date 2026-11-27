@@ -334,7 +334,7 @@ def to_sarif_report(scan_result: Dict[str, Any]) -> Dict[str, Any]:
                 "tool": {
                     "driver": {
                         "name": "Aetheris Microbrains PR Gate",
-                        "version": "0.7.7",
+                        "version": "0.9.0",
                         "informationUri": "https://github.com/drtikov/microbrainsforagents",
                         "rules": list(rules_map.values()),
                     }
