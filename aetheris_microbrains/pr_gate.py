@@ -13,16 +13,21 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .core.layered_decision_engine import PolicyConfig, analyze_code_diff, is_protected_path
+from .core.layered_decision_engine import PolicyConfig, analyze_code_diff, analyze_shell_command, is_protected_path
+from .core.mcp_security import detect_prompt_injection, scan_mcp_tools
 
 _SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv", "target", ".pytest_cache"})
 _BINARY_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".pdf", ".zip", ".exe", ".dll", ".pyd", ".so", ".npz"})
+_SKILL_MD_NAMES = frozenset({"skill.md", "agents.md", "claude.md"})
+_MANIFEST_JSON_NAMES = frozenset({".mcp.json", "mcp.json", "hooks.json"})
+_HIDDEN_UNICODE_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2069\U000e0000-\U000e007f]")
 
 
 def split_unified_diff_by_file(diff_text: str) -> List[Tuple[str, str]]:
@@ -61,6 +66,102 @@ def _first_hunk_line(chunk: str) -> int:
     if m:
         return max(1, int(m.group(1)))
     return 1
+
+
+def _extract_scannable_text(content_or_diff: str) -> str:
+    raw = str(content_or_diff or "")
+    if raw.startswith("diff --git ") or "\ndiff --git " in raw or re.search(r"^@@\s+-\d+", raw, re.MULTILINE):
+        added = [ln[1:] for ln in raw.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
+        return "\n".join(added)
+    return raw
+
+
+def scan_skill_or_mcp_manifest(
+    file_path: str,
+    content_or_diff: str,
+    *,
+    line_hint: int = 1,
+) -> List[Dict[str, Any]]:
+    """Statically audit skill Markdown docs and MCP/hook JSON manifests for smuggling, injection, or supply-chain risks."""
+    norm_path = str(file_path or "").replace("\\", "/").strip().lower()
+    basename = norm_path.rsplit("/", 1)[-1]
+    is_skill_doc = basename in _SKILL_MD_NAMES or ("/skills/" in norm_path and norm_path.endswith(".md"))
+    is_manifest_json = basename in _MANIFEST_JSON_NAMES
+    if not (is_skill_doc or is_manifest_json):
+        return []
+
+    text = _extract_scannable_text(content_or_diff)
+    if not text.strip():
+        return []
+
+    findings: List[Dict[str, Any]] = []
+    if _HIDDEN_UNICODE_RE.search(text):
+        findings.append({
+            "file": file_path,
+            "rule_id": "skill_hidden_unicode_smuggling",
+            "severity": "error",
+            "decision": "deny",
+            "message": f"Hidden zero-width/bidi/tag Unicode characters detected in {file_path}",
+            "line": line_hint,
+        })
+
+    inj = detect_prompt_injection(text)
+    if is_skill_doc and inj.get("injection_detected"):
+        inj_names = ", ".join(str(x) for x in (inj.get("findings") or [])[:4]) or "prompt_injection"
+        findings.append({
+            "file": file_path,
+            "rule_id": "skill_prompt_injection",
+            "severity": "error",
+            "decision": "deny",
+            "message": f"Indirect prompt injection or covert exfiltration in {file_path} ({inj_names})",
+            "line": line_hint,
+        })
+
+    if is_manifest_json:
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            tools_list: List[Dict[str, Any]] = []
+            if isinstance(parsed.get("tools"), list):
+                tools_list.extend(t for t in parsed["tools"] if isinstance(t, dict))
+            servers = parsed.get("mcpServers")
+            if isinstance(servers, dict):
+                for srv_name, srv_cfg in servers.items():
+                    if not isinstance(srv_cfg, dict):
+                        continue
+                    desc = str(srv_cfg.get("description") or "")
+                    if desc:
+                        tools_list.append({"name": str(srv_name), "description": desc})
+                    cmd = str(srv_cfg.get("command") or "").strip()
+                    raw_args = srv_cfg.get("args")
+                    args_list = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+                    full_cmd = shlex.join([cmd, *args_list]) if cmd else ""
+                    if full_cmd:
+                        sh_res = analyze_shell_command(full_cmd)
+                        sh_findings = sh_res.get("findings") or []
+                        if sh_findings or sh_res.get("risk_class") == "IRREVERSIBLE_DESTRUCTIVE":
+                            findings.append({
+                                "file": file_path,
+                                "rule_id": "mcp_manifest_supply_chain_hazard",
+                                "severity": "error",
+                                "decision": "deny",
+                                "message": f"Dangerous MCP server command in {file_path} ({srv_name}): {', '.join(str(x) for x in sh_findings) or sh_res.get('risk_class')}",
+                                "line": line_hint,
+                            })
+            if tools_list:
+                mcp_scan = scan_mcp_tools(tools_list)
+                if not mcp_scan.get("safe", True) or mcp_scan.get("flagged_tools"):
+                    findings.append({
+                        "file": file_path,
+                        "rule_id": "mcp_manifest_supply_chain_hazard",
+                        "severity": "error",
+                        "decision": "deny",
+                        "message": f"Poisoned or suspicious MCP tool definition in {file_path}: {', '.join(str(x) for x in (mcp_scan.get('findings') or [])[:4])}",
+                        "line": line_hint,
+                    })
+    return findings
 
 
 def _scan_one(
@@ -112,6 +213,7 @@ def _scan_one(
             "message": f"{raw_f} detected in {file_path}",
             "line": line_hint,
         })
+    findings.extend(scan_skill_or_mcp_manifest(file_path, content_or_diff, line_hint=line_hint))
     return findings
 
 

@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .core.runtime_paths import get_default_journal_path
+from .core.runtime_paths import get_default_journal_path, verify_jsonl_hash_chain
 
 _INITIAL_JOURNAL_PATH = get_default_journal_path()
 _DEFAULT_JOURNAL_PATH = _INITIAL_JOURNAL_PATH
@@ -48,6 +48,17 @@ def get_journal_entries(
         return out
     except Exception:
         return []
+
+
+def verify_journal_chain(journal_path: Optional[Path | str] = None) -> Dict[str, Any]:
+    """Verify the SHA-256 hash chain across `decision_journal.jsonl`."""
+    default_jp = (
+        Path(_DEFAULT_JOURNAL_PATH)
+        if _DEFAULT_JOURNAL_PATH != _INITIAL_JOURNAL_PATH
+        else get_default_journal_path()
+    )
+    raw_path = journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or default_jp
+    return verify_jsonl_hash_chain(Path(raw_path).expanduser().resolve())
 
 
 def _effective_decision_and_reason(entry: Dict[str, Any]) -> tuple[str, str]:
@@ -620,6 +631,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--port", type=int, default=8767, help="Port for --ui dashboard server (default: 8767)")
     parser.add_argument("--export-otel", type=str, default="", help="Export journal entries as OpenTelemetry OTLP GenAI JSON (file path or '-' for stdout)")
     parser.add_argument("--push-otel", type=str, default="", help="Push OTLP GenAI spans to HTTP collector URL (or 'env' for OTEL_EXPORTER_OTLP_ENDPOINT)")
+    parser.add_argument("--verify-chain", action="store_true", help="Verify SHA-256 tamper-evident hash chain in decision_journal.jsonl")
 
     args = parser.parse_args(argv)
     # Windows consoles default to cp1252 and crash on box-drawing/bullet characters
@@ -639,6 +651,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             economics_path=args.economics_path or None,
             policy_out_path=args.policy_out or None,
         )
+
+    if args.verify_chain:
+        report = verify_journal_chain(journal_path=args.journal_path or None)
+        if args.json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        elif report.get("ok"):
+            print(
+                f"CHAIN OK | total={report['total_entries']} | chained={report['chained_entries']} "
+                f"| legacy={report['legacy_entries']} | head={str(report.get('head_hash') or '')[:16]}"
+            )
+        else:
+            print(
+                f"CHAIN BROKEN at line {report.get('broken_at_line')} "
+                f"({report.get('reason')}) | path={report.get('path')}"
+            )
+        return 0 if report.get("ok") else 2
 
     if args.export_otel:
         from .core.otel_exporter import build_otlp_trace_payload, export_otlp_file
