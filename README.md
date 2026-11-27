@@ -604,6 +604,14 @@ cargo build --release --manifest-path rust/aetheris-gate/Cargo.toml
 aetheris install qwen --workspace . --use-rust-shim --profile guardrails
 ```
 
+**Compact Local CPU Benchmarks** (`v0.7.6`, in-process gate, no live LLM calls):
+
+| Benchmark Suite | Results (% Impact) |
+|---|---|
+| **25-step schema & safety** *(no live LLM)* | **-81.0%** schema tokens (**12,312** vs. 64,800 · **52,488** skipped, ~2.099 Wh avoided) · **0** missed hazards (FN) & **0%** FP *(vs. 8 FN / 4 FP keyword baseline)* · **0.511 ms** p95 |
+| **26-step coding-session A/B** *(14 benign + 12 hazards)* | **100%** hazards caught (**12/12** vs. 0/12) · **0%** FP (**0/14**) · **-100%** syntax failures (0 vs. 4), security incidents (0 vs. 8), & recovery turns (0 vs. 8) · **-74.7%** error-feedback tokens (37 vs. 146) · **8.9 ms** total gate (**0.34 ms** mean / **0.63 ms** p95) · *modeled savings:* **~37,055** input tokens/session (**~\$0.1112/session**, **~\$11.12 / 100 sessions**) |
+| **Security & anti-evasion** *(34 cases)* | **100.0%** attack detection (**22/22** TPR) · **0.0%** benign FP (**0/12** FPR) · **0.175 ms** p50 / **1.143 ms** p95 |
+
 ---
 
 ## OpenClaw Integration (Native Gateway Plugin: `before_tool_call` + DLP)
