@@ -5,9 +5,10 @@ scanning, cache-aware tool narrowing, journal inspection, procedural directive v
 and post-policy verification directly in-process (zero loopback HTTP proxy overhead).
 
 Usage:
-    python -m aetheris_microbrains.mcp_server                       # stdio (default; Hermes/Claude)
-    python -m aetheris_microbrains.mcp_server --http --port 8080     # Streamable HTTP (/mcp)
-    aetheris-mcp                                                     # console entrypoint
+    python -m aetheris_microbrains.mcp_server                                   # stdio (default; Hermes/Claude)
+    python -m aetheris_microbrains.mcp_server --http --port 8080                 # local Streamable HTTP (/mcp)
+    python -m aetheris_microbrains.mcp_server --http --profile manus --port 8080 # authenticated remote Manus profile
+    aetheris-mcp                                                                 # console entrypoint
 """
 
 from __future__ import annotations
@@ -16,11 +17,35 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+_VALID_MCP_PROFILES = ("local", "manus", "remote")
+MANUS_STATELESS_TOOLS: Tuple[str, ...] = (
+    "microbrain_health",
+    "microbrain_preflight_check",
+    "microbrain_scrub_and_scan",
+    "microbrain_scan_mcp_tools",
+    "microbrain_narrow_tools",
+)
 
 
 def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def _normalize_profile(profile: str) -> str:
+    resolved = str(profile or "local").strip().lower()
+    if resolved not in _VALID_MCP_PROFILES:
+        raise ValueError(f"Unsupported MCP profile {profile!r}; expected one of {_VALID_MCP_PROFILES}")
+    return resolved
+
+
+def _is_within_root(candidate: Path, root: Path) -> bool:
+    try:
+        return candidate.resolve().is_relative_to(root.resolve())
+    except Exception:
+        return False
 
 
 def build_mcp_server(
@@ -29,8 +54,17 @@ def build_mcp_server(
     streamable_http_path: str = "/mcp",
     host: str = "127.0.0.1",
     port: int = 8080,
+    profile: str = "local",
+    enable_local_tools: bool = False,
+    allowed_project_root: Optional[str] = None,
+    json_response: bool = False,
 ) -> Any:
     """Construct and register tools on an MCP server instance (supports FastMCP on mcp<2 and MCPServer on mcp>=2)."""
+    resolved_profile = _normalize_profile(profile)
+    is_remote = resolved_profile in {"manus", "remote"}
+    include_local_tools = (not is_remote) or bool(enable_local_tools)
+    confined_root = Path(allowed_project_root).resolve() if allowed_project_root else None
+
     try:
         from mcp.server.fastmcp import FastMCP
         server = FastMCP(
@@ -38,6 +72,7 @@ def build_mcp_server(
             host=host,
             port=int(port),
             streamable_http_path=streamable_http_path,
+            json_response=bool(json_response),
         )
     except ModuleNotFoundError:
         from mcp.server.mcpserver import MCPServer
@@ -45,8 +80,18 @@ def build_mcp_server(
 
     @server.tool()
     def microbrain_health() -> str:
-        """Check Aetheris Microbrains health, version, state directory, and optional warm daemon status."""
+        """Check Aetheris Microbrains health, profile, and server version."""
         from . import __version__
+
+        if is_remote:
+            return _json_dumps({
+                "status": "ok",
+                "name": "aetheris-microbrains",
+                "version": __version__,
+                "profile": resolved_profile,
+                "advisory_only": True,
+            })
+
         from .core.runtime_paths import get_default_journal_path, get_state_dir
         from .hook_daemon import ping_daemon
 
@@ -55,6 +100,7 @@ def build_mcp_server(
             "status": "ok",
             "name": "aetheris-microbrains",
             "version": __version__,
+            "profile": resolved_profile,
             "state_dir": str(get_state_dir()),
             "journal_path": str(get_default_journal_path()),
             "daemon": daemon_info or {"running": False},
@@ -87,11 +133,13 @@ def build_mcp_server(
         if new_string:
             tool_input["new_string"] = new_string
 
+        # Remote callers cannot supply arbitrary filesystem paths for session state.
+        effective_session_path = None if is_remote else (session_state_path or None)
         verdict = evaluate_hook_payload(
             {"tool_name": tool_name, "tool_input": tool_input},
             strict_ast=bool(strict_ast),
             profile=profile or "strict",
-            session_state_path=session_state_path or None,
+            session_state_path=effective_session_path,
             host="generic",
         )
         return _json_dumps({
@@ -140,78 +188,107 @@ def build_mcp_server(
 
         return _json_dumps(narrow_tool_surface(query, tools or [], top_k=max(1, int(top_k))))
 
-    @server.tool()
-    def microbrain_audit_explain(limit: int = 5, sha_prefix: str = "") -> str:
-        """Inspect recent decision journal events and explain why an action was blocked or escalated."""
-        from .audit import explain_entry, get_journal_entries
+    if include_local_tools:
+        @server.tool()
+        def microbrain_audit_explain(limit: int = 5, sha_prefix: str = "") -> str:
+            """Inspect recent decision journal events and explain why an action was blocked or escalated."""
+            from .audit import explain_entry, get_journal_entries
 
-        entries = get_journal_entries(limit=max(1, int(limit)))
-        if not entries:
-            return _json_dumps({"entries": [], "explanation": "No decision journal entries found."})
-        target = entries[-1]
-        if sha_prefix:
-            for e in reversed(entries):
-                if str(e.get("input_sha256") or "").startswith(sha_prefix):
-                    target = e
-                    break
-        return _json_dumps({
-            "count": len(entries),
-            "latest": target,
-            "explanation": explain_entry(target),
-        })
+            entries = get_journal_entries(limit=max(1, int(limit)))
+            if not entries:
+                return _json_dumps({"entries": [], "explanation": "No decision journal entries found."})
+            target = entries[-1]
+            if sha_prefix:
+                for e in reversed(entries):
+                    if str(e.get("input_sha256") or "").startswith(sha_prefix):
+                        target = e
+                        break
+            return _json_dumps({
+                "count": len(entries),
+                "latest": target,
+                "explanation": explain_entry(target),
+            })
 
-    @server.tool()
-    def microbrain_directives(
-        action: str = "select",
-        token_budget: int = 800,
-        scope_path: str = "",
-        directive_id: str = "",
-        guidance: str = "",
-        scope_glob: str = "*",
-        author: str = "hermes",
-    ) -> str:
-        """Query approved operational directives or stage a pending directive proposal (never auto-approves)."""
-        from .core.directive_vault import DirectiveVault
+        @server.tool()
+        def microbrain_directives(
+            action: str = "select",
+            token_budget: int = 800,
+            scope_path: str = "",
+            directive_id: str = "",
+            guidance: str = "",
+            scope_glob: str = "*",
+            author: str = "hermes",
+        ) -> str:
+            """Query approved operational directives or stage a pending directive proposal (never auto-approves)."""
+            from .core.directive_vault import DirectiveVault
 
-        vault = DirectiveVault()
-        act = str(action or "select").strip().lower()
-        if act == "propose":
-            if not directive_id or not guidance:
-                return _json_dumps({"error": "propose requires directive_id and guidance"})
-            card = vault.propose(
-                directive_id,
-                guidance=guidance,
-                scope_glob=scope_glob,
-                author=author,
+            vault = DirectiveVault()
+            act = str(action or "select").strip().lower()
+            if act == "propose":
+                if not directive_id or not guidance:
+                    return _json_dumps({"error": "propose requires directive_id and guidance"})
+                card = vault.propose(
+                    directive_id,
+                    guidance=guidance,
+                    scope_glob=scope_glob,
+                    author=author,
+                )
+                return _json_dumps({"status": "pending_approval", "directive": card.to_dict()})
+            return _json_dumps(vault.select_for_bootstrap(token_budget=int(token_budget), scope_path=scope_path))
+
+        @server.tool()
+        def microbrain_verify(
+            project_dir: str = "",
+            policy: str = "",
+            skip_self_test: bool = True,
+        ) -> str:
+            """Run doctor + optional candidate policy replay verification chain."""
+            from .verify import chain_exit_code, run_chain
+
+            if is_remote and confined_root is None:
+                return _json_dumps({
+                    "exit_code": 2,
+                    "error": "microbrain_verify requires allowed_project_root in remote profile",
+                })
+
+            if confined_root is not None:
+                raw_dir = str(project_dir or "").strip()
+                if not raw_dir:
+                    proj = confined_root
+                else:
+                    candidate = Path(raw_dir)
+                    proj = candidate.resolve() if candidate.is_absolute() else (confined_root / candidate).resolve()
+                if not _is_within_root(proj, confined_root):
+                    return _json_dumps({
+                        "exit_code": 2,
+                        "error": "project_dir escapes allowed_project_root",
+                    })
+                if policy:
+                    p_cand = Path(policy)
+                    p_resolved = p_cand.resolve() if p_cand.is_absolute() else (confined_root / p_cand).resolve()
+                    if not _is_within_root(p_resolved, confined_root):
+                        return _json_dumps({
+                            "exit_code": 2,
+                            "error": "policy path escapes allowed_project_root",
+                        })
+                    policy = str(p_resolved)
+            else:
+                proj = Path(project_dir) if project_dir else Path(os.getcwd())
+
+            results = run_chain(
+                project_dir=proj,
+                policy=policy,
+                skip_self_test=bool(skip_self_test),
+                verbose=False,
             )
-            return _json_dumps({"status": "pending_approval", "directive": card.to_dict()})
-        return _json_dumps(vault.select_for_bootstrap(token_budget=int(token_budget), scope_path=scope_path))
-
-    @server.tool()
-    def microbrain_verify(
-        project_dir: str = "",
-        policy: str = "",
-        skip_self_test: bool = True,
-    ) -> str:
-        """Run doctor + optional candidate policy replay verification chain."""
-        from pathlib import Path
-        from .verify import chain_exit_code, run_chain
-
-        proj = Path(project_dir) if project_dir else Path(os.getcwd())
-        results = run_chain(
-            project_dir=proj,
-            policy=policy,
-            skip_self_test=bool(skip_self_test),
-            verbose=False,
-        )
-        sanitized = [
-            {k: v for k, v in r.items() if k not in ("doctor_report", "eval_report")}
-            for r in results
-        ]
-        return _json_dumps({
-            "exit_code": chain_exit_code(results),
-            "results": sanitized,
-        })
+            sanitized = [
+                {k: v for k, v in r.items() if k not in ("doctor_report", "eval_report")}
+                for r in results
+            ]
+            return _json_dumps({
+                "exit_code": chain_exit_code(results),
+                "results": sanitized,
+            })
 
     if hasattr(server, "custom_route"):
         @server.custom_route("/health", methods=["GET"])
@@ -226,6 +303,7 @@ def build_mcp_server(
                 "status": "ok",
                 "server": name,
                 "version": __version__,
+                "profile": resolved_profile,
                 "tools_registered": tools_registered,
                 "tool_count": len(tools_registered),
             })
@@ -233,13 +311,52 @@ def build_mcp_server(
     return server
 
 
-def run_mcp_self_check() -> Dict[str, Any]:
+def build_streamable_http_app(
+    name: str = "aetheris-microbrains",
+    *,
+    streamable_http_path: str = "/mcp",
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    profile: str = "local",
+    enable_local_tools: bool = False,
+    allowed_project_root: Optional[str] = None,
+    bearer_token: Optional[str] = None,
+    protect_health: bool = False,
+    json_response: bool = False,
+) -> Tuple[Any, Any]:
+    """Build the FastMCP server and its Streamable HTTP ASGI app (optionally wrapped with BearerAuthMiddleware)."""
+    server = build_mcp_server(
+        name=name,
+        streamable_http_path=streamable_http_path,
+        host=host,
+        port=port,
+        profile=profile,
+        enable_local_tools=enable_local_tools,
+        allowed_project_root=allowed_project_root,
+        json_response=json_response,
+    )
+    app = server.streamable_http_app()
+    if bearer_token:
+        from .manus_auth import BearerAuthMiddleware
+
+        app = BearerAuthMiddleware(
+            app,
+            token=bearer_token,
+            path=streamable_http_path,
+            protect_health=protect_health,
+        )
+    return server, app
+
+
+def run_mcp_self_check(*, profile: str = "local") -> Dict[str, Any]:
     """Verify MCP SDK importability, tool registration, health probe, and preflight verdicts."""
     from .hook import evaluate_hook_payload
     from .core.runtime_paths import get_state_dir
 
-    server = build_mcp_server()
-    tools = list(getattr(getattr(server, "_tool_manager", None), "_tools", {}).keys())
+    resolved_profile = _normalize_profile(profile)
+    is_remote = resolved_profile in {"manus", "remote"}
+    server = build_mcp_server(profile=resolved_profile)
+    tools = sorted(getattr(getattr(server, "_tool_manager", None), "_tools", {}).keys())
     deny_probe = evaluate_hook_payload(
         {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
         host="generic",
@@ -248,21 +365,30 @@ def run_mcp_self_check() -> Dict[str, Any]:
         {"tool_name": "Bash", "tool_input": {"command": "git status"}},
         host="generic",
     )
+    expected_tools = list(MANUS_STATELESS_TOOLS)
+    tools_ok = (
+        (set(tools) == set(expected_tools))
+        if is_remote
+        else (len(tools) >= 8)
+    )
     ok = (
-        len(tools) >= 8
+        tools_ok
         and deny_probe.get("decision") == "deny"
         and allow_probe.get("decision") == "allow"
     )
-    return {
+    out: Dict[str, Any] = {
         "ok": ok,
-        "tools_registered": sorted(tools),
+        "profile": resolved_profile,
+        "tools_registered": tools,
         "tool_count": len(tools),
-        "state_dir": str(get_state_dir()),
         "probes": {
             "rm_rf_root": deny_probe.get("decision"),
             "git_status": allow_probe.get("decision"),
         },
     }
+    if not is_remote:
+        out["state_dir"] = str(get_state_dir())
+    return out
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -284,6 +410,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="HTTP bind port (default: 8080)")
     parser.add_argument(
+        "--profile",
+        choices=list(_VALID_MCP_PROFILES),
+        default="local",
+        help="Server exposure profile: local (all tools) or manus/remote (5-tool advisory allowlist)",
+    )
+    parser.add_argument(
+        "--auth-token-env",
+        default="AETHERIS_MCP_BEARER_TOKEN",
+        help="Env var holding Bearer token for Streamable HTTP authentication",
+    )
+    parser.add_argument(
+        "--protect-health",
+        action="store_true",
+        help="Also require Bearer auth on GET /health",
+    )
+    parser.add_argument(
+        "--enable-local-tools",
+        action="store_true",
+        help="Opt into local-state tools (audit/directives/verify) under manus/remote profile",
+    )
+    parser.add_argument(
+        "--allowed-project-root",
+        default="",
+        help="Confine microbrain_verify paths inside this directory",
+    )
+    parser.add_argument(
+        "--allow-unauthenticated-local",
+        action="store_true",
+        help="Allow unauthenticated HTTP startup on loopback only under manus/remote profile",
+    )
+    parser.add_argument(
+        "--json-response",
+        action="store_true",
+        help="Return JSON HTTP responses instead of SSE streams where supported",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Verify MCP SDK availability, registered tools, and pre-flight probe verdicts then exit",
@@ -292,7 +454,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.check:
         try:
-            report = run_mcp_self_check()
+            report = run_mcp_self_check(profile=args.profile)
         except Exception as exc:
             print(_json_dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
             return 1
@@ -300,14 +462,53 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if report.get("ok") else 1
 
     transport = "streamable-http" if args.http else args.transport
+    is_remote_profile = args.profile in {"manus", "remote"}
+    from .manus_auth import is_loopback_host, resolve_bearer_token
+
+    bearer_token = resolve_bearer_token(args.auth_token_env)
+    if transport in {"streamable-http", "sse"} and is_remote_profile and not bearer_token:
+        if not (args.allow_unauthenticated_local and is_loopback_host(args.host)):
+            print(
+                f"Refusing unauthenticated {args.profile!r} HTTP server on {args.host}:{args.port}. "
+                f"Set {args.auth_token_env} (or pass --allow-unauthenticated-local on loopback).",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
-        server = build_mcp_server(host=args.host, port=args.port)
+        if transport == "streamable-http" and (bearer_token or is_remote_profile):
+            server, app = build_streamable_http_app(
+                host=args.host,
+                port=args.port,
+                profile=args.profile,
+                enable_local_tools=bool(args.enable_local_tools),
+                allowed_project_root=args.allowed_project_root or None,
+                bearer_token=bearer_token,
+                protect_health=bool(args.protect_health),
+                json_response=bool(args.json_response),
+            )
+        else:
+            server = build_mcp_server(
+                host=args.host,
+                port=args.port,
+                profile=args.profile,
+                enable_local_tools=bool(args.enable_local_tools),
+                allowed_project_root=args.allowed_project_root or None,
+                json_response=bool(args.json_response),
+            )
+            app = None
     except ImportError as exc:
         print(
             f"MCP SDK is required to run the MCP server ({exc}). Install with: pip install 'aetheris-microbrains[mcp]'",
             file=sys.stderr,
         )
         return 1
+
+    if app is not None and transport == "streamable-http":
+        import uvicorn
+
+        uvicorn.run(app, host=args.host, port=int(args.port))
+        return 0
 
     server.run(transport=transport)
     return 0

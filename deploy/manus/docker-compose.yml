@@ -1,0 +1,36 @@
+services:
+  microbrains-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/manus/Dockerfile
+    environment:
+      AETHERIS_MCP_BEARER_TOKEN: ${AETHERIS_MCP_BEARER_TOKEN:?Set AETHERIS_MCP_BEARER_TOKEN before starting}
+      AETHERIS_HOME: /var/lib/aetheris
+    volumes:
+      - aetheris_state:/var/lib/aetheris
+    expose:
+      - "8080"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - microbrains-mcp
+    environment:
+      MICROBRAINS_DOMAIN: ${MICROBRAINS_DOMAIN:?Set MICROBRAINS_DOMAIN (e.g. microbrains.example.com)}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  aetheris_state:
+  caddy_data:
+  caddy_config:
