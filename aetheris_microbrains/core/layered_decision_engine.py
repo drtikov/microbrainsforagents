@@ -2832,6 +2832,10 @@ _SHELL_SECRET_EGRESS_COMMANDS: Set[str] = {
     "socat", "ssh", "scp", "rsync", "ftp", "sftp", "iwr", "irm",
     "invoke-webrequest", "invoke-restmethod", "write-output", "write-host",
 }
+_SHELL_NETWORK_EGRESS_COMMANDS: Set[str] = {
+    "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
+    "rsync", "ftp", "sftp", "iwr", "irm", "invoke-webrequest", "invoke-restmethod",
+}
 _SENSITIVE_ENV_VAR_RE = re.compile(
     r"(?i)(?:(?:^|_)(?:"
     r"SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|APIKEY|API_KEY|PRIVATE_KEY|"
@@ -4298,6 +4302,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
             has_protected_read = False
             has_env_dump = False
             has_egress_sink = False
+            has_network_egress_sink = False
             for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
                 sub_segments = _split_shell_subcommands(p)
@@ -4321,13 +4326,15 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         has_env_dump = True
                     if pexe in _SHELL_SECRET_EGRESS_COMMANDS:
                         has_egress_sink = True
+                    if pexe in _SHELL_NETWORK_EGRESS_COMMANDS:
+                        has_network_egress_sink = True
                     for arg_tok in eff[1:]:
                         for cand in _extract_candidate_paths_from_arg(arg_tok):
                             if is_protected_path(cand, policy=policy):
                                 has_protected_read = True
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
-            if has_env_dump and has_egress_sink:
+            if has_env_dump and has_network_egress_sink:
                 findings.append("shell_piped_env_egress")
 
     # Inspect pipe sequences per pipeline block for RCE patterns:
@@ -4730,7 +4737,7 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         findings.extend(f"unsafe_inline_interpreter:{f}" for f in lit_res.get("findings", []))
                 break
 
-    if any(c in _SHELL_SECRET_EGRESS_COMMANDS for c in parsed_cmds):
+    if any(c in _SHELL_NETWORK_EGRESS_COMMANDS for c in parsed_cmds):
         if protected_path_reads:
             findings.append("shell_staged_protected_path_egress")
         if sensitive_env_access:
