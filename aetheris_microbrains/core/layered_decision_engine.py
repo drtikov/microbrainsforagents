@@ -4291,11 +4291,12 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     if re.search(r"\$\{?IFS\b", cmd):
         findings.append("shell_ifs_obfuscation")
 
-    # Inspect pipes for secret exfiltration (e.g. cat .env | curl ..., cat 0<.env | curl ...)
+    # Inspect pipes for secret/env exfiltration (e.g. cat .env | curl ..., env | base64 | curl ...)
     for logical_block in _split_command_pipeline_blocks(cmd):
         pipe_segments = _split_unquoted_pipes(logical_block)
         if len(pipe_segments) > 1:
             has_protected_read = False
+            has_env_dump = False
             has_egress_sink = False
             for p in pipe_segments:
                 p = _clean_shell_grouping(p)  # strip subshell/brace-group wrappers
@@ -4305,11 +4306,19 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                         if s_redir["kind"] == "input_file" and is_protected_path(s_redir["target"], policy=policy):
                             has_protected_read = True
                     ptoks = _tokenize_shell_segment(sub_seg)
-                    prem, _pwrap, _pwf, _pbare, _pinl = _unwrap_shell_prefix(ptoks)
+                    prem, _pwrap, _pwf, p_bare_env, _pinl = _unwrap_shell_prefix(ptoks)
+                    if p_bare_env:
+                        has_env_dump = True
                     eff = prem or ptoks
                     if not eff:
                         continue
                     pexe = os.path.basename(eff[0]).lower().removesuffix(".exe").removesuffix(".com")
+                    if pexe in {"env", "printenv"}:
+                        non_flag = [a for a in eff[1:] if not a.startswith("-") and "=" not in a]
+                        if pexe == "printenv" or not non_flag:
+                            has_env_dump = True
+                    elif pexe in {"export", "declare", "typeset"} and (len(eff) == 1 or any(a in {"-p", "-x"} for a in eff[1:])):
+                        has_env_dump = True
                     if pexe in _SHELL_SECRET_EGRESS_COMMANDS:
                         has_egress_sink = True
                     for arg_tok in eff[1:]:
@@ -4318,6 +4327,8 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                                 has_protected_read = True
             if has_protected_read and has_egress_sink:
                 findings.append("shell_piped_protected_path_egress")
+            if has_env_dump and has_egress_sink:
+                findings.append("shell_piped_env_egress")
 
     # Inspect pipe sequences per pipeline block for RCE patterns:
     # (1) remote download-and-execute: curl|sh, wget|bash
@@ -4418,6 +4429,23 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
     sensitive_env_access = False
 
     for sub in subcommands:
+        # Detect unquoted command-name backslash obfuscation (e.g. `r\m -r\f`, `c\url`) before unescaping
+        raw_head_parts = sub.strip().split(None, 1)
+        if raw_head_parts:
+            raw_head = raw_head_parts[0]
+            if (
+                "\\" in raw_head
+                and "/" not in raw_head
+                and ":" not in raw_head
+                and not raw_head.startswith(("'", '"', "."))
+            ):
+                unescaped_head = raw_head.replace("\\", "").lower()
+                if unescaped_head in (
+                    {"rm", "dd", "mkfs", "chmod", "chown", "eval", "exec", "sh", "bash", "sudo"}
+                    | _SHELL_SECRET_EGRESS_COMMANDS
+                ):
+                    findings.append("shell_backslash_obfuscation")
+
         tokens, unbalanced_quotes = _tokenize_shell_segment_checked(sub)
         if not tokens:
             if unbalanced_quotes:
@@ -4567,9 +4595,25 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
 
         elif exe == "chmod":
             has_777 = any("777" in a or "a+rwx" in a for a in args_lower)
-            has_root_or_rec = any(a in {"/", "/*", "-r", "--recursive"} for a in args_lower)
-            if has_777 and has_root_or_rec:
+            has_nuke_perm = any(
+                a in {"0", "00", "000", "0000", "a-rwx", "a-r", "a-x", "ugo-rwx", "a=0", "a="}
+                or (a.startswith(("=", "a-", "ugo-")) and "rwx" in a)
+                for a in args_lower
+            )
+            has_root_or_rec = any(
+                a in {"/", "/*", "-r", "--recursive"}
+                or (a.startswith("-") and not a.startswith("--") and "r" in a[1:])
+                for a in args_lower
+            )
+            has_critical_target = any(
+                _is_destructive_rm_target(a, policy=policy)
+                for a in args
+                if not a.startswith("-")
+            )
+            if has_777 and (has_root_or_rec or has_critical_target):
                 findings.append("dangerous_chmod_777")
+            elif has_nuke_perm and (has_root_or_rec or has_critical_target) and has_critical_target:
+                findings.append("destructive_chmod")
 
         elif exe in {"rg", "ag"}:
             if any(
@@ -4685,6 +4729,12 @@ def analyze_shell_command(cmd_str: Optional[str], policy: Optional[PolicyConfig]
                     if not lit_res.get("is_safe", True):
                         findings.extend(f"unsafe_inline_interpreter:{f}" for f in lit_res.get("findings", []))
                 break
+
+    if any(c in _SHELL_SECRET_EGRESS_COMMANDS for c in parsed_cmds):
+        if protected_path_reads:
+            findings.append("shell_staged_protected_path_egress")
+        if sensitive_env_access:
+            findings.append("shell_staged_env_egress")
 
     is_safe = len(findings) == 0
     redirection_requires_escalation = bool(is_safe and unprivileged_redirects)
