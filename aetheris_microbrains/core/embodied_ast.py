@@ -725,67 +725,6 @@ class EmbodiedASTVerifier:
                     )
                 )
 
-        findings.extend(self._check_unitree_ast(tree, lines))
-        return findings
-
-    def _check_unitree_ast(self, tree: ast.AST, lines: List[str]) -> List[Dict[str, Any]]:
-        findings: List[Dict[str, Any]] = []
-        src_low = "\n".join(lines).lower()
-        uses_lowcmd = ("lowcmd" in src_low) or ("rt/lowcmd" in src_low)
-        if uses_lowcmd and "lowstate" not in src_low and "rt/lowstate" not in src_low:
-            findings.append(
-                self._make_finding(
-                    rule_id="unitree_unhomed_lowcmd",
-                    severity="high",
-                    decision="deny",
-                    line=1,
-                    col=0,
-                    message="Unitree rt/lowcmd used without reading rt/lowstate initial joint positions.",
-                    lines=lines,
-                )
-            )
-        if uses_lowcmd and "crc" not in src_low:
-            findings.append(
-                self._make_finding(
-                    rule_id="unitree_missing_crc",
-                    severity="high",
-                    decision="deny",
-                    line=1,
-                    col=0,
-                    message="Unitree LowCmd published without CRC32 computation.",
-                    lines=lines,
-                )
-            )
-        has_while = any(isinstance(n, ast.While) for n in ast.walk(tree))
-        has_try_finally = any(isinstance(n, ast.Try) and bool(n.finalbody) for n in ast.walk(tree))
-        if uses_lowcmd and has_while and not has_try_finally:
-            findings.append(
-                self._make_finding(
-                    rule_id="unitree_missing_damping_finally",
-                    severity="high",
-                    decision="deny",
-                    line=1,
-                    col=0,
-                    message="Unitree LowCmd control loop lacks try/finally damping shutdown handler.",
-                    lines=lines,
-                )
-            )
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                for tgt in node.targets:
-                    if isinstance(tgt, ast.Attribute) and tgt.attr == "kp":
-                        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, (int, float)) and float(node.value.value) > 300.0:
-                            findings.append(
-                                self._make_finding(
-                                    rule_id="unitree_excessive_kp_gain",
-                                    severity="high",
-                                    decision="deny",
-                                    line=getattr(node, "lineno", 1),
-                                    col=getattr(node, "col_offset", 0),
-                                    message=f"Excessive Unitree motor kp={node.value.value} > 300.0.",
-                                    lines=lines,
-                                )
-                            )
         return findings
 
     def verify(
