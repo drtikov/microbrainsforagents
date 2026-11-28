@@ -1824,10 +1824,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         journal_path = str(args.journal_path or os.getenv("AETHERIS_JOURNAL_PATH") or "").strip() or None
         session_state_path = _resolve_session_state_path(args.session_state)
 
+        max_hook_bytes = max(1024, int(os.getenv("AETHERIS_MAX_HOOK_BYTES") or (16 * 1024 * 1024)))
         if hasattr(sys.stdin, "buffer") and sys.stdin.buffer is not None:
-            raw = sys.stdin.buffer.read().decode("utf-8-sig", errors="replace").strip()
+            raw_bytes = sys.stdin.buffer.read(max_hook_bytes + 1)
+            payload_too_large = len(raw_bytes) > max_hook_bytes
+            raw = "" if payload_too_large else raw_bytes.decode("utf-8-sig", errors="replace").strip()
         else:
-            raw = sys.stdin.read().lstrip("\ufeff").strip()
+            try:
+                raw = sys.stdin.read(max_hook_bytes + 1)
+            except TypeError:
+                raw = sys.stdin.read()
+            payload_too_large = len(raw.encode("utf-8", errors="replace")) > max_hook_bytes
+            if not payload_too_large:
+                raw = raw.lstrip("\ufeff").strip()
+        if payload_too_large:
+            raise ValueError(f"hook_payload_too_large:exceeded_{max_hook_bytes}_bytes")
         if not raw and event_kind not in _LIFECYCLE_EVENTS:
             if shadow_mode:
                 _append_shadow_error_journal(

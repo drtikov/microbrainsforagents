@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import numpy as np
 
 from aetheris_microbrains.core.unitree_safety_bridge import (
@@ -14,7 +16,18 @@ from aetheris_microbrains.core.unitree_safety_bridge import (
 
 
 def test_unitree_specs_and_crc32():
-    expected = {"go2": 12, "b2": 12, "z1": 6, "h1": 19, "h1_2": 27, "g1_23dof": 23, "g1_29dof": 29, "dex3_1": 7}
+    expected = {
+        "go2": 12,
+        "b2": 12,
+        "z1": 6,
+        "h1": 19,
+        "h1_2": 27,
+        "g1_23dof": 23,
+        "g1_29dof": 29,
+        "dex3_1": 7,
+        "dex3_1_r": 7,
+        "dex3_1_l": 7,
+    }
     for name, dof in expected.items():
         assert UNITREE_ROBOT_SPECS[name].n_dof == dof
         assert len(UNITREE_ROBOT_SPECS[name].joint_names) == dof
@@ -148,3 +161,76 @@ def test_hg_int16_pair_temperature_and_h1_motor_slot_remap_and_wire_shim():
     direct_wire = h1_bridge.to_wire_lowcmd(out_h1)
     assert direct_wire.crc == wire_msg.crc
     assert direct_wire.motor_cmd[6].mode == 1
+
+
+def test_h1_2_z1_dex3_limits_and_c_struct_crc_wire_parity():
+    # 1. H1-2: 27-DoF explicit sequential JointIndex + asymmetric knee & 300 N*m limit
+    h1_2 = UNITREE_ROBOT_SPECS["h1_2"]
+    assert h1_2.joint_names[0] == "left_hip_yaw"
+    assert h1_2.joint_names[3] == "left_knee"
+    assert h1_2.motor_slot_map == tuple(range(27))
+    assert h1_2.n_motor_slots == 27
+    assert -0.15 < h1_2.q_min[3] < 0.0 and h1_2.q_max[3] > 2.1
+    assert h1_2.tau_max[3] == 300.0
+
+    # 2. Z1: shoulder joint_2 >= 0 (60 N*m) and elbow joint_3 <= 0 (30 N*m)
+    z1 = UNITREE_ROBOT_SPECS["z1"]
+    z1_pd = MotorPDCBFAdapter(z1, dt=0.002)
+    z1_out = z1_pd.filter_pd_target(
+        q=[0.0, 0.5, -0.5, 0.0, 0.0, 0.0],
+        dq=[0.0] * 6,
+        q_des_nom=[0.0, -1.0, 1.0, 0.0, 0.0, 0.0],
+        kp=[40.0] * 6,
+        kd=[2.0] * 6,
+    )
+    assert z1_out["q_des_safe"][1] >= -1e-6
+    assert z1_out["q_des_safe"][2] <= 1e-6
+    assert z1.tau_max[1] == 60.0 and z1.tau_max[2] == 30.0
+
+    # 3. Dex3-1 right vs left asymmetric finger ranges & 1.4 N*m finger torque cap
+    dex_r = UNITREE_ROBOT_SPECS["dex3_1_r"]
+    dex_l = UNITREE_ROBOT_SPECS["dex3_1_l"]
+    assert dex_r.tau_max[0] == 2.45 and dex_r.tau_max[3] == 1.4
+    assert dex_r.q_min[3] == 0.0 and dex_r.q_max[3] > 1.5
+    assert dex_l.q_max[3] == 0.0 and dex_l.q_min[3] < -1.5
+
+    # 4. Pure-Python C-struct CRC parity with official unitree_sdk2py crc.py (<2B2x+'B3x5fI'*35) and unitree_go (<4B4IH2x+'B3x5f3I'*20+'4B55BxI')
+    go2_bridge = SafeUnitreeLowLevelBridge("go2", dt=0.002, ramp_duration_s=0.004)
+    go2_ls = {
+        "imu_state": {"rpy": [0.0, 0.0, 0.0]},
+        "motor_state": [{"q": float(q0), "dq": 0.0, "temperature": 35.0} for q0 in UNITREE_ROBOT_SPECS["go2"].nominal_stand_q],
+    }
+    go2_out = go2_bridge.step(go2_ls, {"q": list(UNITREE_ROBOT_SPECS["go2"].nominal_stand_q)}, now_s=0.0)
+    go2_wire = go2_bridge.to_wire_lowcmd(go2_out)
+    assert go2_wire.crc == go2_out["crc"]
+
+    go_args = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for i in range(20):
+        mc = go2_wire.motor_cmd[i]
+        go_args.extend((mc.mode, mc.q, mc.dq, mc.tau, mc.kp, mc.kd, 0, 0, 0))
+    go_args.extend([0] * 59)  # 4B bms + 55B remote/led/fan/gpio
+    go_args.append(0)  # LowCmd_.reserve
+    go_bytes = struct.pack("<4B4IH2x" + "B3x5f3I" * 20 + "4B55BxI", *go_args)
+    assert len(go_bytes) == 808
+    go_words = list(struct.unpack("<202I", go_bytes))
+    assert go2_wire.crc == unitree_crc32(go_words)
+
+    g1_bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.004, mode_pr=1)
+    g1_ls = {
+        "mode_machine": 5,
+        "imu_state": {"rpy": [0.0, 0.0, 0.0]},
+        "motor_state": [{"q": 0.0, "dq": 0.0, "temperature": 35.0} for _ in range(35)],
+    }
+    g1_out = g1_bridge.step(g1_ls, {"q": [0.1] * 29}, now_s=0.0)
+    g1_wire = g1_bridge.to_wire_lowcmd(g1_out)
+    assert g1_wire.crc == g1_out["crc"]
+
+    hg_args = [g1_wire.mode_pr, g1_wire.mode_machine]
+    for i in range(35):
+        mc = g1_wire.motor_cmd[i]
+        hg_args.extend((mc.mode, mc.q, mc.dq, mc.tau, mc.kp, mc.kd, 0))
+    hg_args.extend((0, 0, 0, 0))
+    hg_bytes = struct.pack("<2B2x" + "B3x5fI" * 35 + "4I", *hg_args)
+    assert len(hg_bytes) == 1000
+    hg_words = list(struct.unpack("<250I", hg_bytes))
+    assert g1_wire.crc == unitree_crc32(hg_words)

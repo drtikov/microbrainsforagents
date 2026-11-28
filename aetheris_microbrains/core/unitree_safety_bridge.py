@@ -223,10 +223,98 @@ _G1_LIMIT_RULES = {
 _G1_23_LIMITS = _table_bounds(_G1_23_JOINTS, _G1_LIMIT_RULES)
 _G1_29_LIMITS = _table_bounds(_G1_29_JOINTS, _G1_LIMIT_RULES)
 
+# Official Unitree Z1 (z1.urdf): joint2 strictly [0, 170 deg] & 60 Nm; joint3 strictly [-165 deg, 0]
+_Z1_JOINTS = tuple(f"joint_{i}" for i in range(1, 7))
+_Z1_LIMITS = _table_bounds(
+    _Z1_JOINTS,
+    {
+        "joint_1": (-2.6180, 2.6180, 3.1415, 30.0, 60.0, 2.5),
+        "joint_2": (0.0, 2.9671, 3.1415, 60.0, 80.0, 3.0),
+        "joint_3": (-2.8798, 0.0, 3.1415, 30.0, 60.0, 2.5),
+        "joint_4": (-1.5184, 1.5184, 3.1415, 30.0, 50.0, 2.0),
+        "joint_5": (-1.3439, 1.3439, 3.1415, 30.0, 50.0, 2.0),
+        "joint_6": (-2.7925, 2.7925, 3.1415, 30.0, 50.0, 2.0),
+    },
+)
+
+# Official Unitree H1-2 JointIndex (0..26 sequential) and h1_2_handless.urdf limits
+_H1_2_JOINTS = (
+    "left_hip_yaw", "left_hip_pitch", "left_hip_roll", "left_knee", "left_ankle_pitch", "left_ankle_roll",
+    "right_hip_yaw", "right_hip_pitch", "right_hip_roll", "right_knee", "right_ankle_pitch", "right_ankle_roll",
+    "waist_yaw",
+    "left_shoulder_pitch", "left_shoulder_roll", "left_shoulder_yaw", "left_elbow",
+    "left_wrist_roll", "left_wrist_pitch", "left_wrist_yaw",
+    "right_shoulder_pitch", "right_shoulder_roll", "right_shoulder_yaw", "right_elbow",
+    "right_wrist_roll", "right_wrist_pitch", "right_wrist_yaw",
+)
+_H1_2_MOTOR_SLOT_MAP = tuple(range(27))
+_H1_2_LIMITS = _table_bounds(
+    _H1_2_JOINTS,
+    {
+        "_hip_yaw": (-0.43, 0.43, 23.0, 200.0, 200.0, 5.0),
+        "_hip_pitch": (-3.14, 2.5, 23.0, 200.0, 200.0, 5.0),
+        "left_hip_roll": (-0.43, 3.14, 23.0, 200.0, 200.0, 5.0),
+        "right_hip_roll": (-3.14, 0.43, 23.0, 200.0, 200.0, 5.0),
+        "_knee": (-0.12, 2.19, 14.0, 300.0, 200.0, 5.0),
+        "_ankle_pitch": (-0.8973, 0.5236, 9.0, 60.0, 80.0, 2.5),
+        "_ankle_roll": (-0.2618, 0.2618, 9.0, 40.0, 80.0, 2.5),
+        "waist_yaw": (-2.35, 2.35, 23.0, 200.0, 200.0, 5.0),
+        "_shoulder_pitch": (-3.14, 1.57, 9.0, 40.0, 60.0, 2.0),
+        "left_shoulder_roll": (-0.38, 3.4, 9.0, 40.0, 60.0, 2.0),
+        "right_shoulder_roll": (-3.4, 0.38, 9.0, 40.0, 60.0, 2.0),
+        "left_shoulder_yaw": (-2.66, 3.01, 20.0, 18.0, 50.0, 1.5),
+        "right_shoulder_yaw": (-3.01, 2.66, 20.0, 18.0, 50.0, 1.5),
+        "_elbow": (-0.95, 3.18, 20.0, 18.0, 50.0, 1.5),
+        "left_wrist_roll": (-3.01, 2.75, 31.4, 19.0, 40.0, 1.0),
+        "right_wrist_roll": (-2.75, 3.01, 31.4, 19.0, 40.0, 1.0),
+        "_wrist_pitch": (-0.4625, 0.4625, 31.4, 19.0, 40.0, 1.0),
+        "_wrist_yaw": (-1.27, 1.27, 31.4, 19.0, 40.0, 1.0),
+    },
+)
+
+# Official Unitree Dex3-1 hand limits (dex3_1_r.urdf / dex3_1_l.urdf)
+_DEX3_JOINTS = ("thumb_0", "thumb_1", "thumb_2", "index_0", "index_1", "middle_0", "middle_1")
+_DEX3_R_LIMITS = _table_bounds(
+    _DEX3_JOINTS,
+    {
+        "thumb_0": (-1.0472, 1.0472, 3.14, 2.45, 15.0, 0.3),
+        "thumb_1": (-1.0472, 0.6109, 12.0, 1.4, 15.0, 0.3),
+        "thumb_2": (-1.7453, 0.0, 12.0, 1.4, 15.0, 0.3),
+        "index_0": (0.0, 1.5708, 12.0, 1.4, 15.0, 0.3),
+        "index_1": (0.0, 1.7453, 12.0, 1.4, 15.0, 0.3),
+        "middle_0": (0.0, 1.5708, 12.0, 1.4, 15.0, 0.3),
+        "middle_1": (0.0, 1.7453, 12.0, 1.4, 15.0, 0.3),
+    },
+)
+_DEX3_L_LIMITS = _table_bounds(
+    _DEX3_JOINTS,
+    {
+        "thumb_0": (-1.0472, 1.0472, 3.14, 2.45, 15.0, 0.3),
+        "thumb_1": (-0.6109, 1.0472, 12.0, 1.4, 15.0, 0.3),
+        "thumb_2": (0.0, 1.7453, 12.0, 1.4, 15.0, 0.3),
+        "index_0": (-1.5708, 0.0, 12.0, 1.4, 15.0, 0.3),
+        "index_1": (-1.7453, 0.0, 12.0, 1.4, 15.0, 0.3),
+        "middle_0": (-1.5708, 0.0, 12.0, 1.4, 15.0, 0.3),
+        "middle_1": (-1.7453, 0.0, 12.0, 1.4, 15.0, 0.3),
+    },
+)
+_DEX3_ENVELOPE_LIMITS = _table_bounds(
+    _DEX3_JOINTS,
+    {
+        "thumb_0": (-1.0472, 1.0472, 3.14, 2.45, 15.0, 0.3),
+        "thumb_1": (-1.0472, 1.0472, 12.0, 1.4, 15.0, 0.3),
+        "thumb_2": (-1.7453, 1.7453, 12.0, 1.4, 15.0, 0.3),
+        "index_0": (-1.5708, 1.5708, 12.0, 1.4, 15.0, 0.3),
+        "index_1": (-1.7453, 1.7453, 12.0, 1.4, 15.0, 0.3),
+        "middle_0": (-1.5708, 1.5708, 12.0, 1.4, 15.0, 0.3),
+        "middle_1": (-1.7453, 1.7453, 12.0, 1.4, 15.0, 0.3),
+    },
+)
+
 UNITREE_ROBOT_SPECS: Dict[str, UnitreeRobotSpec] = {
     "go2": _make_spec("go2", _GO2_JOINTS, *_GO2_LIMITS, "unitree_go", False, _GO2_STAND),
     "b2": _make_spec("b2", _GO2_JOINTS, *_B2_LIMITS, "unitree_go", False, _GO2_STAND),
-    "z1": _make_spec("z1", tuple(f"joint_{i}" for i in range(1, 7)), -2.8, 2.8, 3.14, 30.0, 60.0, 2.5, "unitree_go", False),
+    "z1": _make_spec("z1", _Z1_JOINTS, *_Z1_LIMITS, "unitree_go", False, fall_tilt_rad=3.14),
     "h1": _make_spec(
         "h1",
         _H1_JOINTS,
@@ -236,10 +324,20 @@ UNITREE_ROBOT_SPECS: Dict[str, UnitreeRobotSpec] = {
         motor_slot_map=_H1_MOTOR_SLOT_MAP,
         n_motor_slots=20,
     ),
-    "h1_2": _make_spec("h1_2", tuple(f"joint_{i}" for i in range(27)), -3.0, 3.0, 20.0, 200.0, 200.0, 5.0, "unitree_hg", True),
+    "h1_2": _make_spec(
+        "h1_2",
+        _H1_2_JOINTS,
+        *_H1_2_LIMITS,
+        "unitree_hg",
+        True,
+        motor_slot_map=_H1_2_MOTOR_SLOT_MAP,
+        n_motor_slots=27,
+    ),
     "g1_23dof": _make_spec("g1_23dof", _G1_23_JOINTS, *_G1_23_LIMITS, "unitree_hg", True),
     "g1_29dof": _make_spec("g1_29dof", _G1_29_JOINTS, *_G1_29_LIMITS, "unitree_hg", True),
-    "dex3_1": _make_spec("dex3_1", ("thumb_0", "thumb_1", "thumb_2", "index_0", "index_1", "middle_0", "middle_1"), -0.1, 1.75, 12.0, 2.5, 15.0, 0.3, "unitree_hg", False, fall_tilt_rad=3.14),
+    "dex3_1": _make_spec("dex3_1", _DEX3_JOINTS, *_DEX3_ENVELOPE_LIMITS, "unitree_hg", False, fall_tilt_rad=3.14),
+    "dex3_1_r": _make_spec("dex3_1_r", _DEX3_JOINTS, *_DEX3_R_LIMITS, "unitree_hg", False, fall_tilt_rad=3.14),
+    "dex3_1_l": _make_spec("dex3_1_l", _DEX3_JOINTS, *_DEX3_L_LIMITS, "unitree_hg", False, fall_tilt_rad=3.14),
 }
 
 
@@ -261,6 +359,77 @@ def unitree_crc32(data_words: Sequence[int]) -> int:
     return crc & 0xFFFFFFFF
 
 
+def _bytes_to_u32_words(packed: bytes) -> List[int]:
+    """Convert little-endian packed bytes (multiple of 4) into uint32 words."""
+    n_words = len(packed) // 4
+    return list(struct.unpack(f"<{n_words}I", packed[: n_words * 4]))
+
+
+def _pack_hg_lowcmd_bytes(
+    mode_pr: int,
+    mode_machine: int,
+    slots: Sequence[Tuple[int, float, float, float, float, float, int]],
+    lowcmd_reserve: Sequence[int] = (0, 0, 0, 0),
+) -> bytes:
+    """Pack unitree_hg::msg::dds_::LowCmd_ pre-CRC payload (<2B2x + B3x5fI*N + 4I)."""
+    args: List[Any] = [int(mode_pr) & 0xFF, int(mode_machine) & 0xFF]
+    for m, qv, dqv, tv, kpv, kdv, res in slots:
+        args.extend((int(m) & 0xFF, float(qv), float(dqv), float(tv), float(kpv), float(kdv), int(res) & 0xFFFFFFFF))
+    args.extend(int(lowcmd_reserve[i]) & 0xFFFFFFFF if i < len(lowcmd_reserve) else 0 for i in range(4))
+    return struct.pack(f"<2B2x{'B3x5fI' * len(slots)}4I", *args)
+
+
+def _pack_go_lowcmd_bytes(
+    slots: Sequence[Tuple[int, float, float, float, float, float, Tuple[int, int, int]]],
+    *,
+    head: Sequence[int] = (0, 0),
+    level_flag: int = 0,
+    frame_reserve: int = 0,
+    sn: Sequence[int] = (0, 0),
+    version: Sequence[int] = (0, 0),
+    bandwidth: int = 0,
+    bms_off: int = 0,
+    bms_reserve: Sequence[int] = (0, 0, 0),
+    wireless_remote: Sequence[int] = (),
+    led: Sequence[int] = (),
+    fan: Sequence[int] = (0, 0),
+    gpio: int = 0,
+    lowcmd_reserve: int = 0,
+) -> bytes:
+    """Pack unitree_go::msg::dds_::LowCmd_ pre-CRC payload (<4B4IH2x + B3x5f3I*N + 4B55BxI)."""
+    args: List[Any] = [
+        int(head[0]) & 0xFF if len(head) > 0 else 0,
+        int(head[1]) & 0xFF if len(head) > 1 else 0,
+        int(level_flag) & 0xFF,
+        int(frame_reserve) & 0xFF,
+        int(sn[0]) & 0xFFFFFFFF if len(sn) > 0 else 0,
+        int(sn[1]) & 0xFFFFFFFF if len(sn) > 1 else 0,
+        int(version[0]) & 0xFFFFFFFF if len(version) > 0 else 0,
+        int(version[1]) & 0xFFFFFFFF if len(version) > 1 else 0,
+        int(bandwidth) & 0xFFFF,
+    ]
+    for m, qv, dqv, tv, kpv, kdv, res in slots:
+        args.extend((
+            int(m) & 0xFF,
+            float(qv),
+            float(dqv),
+            float(tv),
+            float(kpv),
+            float(kdv),
+            int(res[0]) & 0xFFFFFFFF if len(res) > 0 else 0,
+            int(res[1]) & 0xFFFFFFFF if len(res) > 1 else 0,
+            int(res[2]) & 0xFFFFFFFF if len(res) > 2 else 0,
+        ))
+    args.append(int(bms_off) & 0xFF)
+    args.extend(int(bms_reserve[i]) & 0xFF if i < len(bms_reserve) else 0 for i in range(3))
+    args.extend(int(wireless_remote[i]) & 0xFF if i < len(wireless_remote) else 0 for i in range(40))
+    args.extend(int(led[i]) & 0xFF if i < len(led) else 0 for i in range(12))
+    args.extend(int(fan[i]) & 0xFF if i < len(fan) else 0 for i in range(2))
+    args.append(int(gpio) & 0xFF)
+    args.append(int(lowcmd_reserve) & 0xFFFFFFFF)
+    return struct.pack(f"<4B4IH2x{'B3x5f3I' * len(slots)}4B55BxI", *args)
+
+
 def pack_lowcmd_crc_words(
     q: Sequence[float],
     dq: Sequence[float],
@@ -278,8 +447,6 @@ def pack_lowcmd_crc_words(
     """Pack LowCmd fields into IEEE-754 float32 + C-struct little-endian uint32 words for CRC32."""
     total_slots = int(n_slots) if n_slots is not None else (35 if idl_family == "unitree_hg" else 20)
     slots = tuple(int(s) for s in motor_slot_map) if motor_slot_map is not None else tuple(range(len(q)))
-    # HG LowCmd C-struct header: uint8 mode_pr, uint8 mode_machine, uint16 pad (<BB2x)
-    header_word = (int(mode_pr) & 0xFF) | ((int(mode_machine) & 0xFF) << 8)
     slot_data: Dict[int, Tuple[int, float, float, float, float, float]] = {}
     for logical_idx in range(min(len(q), len(slots))):
         hw_idx = slots[logical_idx]
@@ -293,18 +460,11 @@ def pack_lowcmd_crc_words(
                 float(kd[logical_idx]) if logical_idx < len(kd) else 0.0,
             )
 
-    words: List[int] = [header_word]
-    for hw_idx in range(total_slots):
-        m, qv, dqv, tv, kpv, kdv = slot_data.get(hw_idx, (0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        words.append(m & 0xFF)
-        words.append(_f32_to_u32(qv))
-        words.append(_f32_to_u32(dqv))
-        words.append(_f32_to_u32(tv))
-        words.append(_f32_to_u32(kpv))
-        words.append(_f32_to_u32(kdv))
-        words.extend((0, 0, 0))  # MotorCmd_.reserve[3]
-    words.extend((0, 0, 0, 0))  # LowCmd_.reserve[4]
-    return words
+    if idl_family == "unitree_go":
+        go_slots = [(*slot_data.get(hw_idx, (0, 0.0, 0.0, 0.0, 0.0, 0.0)), (0, 0, 0)) for hw_idx in range(total_slots)]
+        return _bytes_to_u32_words(_pack_go_lowcmd_bytes(go_slots))
+    hg_slots = [(*slot_data.get(hw_idx, (0, 0.0, 0.0, 0.0, 0.0, 0.0)), 0) for hw_idx in range(total_slots)]
+    return _bytes_to_u32_words(_pack_hg_lowcmd_bytes(mode_pr, mode_machine, hg_slots))
 
 
 def _dykstra_project(
@@ -690,24 +850,50 @@ class _FallbackMotorCmdIDL:
 
     __slots__ = ("mode", "q", "dq", "tau", "kp", "kd", "reserve")
 
-    def __init__(self) -> None:
+    def __init__(self, idl_family: str = "unitree_hg") -> None:
         self.mode: int = 0
         self.q: float = 0.0
         self.dq: float = 0.0
         self.tau: float = 0.0
         self.kp: float = 0.0
         self.kd: float = 0.0
+        self.reserve: Union[int, List[int]] = 0 if idl_family == "unitree_hg" else [0, 0, 0]
+
+
+class _FallbackBmsCmdIDL:
+    """Lightweight duck-typed BmsCmd_ IDL struct for unitree_go fallback."""
+
+    __slots__ = ("off", "reserve")
+
+    def __init__(self) -> None:
+        self.off: int = 0
         self.reserve: List[int] = [0, 0, 0]
 
 
 class _FallbackLowCmdIDL:
     """Lightweight duck-typed LowCmd_ IDL struct used when unitree_sdk2py is not installed."""
 
-    def __init__(self, n_slots: int = 35) -> None:
-        self.mode_pr: int = 0
-        self.mode_machine: int = 0
-        self.motor_cmd: List[_FallbackMotorCmdIDL] = [_FallbackMotorCmdIDL() for _ in range(n_slots)]
-        self.reserve: List[int] = [0, 0, 0, 0]
+    def __init__(self, n_slots: Optional[int] = None, idl_family: str = "unitree_hg") -> None:
+        self.idl_family = idl_family
+        count = int(n_slots) if n_slots is not None else (35 if idl_family == "unitree_hg" else 20)
+        self.motor_cmd: List[_FallbackMotorCmdIDL] = [_FallbackMotorCmdIDL(idl_family) for _ in range(count)]
+        if idl_family == "unitree_go":
+            self.head: List[int] = [0, 0]
+            self.level_flag: int = 0
+            self.frame_reserve: int = 0
+            self.sn: List[int] = [0, 0]
+            self.version: List[int] = [0, 0]
+            self.bandwidth: int = 0
+            self.bms_cmd = _FallbackBmsCmdIDL()
+            self.wireless_remote: List[int] = [0] * 40
+            self.led: List[int] = [0] * 12
+            self.fan: List[int] = [0, 0]
+            self.gpio: int = 0
+            self.reserve: Union[int, List[int]] = 0
+        else:
+            self.mode_pr: int = 0
+            self.mode_machine: int = 0
+            self.reserve = [0, 0, 0, 0]
         self.crc: int = 0
 
 
@@ -724,15 +910,11 @@ def _allocate_lowcmd_idl(spec: UnitreeRobotSpec) -> Any:
         return unitree_go_msg_dds__LowCmd_()
     except ImportError:
         n_slots = 35 if spec.idl_family == "unitree_hg" else 20
-        return _FallbackLowCmdIDL(n_slots=max(n_slots, spec.total_motor_slots))
-
-
-def _f32_to_u32(val: float) -> int:
-    return int.from_bytes(struct.pack("<f", float(val)), "little")
+        return _FallbackLowCmdIDL(n_slots=max(n_slots, spec.total_motor_slots), idl_family=spec.idl_family)
 
 
 def _compute_idl_wire_crc(low_cmd_msg: Any, crc_calc: Optional[Any] = None) -> int:
-    """Compute real SDK2 CRC(low_cmd_msg) if available, else deterministic float32-packed CRC32."""
+    """Compute real SDK2 CRC(low_cmd_msg) if available, else pure-Python IDL struct CRC32."""
     if crc_calc is not None and hasattr(crc_calc, "Crc"):
         return int(crc_calc.Crc(low_cmd_msg)) & 0xFFFFFFFF
     try:
@@ -741,25 +923,73 @@ def _compute_idl_wire_crc(low_cmd_msg: Any, crc_calc: Optional[Any] = None) -> i
         return int(CRC().Crc(low_cmd_msg)) & 0xFFFFFFFF
     except (ImportError, OSError) as exc:
         warnings.warn(
-            f"unitree_sdk2py CRC unavailable ({exc}); using fallback float32-packed CRC32 (not hardware-wire-compatible)",
+            f"unitree_sdk2py CRC unavailable ({exc}); using pure-Python IDL struct-packed fallback CRC32",
             RuntimeWarning,
             stacklevel=2,
         )
+        is_go = (
+            getattr(low_cmd_msg, "__idl_typename__", "") == "unitree_go.msg.dds_.LowCmd_"
+            or getattr(low_cmd_msg, "idl_family", "") == "unitree_go"
+            or hasattr(low_cmd_msg, "head")
+        )
+        mcs = getattr(low_cmd_msg, "motor_cmd", ())
+        if is_go:
+            go_slots = []
+            for mc in mcs:
+                res = getattr(mc, "reserve", (0, 0, 0))
+                res_tup = tuple(res) if isinstance(res, (list, tuple)) else (int(res), 0, 0)
+                go_slots.append((
+                    int(getattr(mc, "mode", 0)) & 0xFF,
+                    float(getattr(mc, "q", 0.0)),
+                    float(getattr(mc, "dq", 0.0)),
+                    float(getattr(mc, "tau", 0.0)),
+                    float(getattr(mc, "kp", 0.0)),
+                    float(getattr(mc, "kd", 0.0)),
+                    (
+                        int(res_tup[0]) & 0xFFFFFFFF if len(res_tup) > 0 else 0,
+                        int(res_tup[1]) & 0xFFFFFFFF if len(res_tup) > 1 else 0,
+                        int(res_tup[2]) & 0xFFFFFFFF if len(res_tup) > 2 else 0,
+                    ),
+                ))
+            bms = getattr(low_cmd_msg, "bms_cmd", None)
+            tail_res = getattr(low_cmd_msg, "reserve", 0)
+            packed = _pack_go_lowcmd_bytes(
+                go_slots,
+                head=getattr(low_cmd_msg, "head", (0, 0)),
+                level_flag=getattr(low_cmd_msg, "level_flag", 0),
+                frame_reserve=getattr(low_cmd_msg, "frame_reserve", 0),
+                sn=getattr(low_cmd_msg, "sn", (0, 0)),
+                version=getattr(low_cmd_msg, "version", (0, 0)),
+                bandwidth=getattr(low_cmd_msg, "bandwidth", 0),
+                bms_off=getattr(bms, "off", 0) if bms is not None else 0,
+                bms_reserve=getattr(bms, "reserve", (0, 0, 0)) if bms is not None else (0, 0, 0),
+                wireless_remote=getattr(low_cmd_msg, "wireless_remote", ()),
+                led=getattr(low_cmd_msg, "led", ()),
+                fan=getattr(low_cmd_msg, "fan", (0, 0)),
+                gpio=getattr(low_cmd_msg, "gpio", 0),
+                lowcmd_reserve=int(tail_res[0]) if isinstance(tail_res, (list, tuple)) else int(tail_res),
+            )
+            return unitree_crc32(_bytes_to_u32_words(packed))
+
         mode_pr = int(getattr(low_cmd_msg, "mode_pr", 0)) & 0xFF
         mode_machine = int(getattr(low_cmd_msg, "mode_machine", 0)) & 0xFF
-        words: List[int] = [mode_pr | (mode_machine << 8)]
-        for mc in getattr(low_cmd_msg, "motor_cmd", ()):
-            words.append(int(getattr(mc, "mode", 0)) & 0xFF)
-            words.append(_f32_to_u32(getattr(mc, "q", 0.0)))
-            words.append(_f32_to_u32(getattr(mc, "dq", 0.0)))
-            words.append(_f32_to_u32(getattr(mc, "tau", 0.0)))
-            words.append(_f32_to_u32(getattr(mc, "kp", 0.0)))
-            words.append(_f32_to_u32(getattr(mc, "kd", 0.0)))
-            res = getattr(mc, "reserve", (0, 0, 0))
-            words.extend(int(res[i]) & 0xFFFFFFFF if i < len(res) else 0 for i in range(3))
+        hg_slots = []
+        for mc in mcs:
+            res = getattr(mc, "reserve", 0)
+            res_int = int(res[0]) if isinstance(res, (list, tuple)) else int(res)
+            hg_slots.append((
+                int(getattr(mc, "mode", 0)) & 0xFF,
+                float(getattr(mc, "q", 0.0)),
+                float(getattr(mc, "dq", 0.0)),
+                float(getattr(mc, "tau", 0.0)),
+                float(getattr(mc, "kp", 0.0)),
+                float(getattr(mc, "kd", 0.0)),
+                res_int & 0xFFFFFFFF,
+            ))
         tail = getattr(low_cmd_msg, "reserve", (0, 0, 0, 0))
-        words.extend(int(tail[i]) & 0xFFFFFFFF if i < len(tail) else 0 for i in range(4))
-        return unitree_crc32(words)
+        tail_seq = tail if isinstance(tail, (list, tuple)) else (int(tail), 0, 0, 0)
+        packed = _pack_hg_lowcmd_bytes(mode_pr, mode_machine, hg_slots, tail_seq)
+        return unitree_crc32(_bytes_to_u32_words(packed))
 
 
 def populate_unitree_lowcmd_idl(

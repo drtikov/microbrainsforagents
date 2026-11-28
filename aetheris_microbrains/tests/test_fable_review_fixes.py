@@ -1833,6 +1833,14 @@ def test_fable_43_shadow_error_journal_equal_escalation_and_codex_contract(tmp_p
     assert codex_esc["permissionDecision"] is None
     assert codex_esc["exit_code"] == 0
 
+    # 3. Oversized hook stdin payload fails closed without OOM
+    monkeypatch.setenv("AETHERIS_MAX_HOOK_BYTES", "1024")
+    monkeypatch.setattr(sys, "stdin", type("S", (), {"read": lambda self, n=-1: "x" * 2048})())
+    rc_big = hook_mod.main(["--host", "generic"])
+    cap_big = capsys.readouterr()
+    assert rc_big == 2
+    assert "hook_payload_too_large" in cap_big.err
+
     monkeypatch.setattr(
         sys,
         "stdin",
