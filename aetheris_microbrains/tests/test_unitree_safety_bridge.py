@@ -132,3 +132,7 @@ def test_hg_int16_pair_temperature_and_h1_motor_slot_remap_and_wire_shim():
     assert wire_msg.motor_cmd[9].q == 0.0
     assert wire_msg.motor_cmd[6].mode == 1
     assert wire_msg.motor_cmd[8].mode == 1
+
+    direct_wire = h1_bridge.to_wire_lowcmd(out_h1)
+    assert direct_wire.crc == wire_msg.crc
+    assert direct_wire.motor_cmd[6].mode == 1

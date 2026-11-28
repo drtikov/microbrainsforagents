@@ -1167,7 +1167,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         spec = UNITREE_ROBOT_SPECS[r_key]
         bridge = SafeUnitreeLowLevelBridge(r_key)
-        sdk_installed = importlib.util.find_spec("unitree_sdk2_python") is not None
+        sdk_installed = importlib.util.find_spec("unitree_sdk2py") is not None
         cyclonedds_home = str(os.environ.get("CYCLONEDDS_HOME") or "").strip()
         rep = {
             "ok": True,

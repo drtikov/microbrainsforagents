@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import math
 import struct
 import time
+import warnings
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -596,7 +597,12 @@ def _compute_idl_wire_crc(low_cmd_msg: Any, crc_calc: Optional[Any] = None) -> i
         from unitree_sdk2py.utils.crc import CRC  # type: ignore[import-not-found]
 
         return int(CRC().Crc(low_cmd_msg)) & 0xFFFFFFFF
-    except ImportError:
+    except (ImportError, OSError) as exc:
+        warnings.warn(
+            f"unitree_sdk2py CRC unavailable ({exc}); using fallback float32-packed CRC32 (not hardware-wire-compatible)",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         words: List[int] = [
             int(getattr(low_cmd_msg, "mode_pr", 0)) & 0xFF,
             int(getattr(low_cmd_msg, "mode_machine", 0)) & 0xFF,
