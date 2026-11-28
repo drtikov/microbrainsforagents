@@ -87,7 +87,9 @@ def test_ci_workflow_defines_rust_wasm_job():
         "cargo build --release --target wasm32-unknown-unknown --lib --manifest-path rust/aetheris-gate/Cargo.toml"
         in ci_text
     )
-    assert "python -m pytest aetheris_microbrains/tests/test_rust_wasm_core.py -q" in ci_text
+    assert (
+        "python -m pytest aetheris_microbrains/tests/test_rust_wasm_core.py" in ci_text
+    ), "rust-wasm CI job must run test_rust_wasm_core.py"
 
 
 def test_node_esm_live_wasm_sdk_and_pi_fallback_smoke():
