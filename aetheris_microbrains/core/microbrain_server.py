@@ -1155,6 +1155,253 @@ async def gate_action(req: GateRequest):
         raise HTTPException(status_code=500, detail="Internal safety filter evaluation failed")
 
 
+# --- Robotics v1 API Routes ---
+
+
+class RoboticsCBFFilterRequest(BaseModel):
+    state: List[float] = Field(..., max_length=512, description="Robot state vector x")
+    nominal_action: List[float] = Field(..., max_length=512, description="Nominal control u_nom")
+    u_min: Optional[List[float]] = Field(None, max_length=512)
+    u_max: Optional[List[float]] = Field(None, max_length=512)
+    barriers: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        max_length=128,
+        description='[{"type":"sphere","center":[..],"radius":r,"alpha":a}, {"type":"halfplane"|"linear","a":[..],"b":c,"alpha":a}]',
+    )
+    conformal_margin: float = Field(0.0, ge=0.0)
+
+
+class RoboticsCBFFilterResponse(BaseModel):
+    status: str
+    verified_safe: bool
+    u_filtered: List[float]
+    u_nominal: List[float]
+    min_barrier_slack: float = 0.0
+    conformal_margin: float = 0.0
+    n_barriers: int = 0
+    latency_ms: float = 0.0
+
+
+class VLAGateV1Request(GateRequest):
+    calibration_scores: Optional[List[float]] = Field(
+        None,
+        max_length=2048,
+        description="Optional per-request conformal calibration residual window",
+    )
+
+
+class EmbodiedFirewallRequest(BaseModel):
+    protocol: str = Field("ros2", description="ros2 | moveit2 | lerobot | mavlink")
+    payload: Dict[str, Any] = Field(..., description="Protocol-specific embodied command payload")
+    hard_limits: Optional[Dict[str, Any]] = None
+    mission_envelope: Optional[Dict[str, Any]] = None
+    mission_secret: Optional[str] = None
+    scene_text: Optional[Any] = None
+    carrying_payload_n: Optional[float] = None
+    current_position: Optional[List[float]] = Field(None, max_length=16)
+    sensor_observation: Optional[Dict[str, Any]] = None
+    capability_token: Optional[Dict[str, Any]] = None
+    root_secret: Optional[str] = None
+
+
+@app.post("/v1/robotics/cbf-filter", response_model=RoboticsCBFFilterResponse)
+async def robotics_cbf_filter(req: RoboticsCBFFilterRequest):
+    """Evaluate StateCBFSafetyFilter over nominal vector and linear/sphere barriers."""
+    def _sync_cbf() -> RoboticsCBFFilterResponse:
+        from .state_cbf_filter import (
+            ControlAffineDynamics,
+            HalfPlaneBarrier,
+            SphereBarrier,
+            StateCBFSafetyFilter,
+        )
+
+        dyn = ControlAffineDynamics(len(req.state), len(req.nominal_action))
+        barriers = []
+        for spec in req.barriers:
+            btype = str(spec.get("type", "")).strip().lower()
+            alpha = float(spec.get("alpha", 0.5))
+            if btype == "sphere":
+                barriers.append(SphereBarrier(spec["center"], float(spec["radius"]), alpha=alpha))
+            elif btype in ("halfplane", "linear"):
+                barriers.append(HalfPlaneBarrier(spec["a"], float(spec["b"]), alpha=alpha))
+            else:
+                raise HTTPException(status_code=400, detail=f"unknown barrier type: {btype}")
+
+        flt = StateCBFSafetyFilter(
+            dyn,
+            barriers,
+            u_min=req.u_min,
+            u_max=req.u_max,
+            conformal_margin=req.conformal_margin,
+        )
+        out = flt.filter(req.state, req.nominal_action)
+        return RoboticsCBFFilterResponse(
+            status=str(out.get("status", "unknown")),
+            verified_safe=bool(out.get("verified_safe", False)),
+            u_filtered=[float(v) for v in out.get("u_filtered", [])],
+            u_nominal=[float(v) for v in out.get("u_nominal", [])],
+            min_barrier_slack=float(out.get("min_barrier_slack", 0.0)),
+            conformal_margin=float(out.get("conformal_margin", req.conformal_margin)),
+            n_barriers=int(out.get("n_barriers", len(barriers))),
+            latency_ms=float(out.get("latency_ms", 0.0)),
+        )
+
+    try:
+        return await asyncio.to_thread(_sync_cbf)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"Robotics CBF filter failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal CBF filter evaluation failed")
+
+
+@app.post("/v1/robotics/vla-gate", response_model=GateResponse)
+async def robotics_vla_gate(req: VLAGateV1Request):
+    """Evaluate VLActionGate tier decision and CBF-filtered safe action."""
+    global _vla_skill_library, _vla_action_gate
+
+    def _sync_vla() -> GateResponse:
+        global _vla_skill_library, _vla_action_gate
+        from .vla_gating import ConformalActionGate, SkillLibrary, VLActionGate
+
+        if _vla_skill_library is None:
+            _vla_skill_library = SkillLibrary()
+        if req.calibration_scores is not None:
+            action_gate = ConformalActionGate()
+            action_gate.calibrate(req.calibration_scores)
+        else:
+            if _vla_action_gate is None:
+                _vla_action_gate = ConformalActionGate()
+            action_gate = _vla_action_gate
+
+        req_filter = _build_filter_from_request(req)
+        req_filter.set_conformal_margin(req.conformal_margin)
+        req_gate = VLActionGate(
+            skill_library=_vla_skill_library,
+            safety_filter=req_filter,
+            action_gate=action_gate,
+        )
+        out = req_gate.gate(
+            scene_vec=req.scene,
+            state=req.state,
+            nominal_action=req.nominal_action,
+            risk_score=req.risk_score,
+        )
+        return GateResponse(
+            decision=out["decision"],
+            action_out=out["action_out"],
+            reason=out.get("reason", ""),
+            latency_ms=out.get("latency_ms", 0.0),
+            safety=out.get("safety", {}),
+            affordances=out.get("affordances", []),
+            conformal=out.get("conformal", {}),
+        )
+
+    try:
+        return await asyncio.to_thread(_sync_vla)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"Robotics VLA gate failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal VLA gate evaluation failed")
+
+
+@app.post("/v1/robotics/embodied-firewall")
+async def robotics_embodied_firewall(req: EmbodiedFirewallRequest):
+    """Evaluate EmbodiedActionFirewall across ros2, moveit2, lerobot, or mavlink."""
+    def _sync_fw() -> Dict[str, Any]:
+        from ..hosts.ros2_adapter import EmbodiedActionFirewall
+        from .capability_tokens import CapabilityToken
+
+        token_obj = None
+        if req.capability_token is not None:
+            token_obj = CapabilityToken.from_dict(req.capability_token)
+
+        fw = EmbodiedActionFirewall()
+        return fw.evaluate_embodied_action(
+            req.payload,
+            protocol=req.protocol,
+            capability_token=token_obj,
+            root_secret=req.root_secret,
+            hard_limits=req.hard_limits,
+            mission_envelope=req.mission_envelope,
+            mission_secret=req.mission_secret,
+            scene_text=req.scene_text,
+            carrying_payload_n=req.carrying_payload_n,
+            current_position=req.current_position,
+            sensor_observation=req.sensor_observation,
+        )
+
+    try:
+        return await asyncio.to_thread(_sync_fw)
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid firewall request: {e}")
+    except Exception as e:
+        log.warning(f"Embodied firewall evaluation failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal embodied firewall evaluation failed")
+
+
+@app.get("/v1/robotics/status")
+async def robotics_status():
+    """Return robotics runtime readiness, module availability, and active capabilities."""
+    import importlib
+
+    module_names = (
+        "aetheris_microbrains.core.state_cbf_filter",
+        "aetheris_microbrains.core.vla_gating",
+        "aetheris_microbrains.core.whole_body_barriers",
+        "aetheris_microbrains.core.hybrid_contact_passivity",
+        "aetheris_microbrains.core.robust_adaptive_cbf",
+        "aetheris_microbrains.core.swarm_cbf_coordinator",
+        "aetheris_microbrains.core.proprioceptive_ssm_monitor",
+        "aetheris_microbrains.core.urdf_spatial_kinematics",
+        "aetheris_microbrains.core.embodied_threat_guard",
+        "aetheris_microbrains.core.flight_recorder",
+        "aetheris_microbrains.core.shm_sensorimotor_bus",
+        "aetheris_microbrains.core.robotics_policy_synthesizer",
+        "aetheris_microbrains.core.robotics_benchmark_harness",
+        "aetheris_microbrains.hosts.ros2_adapter",
+    )
+    modules_status: Dict[str, bool] = {}
+    for mod_name in module_names:
+        short = mod_name.rsplit(".", 1)[-1]
+        try:
+            importlib.import_module(mod_name)
+            modules_status[short] = True
+        except Exception:
+            modules_status[short] = False
+
+    native_rust_ready = False
+    try:
+        from .rust_shim import NativeRTGateLib
+
+        native_rust_ready = NativeRTGateLib.is_available()
+    except Exception:
+        native_rust_ready = False
+
+    core_ready = all(
+        modules_status.get(k, False)
+        for k in ("state_cbf_filter", "vla_gating", "ros2_adapter", "flight_recorder")
+    )
+    return {
+        "status": "ready" if core_ready else "degraded",
+        "ready": core_ready,
+        "version": _PKG_VERSION,
+        "uptime_seconds": round(time.time() - _start_time, 3),
+        "native_rust_ready": native_rust_ready,
+        "supported_protocols": ["ros2", "moveit2", "lerobot", "mavlink"],
+        "capabilities": [
+            "cbf_filter",
+            "vla_gate",
+            "embodied_firewall",
+            "shm_sensorimotor_bus",
+            "robotics_policy_synthesizer",
+            "robotics_benchmark_harness",
+        ],
+        "modules": modules_status,
+    }
+
+
 # --- Main ---
 
 if __name__ == "__main__":

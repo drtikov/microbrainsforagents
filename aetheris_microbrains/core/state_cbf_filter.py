@@ -466,6 +466,7 @@ class StateCBFSafetyFilter:
         max_iters: int = 200,
         tol: float = 1e-9,
         backup_controller: Optional[Any] = None,
+        use_native_rust: bool = False,
     ):
         self.dynamics = dynamics
         self.barriers = list(barriers)
@@ -475,6 +476,7 @@ class StateCBFSafetyFilter:
         self.max_iters = int(max_iters)
         self.tol = float(tol)
         self.backup_controller = backup_controller
+        self.use_native_rust = bool(use_native_rust)
         self.calls = 0
         self.unsafe_calls = 0
 
@@ -613,6 +615,42 @@ class StateCBFSafetyFilter:
         verified = bool(np.all(np.isfinite(result)) and box_ok and (not A.size or residual >= -1e-6))
         return result, residual, verified
 
+    def _solve_projection(
+        self, A: np.ndarray, b: np.ndarray, u: np.ndarray
+    ) -> Tuple[np.ndarray, float, bool, str]:
+        """Dispatch Dykstra projection to native Rust C-ABI when enabled and in-bounds, else Python."""
+        if (
+            self.use_native_rust
+            and 0 < self.dynamics.control_dim <= 16
+            and A.shape[0] <= 32
+        ):
+            try:
+                from .rust_shim import NativeRTGateLib
+
+                lib = NativeRTGateLib.get()
+            except Exception:
+                lib = None
+            if lib is not None:
+                res = lib.cbf_project(
+                    A,
+                    b,
+                    u,
+                    self.u_min,
+                    self.u_max,
+                    max_iters=self.max_iters,
+                    tol=self.tol,
+                )
+                if res.get("status_code") in (0, 1):
+                    return (
+                        np.asarray(res["u_filtered"], dtype=np.float64),
+                        float(res["min_barrier_slack"]),
+                        bool(res["verified_safe"]),
+                        "native_rust",
+                    )
+
+        result, residual, verified = self._solve_dykstra(A, b, u)
+        return result, residual, verified, "python_numpy"
+
     def filter(self, x: np.ndarray, u_nominal: Sequence[float]) -> Dict[str, Any]:
         t0 = time.perf_counter()
         x = np.asarray(x, dtype=np.float64).flatten()
@@ -668,7 +706,7 @@ class StateCBFSafetyFilter:
             }
 
         m = A.shape[0]
-        result, residual, verified = self._solve_dykstra(A, b, u)
+        result, residual, verified, solver_backend = self._solve_projection(A, b, u)
         if verified:
             latency_ms = (time.perf_counter() - t0) * 1000.0
             return {
@@ -679,6 +717,7 @@ class StateCBFSafetyFilter:
                 "min_barrier_slack": round(residual, 9),
                 "conformal_margin": self.conformal_margin,
                 "n_barriers": m,
+                "solver_backend": solver_backend,
                 "latency_ms": round(latency_ms, 4),
             }
 
@@ -687,7 +726,9 @@ class StateCBFSafetyFilter:
         n_hard = int(np.sum(hard_mask))
         n_soft = m - n_hard
         if n_soft > 0 and n_hard > 0:
-            res_hard, slack_hard, ok_hard = self._solve_dykstra(A[hard_mask], b[hard_mask], u)
+            res_hard, slack_hard, ok_hard, hard_backend = self._solve_projection(
+                A[hard_mask], b[hard_mask], u
+            )
             if ok_hard:
                 latency_ms = (time.perf_counter() - t0) * 1000.0
                 return {
@@ -699,6 +740,7 @@ class StateCBFSafetyFilter:
                     "conformal_margin": self.conformal_margin,
                     "n_barriers": m,
                     "relaxed_soft_barriers": n_soft,
+                    "solver_backend": hard_backend,
                     "latency_ms": round(latency_ms, 4),
                 }
 
@@ -718,6 +760,7 @@ class StateCBFSafetyFilter:
                 "min_barrier_slack": round(backup_slack, 9),
                 "conformal_margin": self.conformal_margin,
                 "n_barriers": m,
+                "solver_backend": solver_backend,
                 "latency_ms": round(latency_ms, 4),
             }
 
@@ -729,6 +772,7 @@ class StateCBFSafetyFilter:
             "min_barrier_slack": round(residual, 9),
             "conformal_margin": self.conformal_margin,
             "n_barriers": m,
+            "solver_backend": solver_backend,
             "latency_ms": round(latency_ms, 4),
         }
 

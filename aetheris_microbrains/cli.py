@@ -1001,7 +1001,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rr.add_argument("--max-ke", type=float, default=None, help="Optional counterfactual max kinetic energy (J)")
     p_rr.add_argument("--max-force", type=float, default=None, help="Optional counterfactual max contact force (N)")
     p_rr.add_argument("--conformal-margin", type=float, default=0.0, help="Conformal margin to apply during replay")
+    p_rr.add_argument("--synthesize-safety-patch", action="store_true", help="Synthesize tightened PhysicalSafetyIR rules and FleetPolicyBundle from incident frames")
+    p_rr.add_argument("--org-id", default="local-org", help="Organization ID for synthesized safety patch bundle")
+    p_rr.add_argument("--key-env", default="AETHERIS_FLEET_SIGNING_KEY", help="Optional HMAC signing key env var")
     p_rr.add_argument("--json", action="store_true", help="Output flight replay report as JSON")
+
+    p_rb = sub.add_parser("robo-bench", help="Run 6-scenario closed-loop embodied robotics safety benchmark suite")
+    p_rb.add_argument("--native-rust", action="store_true", help="Dispatch CBF QP projections to NativeRTGateLib ctypes backend when built")
+    p_rb.add_argument("--json", action="store_true", help="Output full robotics benchmark report as JSON")
 
     p_ir = sub.add_parser("policy-ir-check", help="Verify single-source policy_ir.json parity across Python and Rust")
     p_ir.add_argument("--json", action="store_true", help="Output parity report as JSON")
@@ -1081,6 +1088,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if known.command == "robo-replay":
+        if bool(getattr(known, "synthesize_safety_patch", False)):
+            from .core.robotics_policy_synthesizer import synthesize_safety_patch_from_flight_log
+
+            key_raw = str(os.environ.get(known.key_env) or "").strip()
+            margin = float(known.conformal_margin) if float(known.conformal_margin) > 0.0 else 0.05
+            rep = synthesize_safety_patch_from_flight_log(
+                known.log,
+                org_id=str(known.org_id),
+                signing_key=key_raw.encode("utf-8") if key_raw else None,
+                extra_safety_margin=margin,
+            )
+            if known.json:
+                print(json.dumps(rep, indent=2, ensure_ascii=False))
+            else:
+                cf = rep.get("counterfactual_verification") or {}
+                print(
+                    f"verified_integrity={rep.get('verified_integrity')} | "
+                    f"incidents={rep.get('incident_frame_count')}/{rep.get('total_frame_count')} | "
+                    f"rules={len(rep.get('synthesized_rules') or [])} | "
+                    f"before_intervene={cf.get('before_would_intervene')} | "
+                    f"after_intervene={cf.get('after_would_intervene')}"
+                )
+            return 0 if rep.get("verified_integrity") else 2
+
         from .core.flight_recorder import replay_flight_log
 
         hard_limits: Dict[str, Any] = {}
@@ -1105,6 +1136,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"violations={len(rep.get('violations') or [])}"
             )
         return 0 if rep.get("verified_integrity") else 2
+
+    if known.command == "robo-bench":
+        from .core.robotics_benchmark_harness import run_robotics_benchmark_suite
+
+        rep = run_robotics_benchmark_suite(use_native_rust=bool(known.native_rust))
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            s = rep.get("summary") or {}
+            print(
+                f"scenarios={s.get('passed_scenarios')}/{s.get('total_scenarios')} | "
+                f"violations={s.get('total_violations')}/{s.get('total_steps')} ({s.get('overall_violation_rate_pct')}%) | "
+                f"interventions={s.get('total_interventions')} | backend={s.get('backend')}"
+            )
+        return 0 if (rep.get("summary") or {}).get("all_passed") else 2
 
     if known.command == "policy-ir-check":
         from .core.policy_ir import verify_policy_ir_parity

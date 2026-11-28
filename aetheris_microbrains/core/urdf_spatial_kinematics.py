@@ -123,6 +123,44 @@ def exp_se3(xi: Sequence[float], theta: Optional[float] = None) -> np.ndarray:
     return T
 
 
+def log_so3(R: np.ndarray) -> np.ndarray:
+    """Logarithm map ``SO(3) -> R^3`` returning rotation vector ``phi`` such that ``exp_so3(phi) == R``."""
+    R_arr = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    trace = float(np.trace(R_arr))
+    cos_theta = float(np.clip(0.5 * (trace - 1.0), -1.0, 1.0))
+    theta = math.acos(cos_theta)
+    if theta < 1e-8:
+        scale = 0.5 + (theta * theta) / 12.0
+        return scale * np.array(
+            [
+                R_arr[2, 1] - R_arr[1, 2],
+                R_arr[0, 2] - R_arr[2, 0],
+                R_arr[1, 0] - R_arr[0, 1],
+            ],
+            dtype=np.float64,
+        )
+    if math.pi - theta < 1e-6:
+        diag = np.diag(R_arr)
+        idx = int(np.argmax(diag))
+        v = np.zeros(3, dtype=np.float64)
+        denom = math.sqrt(max(1e-15, 2.0 * (1.0 + float(diag[idx]))))
+        for j in range(3):
+            v[j] = (R_arr[idx, j] + R_arr[j, idx]) / denom
+        v[idx] = 0.5 * denom
+        norm_v = float(np.linalg.norm(v))
+        if norm_v > 1e-15:
+            v = v / norm_v
+        return theta * v
+    return (theta / (2.0 * math.sin(theta))) * np.array(
+        [
+            R_arr[2, 1] - R_arr[1, 2],
+            R_arr[0, 2] - R_arr[2, 0],
+            R_arr[1, 0] - R_arr[0, 1],
+        ],
+        dtype=np.float64,
+    )
+
+
 def adjoint_se3(T: np.ndarray) -> np.ndarray:
     """Return 6x6 SE(3) Adjoint matrix ``Ad_T`` in ``[omega; v]`` ordering.
 
@@ -447,7 +485,18 @@ class _BodyNode:
 
 
 class URDFRobotModel:
-    """Pure-NumPy URDF spatial kinematics, RNEA/CRBA dynamics, and self-collision CBF builder."""
+    """Pure-NumPy URDF spatial kinematics, RNEA/CRBA dynamics, and self-collision CBF builder.
+
+    Supports both fixed-base (``floating_base=False``, default) and free-floating
+    legged/humanoid trees (``floating_base=True``):
+
+    - Fixed-base: ``n_q = n_v = n_dof = n_joints`` with ``q = q_joints``.
+    - Floating-base: ``n_q = n_v = n_dof = 6 + n_joints`` with
+      ``q = [p_b (3), phi_b (3), q_joints (n_joints)]`` where ``p_b`` is the root
+      link position in world frame and ``phi_b`` is the 3D world rotation vector
+      (``R_b = exp_so3(phi_b)``); tangent velocity is
+      ``v = [v_b_world (3), omega_b_world (3), qdot_joints (n_joints)]``.
+    """
 
     _SUPPORTED_JOINTS = ("revolute", "continuous", "prismatic", "fixed")
 
@@ -461,22 +510,47 @@ class URDFRobotModel:
         dq_max: np.ndarray,
         u_min: np.ndarray,
         u_max: np.ndarray,
+        floating_base: bool = False,
     ):
         self.name = name
         self._nodes = nodes
+        self.floating_base = bool(floating_base)
+        self._base_offset = 6 if self.floating_base else 0
         self.n_links = len(nodes)
-        self.n_dof = len(joint_names)
+        self.n_joints = len(joint_names)
+        self.n_q = self._base_offset + self.n_joints
+        self.n_v = self._base_offset + self.n_joints
+        self.n_dof = self.n_v
         self.joint_names = list(joint_names)
         self.link_names = [n.link_name for n in nodes]
         self._link_name_to_idx: Dict[str, int] = {n.link_name: n.link_idx for n in nodes}
         self.root_link_name = nodes[0].link_name
         self.end_effector_link_name = self._select_default_ee_link()
+        self.total_mass = float(sum(n.mass for n in nodes))
 
-        self.q_min = np.asarray(q_min, dtype=np.float64).flatten()
-        self.q_max = np.asarray(q_max, dtype=np.float64).flatten()
-        self.dq_max = np.asarray(dq_max, dtype=np.float64).flatten()
-        self.u_min = np.asarray(u_min, dtype=np.float64).flatten()
-        self.u_max = np.asarray(u_max, dtype=np.float64).flatten()
+        q_min_arr = np.asarray(q_min, dtype=np.float64).flatten()
+        q_max_arr = np.asarray(q_max, dtype=np.float64).flatten()
+        dq_max_arr = np.asarray(dq_max, dtype=np.float64).flatten()
+        u_min_arr = np.asarray(u_min, dtype=np.float64).flatten()
+        u_max_arr = np.asarray(u_max, dtype=np.float64).flatten()
+
+        if self.floating_base:
+            if q_min_arr.shape[0] == self.n_joints:
+                q_min_arr = np.concatenate([np.full(6, -math.inf, dtype=np.float64), q_min_arr])
+            if q_max_arr.shape[0] == self.n_joints:
+                q_max_arr = np.concatenate([np.full(6, math.inf, dtype=np.float64), q_max_arr])
+            if dq_max_arr.shape[0] == self.n_joints:
+                dq_max_arr = np.concatenate([np.full(6, math.inf, dtype=np.float64), dq_max_arr])
+            if u_min_arr.shape[0] == self.n_joints:
+                u_min_arr = np.concatenate([np.full(6, -math.inf, dtype=np.float64), u_min_arr])
+            if u_max_arr.shape[0] == self.n_joints:
+                u_max_arr = np.concatenate([np.full(6, math.inf, dtype=np.float64), u_max_arr])
+
+        self.q_min = q_min_arr
+        self.q_max = q_max_arr
+        self.dq_max = dq_max_arr
+        self.u_min = u_min_arr
+        self.u_max = u_max_arr
         self.collision_capsules: Dict[str, List[CollisionCapsule]] = {
             n.link_name: list(n.capsules) for n in nodes if n.capsules
         }
@@ -487,7 +561,7 @@ class URDFRobotModel:
         return leaves[-1] if leaves else self._nodes[-1].link_name
 
     @classmethod
-    def from_urdf_string(cls, xml_str: str) -> "URDFRobotModel":
+    def from_urdf_string(cls, xml_str: str, floating_base: bool = False) -> "URDFRobotModel":
         """Parse a ``URDFRobotModel`` safely from a URDF XML string."""
         root_elem = _safe_parse_urdf_xml(xml_str)
         robot_name = root_elem.get("name", "urdf_robot")
@@ -711,14 +785,17 @@ class URDFRobotModel:
             dq_max=np.asarray(dq_max_list, dtype=np.float64),
             u_min=np.asarray(u_min_list, dtype=np.float64),
             u_max=np.asarray(u_max_list, dtype=np.float64),
+            floating_base=floating_base,
         )
 
     @classmethod
-    def from_urdf_file(cls, path: Union[str, Path]) -> "URDFRobotModel":
+    def from_urdf_file(
+        cls, path: Union[str, Path], floating_base: bool = False
+    ) -> "URDFRobotModel":
         """Load and parse a ``URDFRobotModel`` from a filesystem URDF path."""
         urdf_path = Path(path)
         xml_text = urdf_path.read_text(encoding="utf-8")
-        return cls.from_urdf_string(xml_text)
+        return cls.from_urdf_string(xml_text, floating_base=floating_base)
 
     def _validate_q(self, q: Sequence[float], label: str = "q") -> np.ndarray:
         arr = np.asarray(q, dtype=np.float64).flatten()
@@ -726,12 +803,39 @@ class URDFRobotModel:
             raise ValueError(f"Expected {label} of length {self.n_dof}, got {arr.shape[0]}")
         return arr
 
-    def _parent_to_child_pose(self, node: _BodyNode, q_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Return ``(R_parent_child, r_parent_child)`` for ``node`` at joint configuration ``q_arr``."""
+    def _split_q(self, q_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(p_b, R_b, q_joints)`` for fixed-base or floating-base configuration."""
+        if not self.floating_base:
+            return np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64), q_arr
+        return q_arr[:3], exp_so3(q_arr[3:6]), q_arr[6:]
+
+    def _split_v(self, v_arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(v_b_world, omega_b_world, dq_joints)`` for fixed-base or floating-base velocity."""
+        if not self.floating_base:
+            return np.zeros(3, dtype=np.float64), np.zeros(3, dtype=np.float64), v_arr
+        return v_arr[:3], v_arr[3:6], v_arr[6:]
+
+    def integrate_configuration(
+        self, q: Sequence[float], v: Sequence[float], dt: float = 1.0
+    ) -> np.ndarray:
+        """Advance configuration ``q`` along tangent velocity ``v`` over ``dt`` on ``SE(3) x R^{n_j}``."""
+        q_arr = self._validate_q(q, "q")
+        v_arr = self._validate_q(v, "v")
+        dt_f = float(dt)
+        if not self.floating_base:
+            return q_arr + dt_f * v_arr
+        p_new = q_arr[:3] + dt_f * v_arr[:3]
+        R_new = exp_so3(dt_f * v_arr[3:6]) @ exp_so3(q_arr[3:6])
+        phi_new = log_so3(R_new)
+        q_j_new = q_arr[6:] + dt_f * v_arr[6:]
+        return np.concatenate([p_new, phi_new, q_j_new])
+
+    def _parent_to_child_pose(self, node: _BodyNode, q_joints: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(R_parent_child, r_parent_child)`` for ``node`` at joint configuration ``q_joints``."""
         jtype = node.joint_type
         if jtype == "fixed":
             return node.origin_R, node.origin_t
-        qd = float(q_arr[node.dof_index])  # type: ignore[index]
+        qd = float(q_joints[node.dof_index])  # type: ignore[index]
         if jtype in ("revolute", "continuous"):
             R_j = _fast_unit_axis_rodrigues(node.axis, qd)
             return node.origin_R @ R_j, node.origin_t
@@ -742,24 +846,29 @@ class URDFRobotModel:
     # Forward Kinematics & Analytical Jacobians
     # ------------------------------------------------------------------
 
-    def forward_kinematics(self, q: Sequence[float]) -> Dict[str, np.ndarray]:
-        """Compute 4x4 world homogeneous transforms ``T_world_link`` for all links in O(n_dof)."""
-        q_arr = self._validate_q(q, "q")
-        transforms: List[np.ndarray] = [np.eye(4, dtype=np.float64)]
-        out: Dict[str, np.ndarray] = {self._nodes[0].link_name: transforms[0]}
-
+    def _forward_kinematics_list(self, q_arr: np.ndarray) -> List[np.ndarray]:
+        p_b, R_b, q_j = self._split_q(q_arr)
+        T0 = np.eye(4, dtype=np.float64)
+        T0[:3, :3] = R_b
+        T0[:3, 3] = p_b
+        transforms: List[np.ndarray] = [T0]
         for k in range(1, self.n_links):
             node = self._nodes[k]
             T_parent = transforms[node.parent_idx]
             R_w_p = T_parent[:3, :3]
             p_w_p = T_parent[:3, 3]
-            R_p_k, r_p_k = self._parent_to_child_pose(node, q_arr)
+            R_p_k, r_p_k = self._parent_to_child_pose(node, q_j)
             T_w_k = np.eye(4, dtype=np.float64)
             T_w_k[:3, :3] = R_w_p @ R_p_k
             T_w_k[:3, 3] = p_w_p + R_w_p @ r_p_k
             transforms.append(T_w_k)
-            out[node.link_name] = T_w_k
-        return out
+        return transforms
+
+    def forward_kinematics(self, q: Sequence[float]) -> Dict[str, np.ndarray]:
+        """Compute 4x4 world homogeneous transforms ``T_world_link`` for all links in O(n_dof)."""
+        q_arr = self._validate_q(q, "q")
+        transforms = self._forward_kinematics_list(q_arr)
+        return {self._nodes[k].link_name: transforms[k] for k in range(self.n_links)}
 
     def _chain_kinematics(
         self, q_arr: np.ndarray, link_idx: int
@@ -774,8 +883,10 @@ class URDFRobotModel:
     ]:
         """Evaluate world pose and active joint axes along the root-to-link chain."""
         chain = self._nodes[link_idx].ancestor_chain
-        R_w = np.eye(3, dtype=np.float64)
-        p_w = np.zeros(3, dtype=np.float64)
+        p_w, R_w, q_j = self._split_q(q_arr)
+        p_w = p_w.copy()
+        R_w = R_w.copy()
+        dof_offset = self._base_offset
 
         rev_dofs: List[int] = []
         rev_axes: List[np.ndarray] = []
@@ -785,17 +896,17 @@ class URDFRobotModel:
 
         for idx in chain[1:]:
             node = self._nodes[idx]
-            R_p_k, r_p_k = self._parent_to_child_pose(node, q_arr)
+            R_p_k, r_p_k = self._parent_to_child_pose(node, q_j)
             p_w = p_w + R_w @ r_p_k
             R_w = R_w @ R_p_k
             if node.dof_index is not None:
                 z_world = R_w @ node.axis
                 if node.joint_type in ("revolute", "continuous"):
-                    rev_dofs.append(node.dof_index)
+                    rev_dofs.append(dof_offset + node.dof_index)
                     rev_axes.append(z_world)
                     rev_origins.append(p_w)
                 else:
-                    pris_dofs.append(node.dof_index)
+                    pris_dofs.append(dof_offset + node.dof_index)
                     pris_axes.append(z_world)
 
         return R_w, p_w, rev_dofs, rev_axes, rev_origins, pris_dofs, pris_axes
@@ -806,7 +917,7 @@ class URDFRobotModel:
         link_name: str,
         local_point: Sequence[float] = (0.0, 0.0, 0.0),
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute ``(world_point_3d, J_linear_3xn)`` analytically in O(n_dof) with zero finite differences."""
+        """Compute ``(world_point_3d, J_linear_3xn_v)`` analytically in O(n_dof) with zero finite differences."""
         if link_name not in self._link_name_to_idx:
             raise KeyError(f"Unknown link name: {link_name!r}")
         q_arr = self._validate_q(q, "q")
@@ -819,7 +930,11 @@ class URDFRobotModel:
             q_arr, link_idx
         )
         p_world = p_w + R_w @ pt_local
-        J_lin = np.zeros((3, self.n_dof), dtype=np.float64)
+        J_lin = np.zeros((3, self.n_v), dtype=np.float64)
+
+        if self.floating_base:
+            J_lin[:, 0:3] = np.eye(3, dtype=np.float64)
+            J_lin[:, 3:6] = -hat_so3(p_world - q_arr[:3])
 
         if rev_dofs:
             Z = np.asarray(rev_axes, dtype=np.float64)
@@ -835,7 +950,7 @@ class URDFRobotModel:
         q: Sequence[float],
         link_name: Optional[str] = None,
     ) -> np.ndarray:
-        """Compute 6 x n_dof world-aligned geometric Jacobian ``[J_angular; J_linear]``."""
+        """Compute 6 x n_v world-aligned geometric Jacobian ``[J_angular; J_linear]``."""
         target = self.end_effector_link_name if link_name is None else link_name
         if target not in self._link_name_to_idx:
             raise KeyError(f"Unknown link name: {target!r}")
@@ -845,7 +960,11 @@ class URDFRobotModel:
             q_arr, link_idx
         )
 
-        J = np.zeros((6, self.n_dof), dtype=np.float64)
+        J = np.zeros((6, self.n_v), dtype=np.float64)
+        if self.floating_base:
+            J[:3, 3:6] = np.eye(3, dtype=np.float64)
+            J[3:6, 0:3] = np.eye(3, dtype=np.float64)
+            J[3:6, 3:6] = -hat_so3(p_ee - q_arr[:3])
         if rev_dofs:
             Z = np.asarray(rev_axes, dtype=np.float64)
             O = np.asarray(rev_origins, dtype=np.float64)
@@ -859,11 +978,12 @@ class URDFRobotModel:
         self, q_arr: np.ndarray, link_idx: int, local_p0: np.ndarray, local_p1: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
         chain = self._nodes[link_idx].ancestor_chain
-        R_w = np.eye(3, dtype=np.float64)
-        p_w = np.zeros(3, dtype=np.float64)
+        p_w, R_w, q_j = self._split_q(q_arr)
+        p_w = p_w.copy()
+        R_w = R_w.copy()
         for idx in chain[1:]:
             node = self._nodes[idx]
-            R_p_k, r_p_k = self._parent_to_child_pose(node, q_arr)
+            R_p_k, r_p_k = self._parent_to_child_pose(node, q_j)
             p_w = p_w + R_w @ r_p_k
             R_w = R_w @ R_p_k
         return p_w + R_w @ local_p0, p_w + R_w @ local_p1
@@ -876,8 +996,14 @@ class URDFRobotModel:
         )
         w0 = p_w + R_w @ local_p0
         w1 = p_w + R_w @ local_p1
-        J0 = np.zeros((3, self.n_dof), dtype=np.float64)
-        J1 = np.zeros((3, self.n_dof), dtype=np.float64)
+        J0 = np.zeros((3, self.n_v), dtype=np.float64)
+        J1 = np.zeros((3, self.n_v), dtype=np.float64)
+        if self.floating_base:
+            p_b = q_arr[:3]
+            J0[:, 0:3] = np.eye(3, dtype=np.float64)
+            J1[:, 0:3] = np.eye(3, dtype=np.float64)
+            J0[:, 3:6] = -hat_so3(w0 - p_b)
+            J1[:, 3:6] = -hat_so3(w1 - p_b)
         if rev_dofs:
             Z = np.asarray(rev_axes, dtype=np.float64)
             O = np.asarray(rev_origins, dtype=np.float64)
@@ -888,6 +1014,108 @@ class URDFRobotModel:
             J0[:, pris_dofs] = P_axes
             J1[:, pris_dofs] = P_axes
         return J0, J1
+
+    # ------------------------------------------------------------------
+    # Centroidal Kinematics & Orin-Goswami Centroidal Momentum Matrix
+    # ------------------------------------------------------------------
+
+    def _all_link_world_jacobians(
+        self, q_arr: np.ndarray
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """Compute world transforms and 6 x n_v world-aligned origin Jacobians for all links."""
+        transforms = self._forward_kinematics_list(q_arr)
+        J_list: List[np.ndarray] = []
+        J0 = np.zeros((6, self.n_v), dtype=np.float64)
+        if self.floating_base:
+            J0[:3, 3:6] = np.eye(3, dtype=np.float64)
+            J0[3:6, 0:3] = np.eye(3, dtype=np.float64)
+        J_list.append(J0)
+
+        dof_offset = self._base_offset
+        for k in range(1, self.n_links):
+            node = self._nodes[k]
+            p = node.parent_idx
+            J_p = J_list[p]
+            r_pk_w = transforms[k][:3, 3] - transforms[p][:3, 3]
+            J_k = np.empty((6, self.n_v), dtype=np.float64)
+            J_k[:3, :] = J_p[:3, :]
+            J_k[3:6, :] = J_p[3:6, :] - hat_so3(r_pk_w) @ J_p[:3, :]
+            if node.dof_index is not None:
+                d = dof_offset + node.dof_index
+                z_w = transforms[k][:3, :3] @ node.axis
+                if node.joint_type in ("revolute", "continuous"):
+                    J_k[:3, d] += z_w
+                else:
+                    J_k[3:6, d] += z_w
+            J_list.append(J_k)
+        return transforms, J_list
+
+    def center_of_mass(self, q: Sequence[float]) -> np.ndarray:
+        """Return 3D total Center of Mass ``p_com(q)`` in world frame."""
+        q_arr = self._validate_q(q, "q")
+        transforms = self._forward_kinematics_list(q_arr)
+        if self.total_mass <= 0.0:
+            return np.zeros(3, dtype=np.float64)
+        weighted = np.zeros(3, dtype=np.float64)
+        for k, node in enumerate(self._nodes):
+            if node.mass > 0.0:
+                T_k = transforms[k]
+                p_com_k = T_k[:3, 3] + T_k[:3, :3] @ node.com_xyz
+                weighted += node.mass * p_com_k
+        return weighted / self.total_mass
+
+    def com_jacobian(self, q: Sequence[float]) -> np.ndarray:
+        """Return analytical ``3 x n_v`` total Center of Mass Jacobian ``J_com(q)``."""
+        q_arr = self._validate_q(q, "q")
+        if self.total_mass <= 0.0:
+            return np.zeros((3, self.n_v), dtype=np.float64)
+        transforms, J_list = self._all_link_world_jacobians(q_arr)
+        J_com = np.zeros((3, self.n_v), dtype=np.float64)
+        for k, node in enumerate(self._nodes):
+            if node.mass > 0.0:
+                R_k = transforms[k][:3, :3]
+                J_k = J_list[k]
+                c_w = R_k @ node.com_xyz
+                J_com_k = J_k[3:6, :] - hat_so3(c_w) @ J_k[:3, :]
+                J_com += node.mass * J_com_k
+        return J_com / self.total_mass
+
+    def centroidal_momentum_matrix(self, q: Sequence[float]) -> np.ndarray:
+        """Compute Orin & Goswami's ``6 x n_v`` Centroidal Momentum Matrix ``A_G(q)``.
+
+        Satisfies ``h_G = [k_G; m_total * dp_com/dt] = A_G(q) @ v`` in the world-aligned
+        centroidal frame centered at ``p_com(q)``, with ``A_G[3:6, :] == m_total * J_com(q)``.
+        """
+        q_arr = self._validate_q(q, "q")
+        transforms, J_list = self._all_link_world_jacobians(q_arr)
+        if self.total_mass <= 0.0:
+            return np.zeros((6, self.n_v), dtype=np.float64)
+
+        weighted = np.zeros(3, dtype=np.float64)
+        for k, node in enumerate(self._nodes):
+            if node.mass > 0.0:
+                T_k = transforms[k]
+                weighted += node.mass * (T_k[:3, 3] + T_k[:3, :3] @ node.com_xyz)
+        p_com = weighted / self.total_mass
+
+        A_G = np.zeros((6, self.n_v), dtype=np.float64)
+        for k, node in enumerate(self._nodes):
+            if node.mass <= 0.0 and not np.any(node.spatial_inertia):
+                continue
+            T_k = transforms[k]
+            R_k = T_k[:3, :3]
+            r_Gk = T_k[:3, 3] - p_com
+            X_Gk_star = np.zeros((6, 6), dtype=np.float64)
+            X_Gk_star[:3, :3] = R_k
+            X_Gk_star[:3, 3:] = hat_so3(r_Gk) @ R_k
+            X_Gk_star[3:, 3:] = R_k
+
+            J_k = J_list[k]
+            J_k_body = np.empty((6, self.n_v), dtype=np.float64)
+            J_k_body[:3, :] = R_k.T @ J_k[:3, :]
+            J_k_body[3:6, :] = R_k.T @ J_k[3:6, :]
+            A_G += X_Gk_star @ node.spatial_inertia @ J_k_body
+        return A_G
 
     # ------------------------------------------------------------------
     # Featherstone RNEA, CRBA, Energy & Euler-Lagrange Wiring
@@ -912,18 +1140,33 @@ class URDFRobotModel:
         if g_vec.shape[0] != 3:
             raise ValueError(f"gravity must be a 3-vector, got shape {g_vec.shape}")
 
+        _, R_b, q_j = self._split_q(q_arr)
+        v_b_w, w_b_w, dq_j = self._split_v(dq_arr)
+        a_b_w, alpha_b_w, ddq_j = self._split_v(ddq_arr)
+
         v_links = [np.zeros(6, dtype=np.float64) for _ in range(self.n_links)]
         a_links = [np.zeros(6, dtype=np.float64) for _ in range(self.n_links)]
         f_links = [np.zeros(6, dtype=np.float64) for _ in range(self.n_links)]
         X_up = [np.eye(6, dtype=np.float64) for _ in range(self.n_links)]
 
-        a_links[0][3:6] = -g_vec
+        if self.floating_base:
+            R_b_T = R_b.T
+            w_0_b = R_b_T @ w_b_w
+            v_0_b = R_b_T @ v_b_w
+            v_links[0] = np.concatenate([w_0_b, v_0_b])
+            a_0_ang_b = R_b_T @ alpha_b_w
+            a_0_lin_b = R_b_T @ (a_b_w - g_vec) - np.cross(w_0_b, v_0_b)
+            a_links[0] = np.concatenate([a_0_ang_b, a_0_lin_b])
+            I_0 = self._nodes[0].spatial_inertia
+            f_links[0] = (I_0 @ a_links[0]) + spatial_cross_force(v_links[0], I_0 @ v_links[0])
+        else:
+            a_links[0][3:6] = -g_vec
 
         # Forward pass: root -> leaves
         for k in range(1, self.n_links):
             node = self._nodes[k]
             p = node.parent_idx
-            R_p_k, r_p_k = self._parent_to_child_pose(node, q_arr)
+            R_p_k, r_p_k = self._parent_to_child_pose(node, q_j)
             X_kp = _plucker_motion_from_parent(R_p_k, r_p_k)
             X_up[k] = X_kp
 
@@ -932,11 +1175,11 @@ class URDFRobotModel:
                 a_k = X_kp @ a_links[p]
             else:
                 d = node.dof_index
-                v_j = node.motion_subspace * float(dq_arr[d])
+                v_j = node.motion_subspace * float(dq_j[d])
                 v_k = (X_kp @ v_links[p]) + v_j
                 a_k = (
                     (X_kp @ a_links[p])
-                    + node.motion_subspace * float(ddq_arr[d])
+                    + node.motion_subspace * float(ddq_j[d])
                     + spatial_cross_motion(v_k, v_j)
                 )
 
@@ -947,32 +1190,39 @@ class URDFRobotModel:
 
         # Backward pass: leaves -> root
         tau = np.zeros(self.n_dof, dtype=np.float64)
+        dof_offset = self._base_offset
         for k in range(self.n_links - 1, 0, -1):
             node = self._nodes[k]
             if node.dof_index is not None:
-                tau[node.dof_index] = float(np.dot(node.motion_subspace, f_links[k]))
+                tau[dof_offset + node.dof_index] = float(np.dot(node.motion_subspace, f_links[k]))
             p = node.parent_idx
-            if p > 0:
+            if p > 0 or (p == 0 and self.floating_base):
                 f_links[p] = f_links[p] + (X_up[k].T @ f_links[k])
+
+        if self.floating_base:
+            tau[0:3] = R_b @ f_links[0][3:6]
+            tau[3:6] = R_b @ f_links[0][:3]
         return tau
 
     def mass_matrix_crba(self, q: Sequence[float]) -> np.ndarray:
         """Compute symmetric positive-definite joint-space inertia matrix ``M(q)`` via CRBA."""
         q_arr = self._validate_q(q, "q")
+        _, R_b, q_j = self._split_q(q_arr)
         X_up = [np.eye(6, dtype=np.float64) for _ in range(self.n_links)]
         I_comp = [node.spatial_inertia.copy() for node in self._nodes]
 
         for k in range(1, self.n_links):
             node = self._nodes[k]
-            R_p_k, r_p_k = self._parent_to_child_pose(node, q_arr)
+            R_p_k, r_p_k = self._parent_to_child_pose(node, q_j)
             X_up[k] = _plucker_motion_from_parent(R_p_k, r_p_k)
 
-        M = np.zeros((self.n_dof, self.n_dof), dtype=np.float64)
+        M = np.zeros((self.n_v, self.n_v), dtype=np.float64)
+        dof_offset = self._base_offset
         for k in range(self.n_links - 1, 0, -1):
             node = self._nodes[k]
             p = node.parent_idx
             if node.dof_index is not None:
-                di = node.dof_index
+                di = dof_offset + node.dof_index
                 F = I_comp[k] @ node.motion_subspace
                 M[di, di] = float(np.dot(node.motion_subspace, F))
 
@@ -982,14 +1232,29 @@ class URDFRobotModel:
                     curr = self._nodes[curr].parent_idx
                     anc_node = self._nodes[curr]
                     if anc_node.dof_index is not None:
-                        dj = anc_node.dof_index
+                        dj = dof_offset + anc_node.dof_index
                         val = float(np.dot(F, anc_node.motion_subspace))
                         M[di, dj] = val
                         M[dj, di] = val
 
+                if self.floating_base:
+                    F_0 = X_up[curr].T @ F
+                    f_w = R_b @ F_0[3:6]
+                    tau_w = R_b @ F_0[:3]
+                    M[0:3, di] = f_w
+                    M[di, 0:3] = f_w
+                    M[3:6, di] = tau_w
+                    M[di, 3:6] = tau_w
+
             if p >= 0:
                 X_kp = X_up[k]
                 I_comp[p] = I_comp[p] + (X_kp.T @ I_comp[k] @ X_kp)
+
+        if self.floating_base:
+            Q_rot = np.zeros((6, 6), dtype=np.float64)
+            Q_rot[:3, 3:6] = R_b.T
+            Q_rot[3:6, 0:3] = R_b.T
+            M[:6, :6] = Q_rot.T @ I_comp[0] @ Q_rot
 
         return 0.5 * (M + M.T)
 
