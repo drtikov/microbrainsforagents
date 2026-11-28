@@ -1232,4 +1232,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    if not __package__:
+        import importlib
+
+        _pkg_root = str(Path(__file__).resolve().parent.parent)
+        if _pkg_root not in sys.path:
+            sys.path.insert(0, _pkg_root)
+        raise SystemExit(importlib.import_module("aetheris_microbrains.cli").main())
     raise SystemExit(main())

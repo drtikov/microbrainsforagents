@@ -123,4 +123,4 @@ jobs:
       - name: Build Rust WASM library
         run: cargo build --release --target wasm32-unknown-unknown --lib --manifest-path rust/aetheris-gate/Cargo.toml
       - name: Run Rust/WASM Python verification tests
-        run: python -m pytest aetheris_microbrains/tests/test_rust_wasm_core.py aetheris_microbrains/tests/test_native_rt_ffi_and_wasm_teleop.py aetheris_microbrains/tests/test_humanoid_64dof_rust_cbf.py -q
+        run: python -m pytest aetheris_microbrains/tests/test_rust_wasm_core.py aetheris_microbrains/tests/test_native_rt_ffi_and_wasm_teleop.py aetheris_microbrains/tests/test_humanoid_64dof_rust_cbf.py aetheris_microbrains/tests/test_differentiable_clf_cbf.py -q

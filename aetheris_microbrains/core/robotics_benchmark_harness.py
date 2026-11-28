@@ -683,6 +683,7 @@ def _scenario_actuator_thermal_derating(native_lib: NativeRTGateLib | None) -> D
 
 def run_robotics_benchmark_suite(use_native_rust: bool = False) -> Dict[str, Any]:
     """Execute all 6 deterministic closed-loop embodied safety scenarios."""
+    native_available = NativeRTGateLib.is_available()
     native_lib = NativeRTGateLib.get() if use_native_rust else None
 
     scenarios: Dict[str, Dict[str, Any]] = {
@@ -711,7 +712,7 @@ def run_robotics_benchmark_suite(use_native_rust: bool = False) -> Dict[str, Any
             "overall_violation_rate_pct": round(100.0 * total_violations / max(1, total_steps), 4),
             "total_interventions": total_interventions,
             "use_native_rust": bool(use_native_rust),
-            "native_rust_available": native_lib is not None,
+            "native_rust_available": bool(native_available),
             "backend": "rust_cdylib" if native_lib is not None else "python_numpy",
         },
     }

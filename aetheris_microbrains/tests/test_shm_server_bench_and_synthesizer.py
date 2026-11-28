@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import ast
+import json
 import multiprocessing
 import re
 import struct
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -19,6 +22,7 @@ from aetheris_microbrains.core.robotics_benchmark_harness import run_robotics_be
 from aetheris_microbrains.core.robotics_policy_synthesizer import (
     synthesize_safety_patch_from_flight_log,
 )
+from aetheris_microbrains.core.rust_shim import NativeRTGateLib
 from aetheris_microbrains.core.semantic_cbf_compiler import PhysicalSafetyIR
 from aetheris_microbrains.core.shm_sensorimotor_bus import (
     _HEADER_SIZE,
@@ -229,6 +233,25 @@ def test_run_robotics_benchmark_suite_six_scenarios_zero_violations():
     assert summary["all_passed"] is True
     assert summary["total_violations"] == 0
     assert summary["overall_violation_rate_pct"] == 0.0
+    assert summary["use_native_rust"] is False
+    assert summary["backend"] == "python_numpy"
+    assert summary["native_rust_available"] == NativeRTGateLib.is_available()
+
+
+def test_cli_direct_file_invocation_supports_late_relative_imports():
+    repo_root = Path(__file__).resolve().parents[2]
+    cli_path = repo_root / "aetheris_microbrains" / "cli.py"
+    for args in (["unitree-doctor", "--robot", "go2", "--json"], ["robo-bench", "--json"]):
+        proc = subprocess.run(
+            [sys.executable, str(cli_path), *args],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, f"{args} failed: {proc.stderr}"
+        payload = json.loads(proc.stdout)
+        assert isinstance(payload, dict)
 
 
 def test_microbrain_server_v1_robotics_routes(monkeypatch):

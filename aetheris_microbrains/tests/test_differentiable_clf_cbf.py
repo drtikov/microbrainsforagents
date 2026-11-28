@@ -65,11 +65,20 @@ class TestNativeRustBackendParity:
         assert np.allclose(out_rs["u_filtered"], out_py["u_filtered"], atol=1e-9)
 
     def test_native_rust_falls_back_gracefully_when_limits_exceeded(self):
-        # control_dim = 17 exceeds MAX_DIM = 16 -> seamless fallback to python_numpy
-        dyn = LinearDynamics(np.zeros((17, 17)), np.eye(17))
-        bar = HalfPlaneBarrier(a=[1.0] + [0.0] * 16, b=0.0, alpha=1.0)
-        filt = StateCBFSafetyFilter(dyn, [bar], u_min=-2.0 * np.ones(17), u_max=2.0 * np.ones(17), use_native_rust=True)
-        out = filt.filter(np.zeros(17), np.array([-1.0] + [0.5] * 16))
+        # control_dim = 64 is within MAX_DIM = 64 (native_rust when built)
+        dyn_ok = LinearDynamics(np.zeros((64, 64)), np.eye(64))
+        bar_ok = HalfPlaneBarrier(a=[1.0] + [0.0] * 63, b=0.0, alpha=1.0)
+        filt_ok = StateCBFSafetyFilter(dyn_ok, [bar_ok], u_min=-2.0 * np.ones(64), u_max=2.0 * np.ones(64), use_native_rust=True)
+        out_ok = filt_ok.filter(np.zeros(64), np.array([-1.0] + [0.5] * 63))
+        assert out_ok["verified_safe"] is True
+        expected_backend = "native_rust" if NativeRTGateLib.is_available() else "python_numpy"
+        assert out_ok["solver_backend"] == expected_backend
+
+        # control_dim = 65 exceeds MAX_DIM = 64 -> seamless fallback to python_numpy
+        dyn = LinearDynamics(np.zeros((65, 65)), np.eye(65))
+        bar = HalfPlaneBarrier(a=[1.0] + [0.0] * 64, b=0.0, alpha=1.0)
+        filt = StateCBFSafetyFilter(dyn, [bar], u_min=-2.0 * np.ones(65), u_max=2.0 * np.ones(65), use_native_rust=True)
+        out = filt.filter(np.zeros(65), np.array([-1.0] + [0.5] * 64))
         assert out["verified_safe"] is True
         assert out["solver_backend"] == "python_numpy"
         assert out["u_filtered"][0] >= -1e-7
