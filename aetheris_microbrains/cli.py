@@ -1010,6 +1010,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rb.add_argument("--native-rust", action="store_true", help="Dispatch CBF QP projections to NativeRTGateLib ctypes backend when built")
     p_rb.add_argument("--json", action="store_true", help="Output full robotics benchmark report as JSON")
 
+    p_ud = sub.add_parser("unitree-doctor", help="Inspect Unitree hardware profile limits, CycloneDDS readiness, and safety bridge health")
+    p_ud.add_argument("--robot", default="g1_29dof", help="Unitree robot profile (go2, b2, z1, h1, h1_2, g1_23dof, g1_29dof, dex3_1)")
+    p_ud.add_argument("--json", action="store_true", help="Output diagnostic report as JSON")
+
     p_ir = sub.add_parser("policy-ir-check", help="Verify single-source policy_ir.json parity across Python and Rust")
     p_ir.add_argument("--json", action="store_true", help="Output parity report as JSON")
 
@@ -1151,6 +1155,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"interventions={s.get('total_interventions')} | backend={s.get('backend')}"
             )
         return 0 if (rep.get("summary") or {}).get("all_passed") else 2
+
+    if known.command == "unitree-doctor":
+        import importlib.util
+
+        from .core.unitree_safety_bridge import UNITREE_ROBOT_SPECS, SafeUnitreeLowLevelBridge
+
+        r_key = str(known.robot).strip().lower()
+        if r_key not in UNITREE_ROBOT_SPECS:
+            print(f"Unknown Unitree robot profile: {known.robot}", file=sys.stderr)
+            return 2
+        spec = UNITREE_ROBOT_SPECS[r_key]
+        bridge = SafeUnitreeLowLevelBridge(r_key)
+        sdk_installed = importlib.util.find_spec("unitree_sdk2_python") is not None
+        cyclonedds_home = str(os.environ.get("CYCLONEDDS_HOME") or "").strip()
+        rep = {
+            "ok": True,
+            "robot": spec.name,
+            "n_dof": spec.n_dof,
+            "idl_family": spec.idl_family,
+            "pr_ab_supported": spec.pr_ab_supported,
+            "unitree_sdk2_python_installed": sdk_installed,
+            "cyclonedds_home": cyclonedds_home or None,
+            "initial_lifecycle_state": bridge.lifecycle_state,
+            "recommended_subnet": "192.168.123.x",
+        }
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"unitree_ok=True | robot={spec.name} | dof={spec.n_dof} | idl={spec.idl_family} | "
+                f"sdk2={sdk_installed} | lifecycle={bridge.lifecycle_state}"
+            )
+        return 0
 
     if known.command == "policy-ir-check":
         from .core.policy_ir import verify_policy_ir_parity

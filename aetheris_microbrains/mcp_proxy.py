@@ -210,7 +210,7 @@ def is_embodied_mcp_tool(
         raw = raw.split("__", 2)[2]
     if (
         raw in _EMBODIED_EXACT_TOOLS
-        or raw.startswith(("ros2_", "ros2-", "moveit", "mavlink_", "mavlink-", "lerobot_", "lerobot-"))
+        or raw.startswith(("ros2_", "ros2-", "moveit", "mavlink_", "mavlink-", "lerobot_", "lerobot-", "unitree_", "unitree-", "sport_client_", "loco_client_", "dex3_", "rt_lowcmd"))
         or raw.endswith(_EMBODIED_SUFFIXES)
     ):
         return True
@@ -232,8 +232,10 @@ def _infer_embodied_protocol_and_payload(
         raw = raw.split("__", 2)[2]
 
     explicit_proto = str(arguments.get("protocol") or "").strip().lower()
-    if explicit_proto in ("ros2", "moveit2", "lerobot", "mavlink"):
+    if explicit_proto in ("ros2", "moveit2", "lerobot", "mavlink", "unitree"):
         protocol = explicit_proto
+    elif raw.startswith(("unitree_", "unitree-", "sport_client_", "loco_client_", "dex3_", "rt_lowcmd")):
+        protocol = "unitree"
     elif raw.startswith("moveit"):
         protocol = "moveit2"
     elif raw.startswith(("mavlink_", "mavlink-")) or raw == "mavlink":

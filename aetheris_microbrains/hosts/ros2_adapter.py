@@ -22,7 +22,7 @@ from aetheris_microbrains.core.embodied_threat_guard import (
 )
 
 
-SUPPORTED_PROTOCOLS = frozenset({"ros2", "moveit2", "lerobot", "mavlink"})
+SUPPORTED_PROTOCOLS = frozenset({"ros2", "moveit2", "lerobot", "mavlink", "unitree"})
 
 
 def _contains_non_finite(value: Any) -> bool:
@@ -150,6 +150,8 @@ class EmbodiedActionFirewall:
             return self._normalize_moveit2(payload)
         if proto == "lerobot":
             return self._normalize_lerobot(payload)
+        if proto == "unitree":
+            return self._normalize_unitree(payload)
         return self._normalize_mavlink(payload)
 
     def _finalize(
@@ -269,6 +271,55 @@ class EmbodiedActionFirewall:
 
         return self._finalize(
             protocol="ros2",
+            topic_or_action=topic_or_action,
+            actuator=actuator,
+            target_position=target_position,
+            linear_vel_mps=linear_vel_mps,
+            contact_force_n=contact_force_n,
+            kinetic_energy_j=kinetic_energy_j,
+            waypoints=waypoints,
+            payload=payload,
+        )
+
+    def _normalize_unitree(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        topic_or_action = str(
+            _first_present(payload, "topic_or_action", "rpc", "method", "action", "topic") or "unitree_cmd"
+        ).strip()
+        actuator = _first_present(payload, "actuator", "robot_model") or (
+            "dex3_hand" if "dex3" in topic_or_action.lower() else "unitree_body"
+        )
+        vx = payload.get("vx")
+        vy = payload.get("vy")
+        linear_vel_mps: Optional[float] = None
+        if vx is not None or vy is not None:
+            vx_f = _to_finite_float(vx or 0.0, "vx")
+            vy_f = _to_finite_float(vy or 0.0, "vy")
+            linear_vel_mps = math.hypot(vx_f, vy_f)
+        elif payload.get("linear_vel_mps") is not None:
+            linear_vel_mps = abs(_to_finite_float(payload["linear_vel_mps"], "linear_vel_mps"))
+
+        contact_force = _first_present(payload, "contact_force_n", "max_effort", "tau")
+        contact_force_n: Optional[float] = None
+        if isinstance(contact_force, (list, tuple)):
+            contact_force_n = max((abs(_to_finite_float(v, "tau")) for v in contact_force), default=0.0)
+        elif contact_force is not None:
+            contact_force_n = abs(_to_finite_float(contact_force, "contact_force_n"))
+
+        motor_cmds = payload.get("motor_cmd")
+        if isinstance(motor_cmds, (list, tuple)) and motor_cmds:
+            max_tau = 0.0
+            for mc in motor_cmds:
+                if isinstance(mc, Mapping) and mc.get("tau") is not None:
+                    max_tau = max(max_tau, abs(_to_finite_float(mc["tau"], "motor_cmd.tau")))
+            if contact_force_n is None:
+                contact_force_n = max_tau
+
+        ke_raw = payload.get("kinetic_energy_j")
+        kinetic_energy_j = _to_finite_float(ke_raw, "kinetic_energy_j") if ke_raw is not None else None
+        target_position = _extract_position_from_mapping(payload)
+        waypoints = _extract_waypoints(payload.get("waypoints"))
+        return self._finalize(
+            protocol="unitree",
             topic_or_action=topic_or_action,
             actuator=actuator,
             target_position=target_position,
@@ -429,6 +480,8 @@ class EmbodiedActionFirewall:
         scene_text: Optional[Any] = None,
         carrying_payload_n: Optional[float] = None,
         current_position: Optional[Union[Sequence[float], Mapping[str, Any]]] = None,
+        allow_acrobatic_stunts: bool = False,
+        base_speed_mps: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Validate, normalize, and authorize an embodied action payload."""
         if not isinstance(payload, Mapping):
@@ -465,6 +518,15 @@ class EmbodiedActionFirewall:
             }
 
         clamp_hints: Dict[str, Any] = {}
+
+        if normalized["protocol"] == "unitree":
+            act_low = str(normalized["topic_or_action"]).strip().lower()
+            if any(stunt in act_low for stunt in ("frontflip", "backflip", "jumpyaw", "zerotorque")) and not allow_acrobatic_stunts:
+                return self._deny("unitree_acrobatic_stunt_blocked", normalized, clamp_hints)
+            eff_base_speed = base_speed_mps if base_speed_mps is not None else payload.get("base_speed_mps")
+            if ("standdown" in act_low or "zerotorque" in act_low) and eff_base_speed is not None:
+                if abs(_to_finite_float(eff_base_speed, "base_speed_mps")) > 0.1:
+                    return self._deny("unitree_mid_motion_stand_down_blocked", normalized, clamp_hints)
 
         eff_current_pos = current_position
         if sensor_observation is not None:

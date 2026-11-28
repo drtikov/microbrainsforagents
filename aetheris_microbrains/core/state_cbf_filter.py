@@ -621,8 +621,8 @@ class StateCBFSafetyFilter:
         """Dispatch Dykstra projection to native Rust C-ABI when enabled and in-bounds, else Python."""
         if (
             self.use_native_rust
-            and 0 < self.dynamics.control_dim <= 16
-            and A.shape[0] <= 32
+            and 0 < self.dynamics.control_dim <= 64
+            and A.shape[0] <= 128
         ):
             try:
                 from .rust_shim import NativeRTGateLib

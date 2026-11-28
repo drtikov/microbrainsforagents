@@ -3,8 +3,8 @@
 //!
 //! Pure `core` math: safe on native targets, embedded `no_std`, and `wasm32`.
 
-pub const MAX_DIM: usize = 16;
-pub const MAX_BARRIERS: usize = 32;
+pub const MAX_DIM: usize = 64;
+pub const MAX_BARRIERS: usize = 128;
 
 pub const CBF_STATUS_SAFE: i32 = 0;
 pub const CBF_STATUS_UNSAFE_NO_SOLUTION: i32 = 1;
@@ -409,6 +409,117 @@ pub fn rt_cbf_filter_or_brake(
         res.status = CbfStatus::SimplexFallback;
     }
     res
+}
+
+/// Zero-heap-allocation Motor-PD CBF clamp: transforms torque-space halfspaces
+/// `A_tau * tau >= b_tau` into safe PD position targets `q_des` under
+/// `tau = tau_ff + kp * (q_des - q) + kd * (q_dot_des - q_dot)`, tightened by
+/// `tau_max / kp` and slew-rate `dq_max * dt`.
+pub fn pd_cbf_clamp(
+    a_tau_flat: &[f64],
+    b_tau: &[f64],
+    m_barriers: usize,
+    q: &[f64],
+    q_dot: &[f64],
+    q_des_nom: &[f64],
+    q_dot_des: &[f64],
+    tau_ff: &[f64],
+    kp: &[f64],
+    kd: &[f64],
+    q_min: &[f64],
+    q_max: &[f64],
+    tau_max: &[f64],
+    q_des_prev: Option<&[f64]>,
+    dq_max: Option<&[f64]>,
+    dt: f64,
+    max_iters: usize,
+    tol: f64,
+) -> CbfFilterResult {
+    let dim = q.len();
+    if dim == 0
+        || dim > MAX_DIM
+        || m_barriers > MAX_BARRIERS
+        || q_dot.len() != dim
+        || q_des_nom.len() != dim
+        || q_dot_des.len() != dim
+        || tau_ff.len() != dim
+        || kp.len() != dim
+        || kd.len() != dim
+        || q_min.len() != dim
+        || q_max.len() != dim
+        || tau_max.len() != dim
+    {
+        return CbfFilterResult::error(CbfStatus::DimMismatch, dim, q_des_nom);
+    }
+
+    let mut lo = [0.0_f64; MAX_DIM];
+    let mut hi = [0.0_f64; MAX_DIM];
+    let mut tau_bias = [0.0_f64; MAX_DIM];
+    let mut d = 0usize;
+    while d < dim {
+        let kp_d = if kp[d] > 0.0 { kp[d] } else { 0.0 };
+        let mut l = q_min[d];
+        let mut h = q_max[d];
+        if kp_d > 1e-6 {
+            let margin = tau_max[d].abs() / kp_d;
+            if q[d] - margin > l {
+                l = q[d] - margin;
+            }
+            if q[d] + margin < h {
+                h = q[d] + margin;
+            }
+        }
+        if let (Some(qp), Some(dqm)) = (q_des_prev, dq_max) {
+            let step = dqm[d].abs() * dt.max(0.0);
+            if qp[d] - step > l {
+                l = qp[d] - step;
+            }
+            if qp[d] + step < h {
+                h = qp[d] + step;
+            }
+        }
+        if l > h {
+            l = h;
+        }
+        lo[d] = l;
+        hi[d] = h;
+        tau_bias[d] = tau_ff[d] - kp_d * q[d] + kd[d].max(0.0) * (q_dot_des[d] - q_dot[d]);
+        d += 1;
+    }
+
+    let mut hs_buf = [CbfHalfspace {
+        a: [0.0_f64; MAX_DIM],
+        b: 0.0,
+    }; MAX_BARRIERS];
+    if m_barriers > 0 {
+        if a_tau_flat.len() < m_barriers * dim || b_tau.len() < m_barriers {
+            return CbfFilterResult::error(CbfStatus::DimMismatch, dim, q_des_nom);
+        }
+        let mut j = 0usize;
+        while j < m_barriers {
+            let base = j * dim;
+            let mut bias_dot = 0.0_f64;
+            let mut c = 0usize;
+            while c < dim {
+                let a_jc = a_tau_flat[base + c];
+                let kp_c = if kp[c] > 0.0 { kp[c] } else { 0.0 };
+                hs_buf[j].a[c] = a_jc * kp_c;
+                bias_dot += a_jc * tau_bias[c];
+                c += 1;
+            }
+            hs_buf[j].b = b_tau[j] - bias_dot;
+            j += 1;
+        }
+    }
+
+    dykstra_cbf_project(
+        q_des_nom,
+        &hs_buf[..m_barriers],
+        Some(&lo[..dim]),
+        Some(&hi[..dim]),
+        max_iters,
+        tol,
+    )
 }
 
 /// Zero-heap-allocation flat-matrix wrapper for [`dykstra_cbf_project`].

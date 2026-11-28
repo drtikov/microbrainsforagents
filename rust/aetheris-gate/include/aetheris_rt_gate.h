@@ -38,10 +38,10 @@ extern "C" {
 #endif
 
 /** Maximum control dimension supported by fixed-stack CBF projection buffers. */
-#define AETHERIS_RT_CBF_MAX_DIM 16
+#define AETHERIS_RT_CBF_MAX_DIM 64
 
 /** Maximum number of simultaneous affine barrier halfspaces (`A u >= b`). */
-#define AETHERIS_RT_CBF_MAX_BARRIERS 32
+#define AETHERIS_RT_CBF_MAX_BARRIERS 128
 
 /** Return status codes for `aetheris_rt_cbf_project` and `aetheris_rt_cbf_filter_or_brake`. */
 typedef enum aetheris_rt_cbf_status_t {
@@ -136,6 +136,35 @@ double aetheris_rt_cbf_watchdog_scale(
     double age_ms,
     double ttl_ms,
     double ramp_ms
+);
+
+/**
+ * Zero-heap-allocation Motor-PD CBF clamp transforming torque halfspaces `A_tau * tau >= b_tau`
+ * into safe desired joint position targets `q_des_out_ptr`.
+ */
+int32_t aetheris_rt_pd_cbf_clamp(
+    const double *a_tau_flat_ptr,
+    const double *b_tau_ptr,
+    size_t m_barriers,
+    size_t dim,
+    const double *q_ptr,
+    const double *q_dot_ptr,
+    const double *q_des_nom_ptr,
+    const double *q_dot_des_ptr,
+    const double *tau_ff_ptr,
+    const double *kp_ptr,
+    const double *kd_ptr,
+    const double *q_min_ptr,
+    const double *q_max_ptr,
+    const double *tau_max_ptr,
+    const double *q_des_prev_ptr,
+    const double *dq_max_ptr,
+    double dt,
+    size_t max_iters,
+    double tol,
+    double *q_des_out_ptr,
+    double *out_min_slack,
+    size_t *out_iters
 );
 
 /**

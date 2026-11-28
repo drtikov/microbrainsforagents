@@ -704,6 +704,101 @@ pub extern "C" fn aetheris_rt_cbf_watchdog_scale(
     rt_cbf::watchdog_authority_scale(age_ms, ttl_ms, ramp_ms)
 }
 
+/// C-ABI zero-alloc Motor-PD CBF clamp for Unitree / RL position-target controllers.
+#[no_mangle]
+pub extern "C" fn aetheris_rt_pd_cbf_clamp(
+    a_tau_flat_ptr: *const f64,
+    b_tau_ptr: *const f64,
+    m_barriers: usize,
+    dim: usize,
+    q_ptr: *const f64,
+    q_dot_ptr: *const f64,
+    q_des_nom_ptr: *const f64,
+    q_dot_des_ptr: *const f64,
+    tau_ff_ptr: *const f64,
+    kp_ptr: *const f64,
+    kd_ptr: *const f64,
+    q_min_ptr: *const f64,
+    q_max_ptr: *const f64,
+    tau_max_ptr: *const f64,
+    q_des_prev_ptr: *const f64,
+    dq_max_ptr: *const f64,
+    dt: f64,
+    max_iters: usize,
+    tol: f64,
+    q_des_out_ptr: *mut f64,
+    out_min_slack: *mut f64,
+    out_iters: *mut usize,
+) -> i32 {
+    if q_ptr.is_null()
+        || q_dot_ptr.is_null()
+        || q_des_nom_ptr.is_null()
+        || q_dot_des_ptr.is_null()
+        || tau_ff_ptr.is_null()
+        || kp_ptr.is_null()
+        || kd_ptr.is_null()
+        || q_min_ptr.is_null()
+        || q_max_ptr.is_null()
+        || tau_max_ptr.is_null()
+        || q_des_out_ptr.is_null()
+    {
+        return rt_cbf::CBF_STATUS_INVALID_INPUT;
+    }
+    if m_barriers > 0 && (a_tau_flat_ptr.is_null() || b_tau_ptr.is_null()) {
+        return rt_cbf::CBF_STATUS_INVALID_INPUT;
+    }
+    if dim == 0 || dim > rt_cbf::MAX_DIM || m_barriers > rt_cbf::MAX_BARRIERS {
+        return rt_cbf::CBF_STATUS_DIM_MISMATCH;
+    }
+    let a_flat: &[f64] = if m_barriers == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(a_tau_flat_ptr, m_barriers * dim) }
+    };
+    let b_vec: &[f64] = if m_barriers == 0 {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(b_tau_ptr, m_barriers) }
+    };
+    let q = unsafe { core::slice::from_raw_parts(q_ptr, dim) };
+    let q_dot = unsafe { core::slice::from_raw_parts(q_dot_ptr, dim) };
+    let q_des_nom = unsafe { core::slice::from_raw_parts(q_des_nom_ptr, dim) };
+    let q_dot_des = unsafe { core::slice::from_raw_parts(q_dot_des_ptr, dim) };
+    let tau_ff = unsafe { core::slice::from_raw_parts(tau_ff_ptr, dim) };
+    let kp = unsafe { core::slice::from_raw_parts(kp_ptr, dim) };
+    let kd = unsafe { core::slice::from_raw_parts(kd_ptr, dim) };
+    let q_min = unsafe { core::slice::from_raw_parts(q_min_ptr, dim) };
+    let q_max = unsafe { core::slice::from_raw_parts(q_max_ptr, dim) };
+    let tau_max = unsafe { core::slice::from_raw_parts(tau_max_ptr, dim) };
+    let q_des_prev = if q_des_prev_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(q_des_prev_ptr, dim) })
+    };
+    let dq_max = if dq_max_ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(dq_max_ptr, dim) })
+    };
+    let res = rt_cbf::pd_cbf_clamp(
+        a_flat, b_vec, m_barriers, q, q_dot, q_des_nom, q_dot_des, tau_ff, kp, kd,
+        q_min, q_max, tau_max, q_des_prev, dq_max, dt, max_iters, tol,
+    );
+    let out_slice = unsafe { core::slice::from_raw_parts_mut(q_des_out_ptr, dim) };
+    let mut i = 0usize;
+    while i < dim {
+        out_slice[i] = res.u_filtered[i];
+        i += 1;
+    }
+    if !out_min_slack.is_null() {
+        unsafe { *out_min_slack = res.min_barrier_slack; }
+    }
+    if !out_iters.is_null() {
+        unsafe { *out_iters = res.iterations; }
+    }
+    res.status.to_c_code()
+}
+
 /// WASM/C-ABI zero-alloc 2-bit packed ternary matvec. Returns 0 on success, -1 on invalid inputs.
 #[no_mangle]
 pub extern "C" fn aetheris_rt_ternary_matvec_i8(

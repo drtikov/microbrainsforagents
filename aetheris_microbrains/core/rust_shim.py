@@ -290,6 +290,15 @@ def _configure_cdll_signatures(lib: ctypes.CDLL) -> ctypes.CDLL:
     ]
     lib.aetheris_rt_cbf_watchdog_scale.restype = ctypes.c_double
 
+    lib.aetheris_rt_pd_cbf_clamp.argtypes = [
+        _F64_PTR, _F64_PTR, ctypes.c_size_t, ctypes.c_size_t,
+        _F64_PTR, _F64_PTR, _F64_PTR, _F64_PTR, _F64_PTR,
+        _F64_PTR, _F64_PTR, _F64_PTR, _F64_PTR, _F64_PTR,
+        _F64_PTR, _F64_PTR, ctypes.c_double, ctypes.c_size_t, ctypes.c_double,
+        _F64_PTR, _F64_PTR, _USIZE_PTR,
+    ]
+    lib.aetheris_rt_pd_cbf_clamp.restype = ctypes.c_int32
+
     lib.aetheris_rt_ternary_matvec_i8.argtypes = [
         _U8_PTR,
         ctypes.c_size_t,
@@ -574,6 +583,68 @@ class NativeRTGateLib:
             "verified_safe": rc == 0,
             "backup_engaged": rc == 2,
             "u_filtered": [float(u_out[i]) for i in range(dim)],
+            "min_barrier_slack": float(out_slack.value) if rc in (0, 1, 2) else -1.0,
+            "iterations": int(out_iters.value) if rc in (0, 1, 2) else 0,
+        }
+
+    def pd_cbf_clamp(
+        self,
+        *,
+        a_tau_rows: Any,
+        b_tau_vec: Any,
+        q: Any,
+        q_dot: Any,
+        q_des_nom: Any,
+        q_dot_des: Any,
+        tau_ff: Any,
+        kp: Any,
+        kd: Any,
+        q_min: Any,
+        q_max: Any,
+        tau_max: Any,
+        q_des_prev: Any = None,
+        dq_max: Any = None,
+        dt: float = 0.002,
+        max_iters: int = 200,
+        tol: float = 1e-9,
+    ) -> Dict[str, Any]:
+        q_ptr, dim, q_keep = _as_f64_vec(q)
+        if q_ptr is None or dim <= 0:
+            return {"status": "dim_mismatch", "status_code": -2, "verified_safe": False, "q_des_safe": []}
+        qd_ptr, _, qd_keep = _as_f64_vec(q_dot)
+        qn_ptr, _, qn_keep = _as_f64_vec(q_des_nom)
+        qdn_ptr, _, qdn_keep = _as_f64_vec(q_dot_des)
+        tff_ptr, _, tff_keep = _as_f64_vec(tau_ff)
+        kp_ptr, _, kp_keep = _as_f64_vec(kp)
+        kd_ptr, _, kd_keep = _as_f64_vec(kd)
+        qlo_ptr, _, qlo_keep = _as_f64_vec(q_min)
+        qhi_ptr, _, qhi_keep = _as_f64_vec(q_max)
+        tmax_ptr, _, tmax_keep = _as_f64_vec(tau_max)
+        qp_ptr, _, qp_keep = (None, 0, None) if q_des_prev is None else _as_f64_vec(q_des_prev)
+        dqm_ptr, _, dqm_keep = (None, 0, None) if dq_max is None else _as_f64_vec(dq_max)
+        b_ptr, m_b, b_keep = (None, 0, None) if b_tau_vec is None else _as_f64_vec(b_tau_vec)
+        a_ptr, m_a, a_ok, a_keep = _as_f64_matrix(a_tau_rows, dim, expected_m=m_b if b_ptr is not None else None)
+        if not a_ok or m_a != m_b:
+            return {"status": "dim_mismatch", "status_code": -2, "verified_safe": False, "q_des_safe": []}
+
+        q_out = (ctypes.c_double * dim)()
+        out_slack = ctypes.c_double(0.0)
+        out_iters = ctypes.c_size_t(0)
+        rc = int(
+            self._lib.aetheris_rt_pd_cbf_clamp(
+                a_ptr, b_ptr, ctypes.c_size_t(m_a), ctypes.c_size_t(dim),
+                q_ptr, qd_ptr, qn_ptr, qdn_ptr, tff_ptr, kp_ptr, kd_ptr,
+                qlo_ptr, qhi_ptr, tmax_ptr, qp_ptr, dqm_ptr,
+                ctypes.c_double(float(dt)), ctypes.c_size_t(max(0, int(max_iters))), ctypes.c_double(float(tol)),
+                ctypes.cast(q_out, _F64_PTR), ctypes.byref(out_slack), ctypes.byref(out_iters),
+            )
+        )
+        _ = (q_keep, qd_keep, qn_keep, qdn_keep, tff_keep, kp_keep, kd_keep, qlo_keep, qhi_keep, tmax_keep, qp_keep, dqm_keep, b_keep, a_keep)
+        return {
+            "status": _STATUS_CODE_TO_STR.get(rc, "invalid_input"),
+            "status_code": rc,
+            "verified_safe": rc == 0,
+            "q_des_safe": [float(q_out[i]) for i in range(dim)],
             "min_barrier_slack": float(out_slack.value) if rc in (0, 1, 2) else -1.0,
             "iterations": int(out_iters.value) if rc in (0, 1, 2) else 0,
         }
