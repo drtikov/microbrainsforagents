@@ -16,6 +16,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import math
 import posixpath
 import secrets
 import time
@@ -29,6 +30,25 @@ def _coerce_str_tuple(value: Optional[Iterable[str]], field_name: str) -> Option
     if isinstance(value, (str, bytes)):
         raise TypeError(f"{field_name} must be an iterable of strings or None, not {type(value).__name__}")
     return tuple(str(item) for item in value)
+
+
+def _coerce_geofence_polytope(
+    value: Optional[Iterable[Any]],
+) -> Optional[Tuple[Tuple[Tuple[float, ...], float], ...]]:
+    if value is None:
+        return None
+    halfspaces: List[Tuple[Tuple[float, ...], float]] = []
+    for item in value:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("each geofence_polytope halfspace must be a (normal, offset) pair")
+        normal_raw, offset_raw = item
+        if isinstance(normal_raw, (str, bytes)) or not isinstance(normal_raw, Iterable):
+            raise TypeError("geofence_polytope halfspace normal must be an iterable of numbers")
+        normal = tuple(float(coord) for coord in normal_raw)
+        if not normal:
+            raise ValueError("geofence_polytope halfspace normal must not be empty")
+        halfspaces.append((normal, float(offset_raw)))
+    return tuple(halfspaces)
 
 
 def _canonical_json_bytes(payload: Any) -> bytes:
@@ -129,6 +149,11 @@ class CapabilityCaveat:
     expires_at: Optional[float] = None
     subagent_id: Optional[str] = None
     depth_remaining: Optional[int] = None
+    max_linear_vel_mps: Optional[float] = None
+    max_kinetic_energy_j: Optional[float] = None
+    max_contact_force_n: Optional[float] = None
+    allowed_actuators: Optional[Tuple[str, ...]] = None
+    geofence_polytope: Optional[Tuple[Tuple[Tuple[float, ...], float], ...]] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "allowed_tools", _coerce_str_tuple(self.allowed_tools, "allowed_tools"))
@@ -144,10 +169,18 @@ class CapabilityCaveat:
             object.__setattr__(self, "subagent_id", str(self.subagent_id))
         if self.depth_remaining is not None:
             object.__setattr__(self, "depth_remaining", int(self.depth_remaining))
+        if self.max_linear_vel_mps is not None:
+            object.__setattr__(self, "max_linear_vel_mps", float(self.max_linear_vel_mps))
+        if self.max_kinetic_energy_j is not None:
+            object.__setattr__(self, "max_kinetic_energy_j", float(self.max_kinetic_energy_j))
+        if self.max_contact_force_n is not None:
+            object.__setattr__(self, "max_contact_force_n", float(self.max_contact_force_n))
+        object.__setattr__(self, "allowed_actuators", _coerce_str_tuple(self.allowed_actuators, "allowed_actuators"))
+        object.__setattr__(self, "geofence_polytope", _coerce_geofence_polytope(self.geofence_polytope))
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize caveat into a deterministic JSON-compatible mapping."""
-        return {
+        data: Dict[str, Any] = {
             "allowed_tools": list(self.allowed_tools) if self.allowed_tools is not None else None,
             "read_globs": list(self.read_globs) if self.read_globs is not None else None,
             "write_globs": list(self.write_globs) if self.write_globs is not None else None,
@@ -158,6 +191,18 @@ class CapabilityCaveat:
             "subagent_id": self.subagent_id,
             "depth_remaining": self.depth_remaining,
         }
+        # Omit unset physical safety keys so non-physical caveats preserve byte-identical hashes.
+        if self.max_linear_vel_mps is not None:
+            data["max_linear_vel_mps"] = self.max_linear_vel_mps
+        if self.max_kinetic_energy_j is not None:
+            data["max_kinetic_energy_j"] = self.max_kinetic_energy_j
+        if self.max_contact_force_n is not None:
+            data["max_contact_force_n"] = self.max_contact_force_n
+        if self.allowed_actuators is not None:
+            data["allowed_actuators"] = list(self.allowed_actuators)
+        if self.geofence_polytope is not None:
+            data["geofence_polytope"] = [[list(normal), offset] for normal, offset in self.geofence_polytope]
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CapabilityCaveat":
@@ -172,6 +217,11 @@ class CapabilityCaveat:
             expires_at=data.get("expires_at"),
             subagent_id=data.get("subagent_id"),
             depth_remaining=data.get("depth_remaining"),
+            max_linear_vel_mps=data.get("max_linear_vel_mps"),
+            max_kinetic_energy_j=data.get("max_kinetic_energy_j"),
+            max_contact_force_n=data.get("max_contact_force_n"),
+            allowed_actuators=tuple(data["allowed_actuators"]) if data.get("allowed_actuators") is not None else None,
+            geofence_polytope=data.get("geofence_polytope"),
         )
 
 
@@ -279,29 +329,29 @@ def attenuate_capability(token: CapabilityToken, caveat: CapabilityCaveat) -> Ca
     )
 
 
-def _auth_result(authorized: bool, reason: str, subject: str, chain_depth: int) -> Dict[str, Any]:
-    return {
+def _auth_result(
+    authorized: bool,
+    reason: str,
+    subject: str,
+    chain_depth: int,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
         "authorized": authorized,
         "decision": "allow" if authorized else "deny",
         "reason": reason,
         "subject": subject,
         "chain_depth": chain_depth,
     }
+    if extra is not None:
+        result.update(extra)
+    return result
 
 
-def verify_capability_and_authorize(
+def _verify_hmac_chain(
     token: CapabilityToken,
     root_secret: Union[bytes, str],
-    *,
-    tool_name: str,
-    path: Optional[str] = None,
-    is_write: bool = False,
-    is_shell: bool = False,
-    secret_handle: Optional[str] = None,
-    domain: Optional[str] = None,
-    now: Optional[float] = None,
-) -> Dict[str, Any]:
-    """Verify HMAC chain integrity and authorize a requested action against all caveats."""
+) -> Optional[Dict[str, Any]]:
     if not isinstance(token, CapabilityToken):
         return _auth_result(False, "invalid_token_type", "", 0)
 
@@ -327,6 +377,72 @@ def verify_capability_and_authorize(
 
     if not hmac.compare_digest(expected_sig, provided_sig):
         return _auth_result(False, "invalid_hmac_signature", subject, chain_depth)
+    return None
+
+
+def _advance_chain_metadata(
+    cav: CapabilityCaveat,
+    idx: int,
+    current_time: float,
+    effective_depth: Optional[int],
+    pinned_subagent: Optional[str],
+    effective_expires_at: Optional[float],
+    subject: str,
+    chain_depth: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[str], Optional[float]]:
+    if idx > 0 and effective_depth is not None:
+        effective_depth -= 1
+        if effective_depth < 0:
+            return _auth_result(False, "delegation_depth_exceeded", subject, chain_depth), effective_depth, pinned_subagent, effective_expires_at
+
+    if cav.depth_remaining is not None:
+        if cav.depth_remaining < 0:
+            return _auth_result(False, "delegation_depth_exceeded", subject, chain_depth), effective_depth, pinned_subagent, effective_expires_at
+        effective_depth = (
+            cav.depth_remaining
+            if effective_depth is None
+            else min(effective_depth, cav.depth_remaining)
+        )
+
+    if cav.subagent_id is not None:
+        if not cav.subagent_id.strip():
+            return _auth_result(False, "invalid_subagent_id", subject, chain_depth), effective_depth, pinned_subagent, effective_expires_at
+        if pinned_subagent is None:
+            pinned_subagent = cav.subagent_id
+        elif pinned_subagent != cav.subagent_id:
+            return _auth_result(False, "subagent_id_conflict", subject, chain_depth), effective_depth, pinned_subagent, effective_expires_at
+
+    if cav.expires_at is not None:
+        effective_expires_at = (
+            cav.expires_at
+            if effective_expires_at is None
+            else min(effective_expires_at, cav.expires_at)
+        )
+        if current_time > effective_expires_at:
+            return _auth_result(False, "token_expired", subject, chain_depth), effective_depth, pinned_subagent, effective_expires_at
+
+    return None, effective_depth, pinned_subagent, effective_expires_at
+
+
+def verify_capability_and_authorize(
+    token: CapabilityToken,
+    root_secret: Union[bytes, str],
+    *,
+    tool_name: str,
+    path: Optional[str] = None,
+    is_write: bool = False,
+    is_shell: bool = False,
+    secret_handle: Optional[str] = None,
+    domain: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Verify HMAC chain integrity and authorize a requested action against all caveats."""
+    hmac_err = _verify_hmac_chain(token, root_secret)
+    if hmac_err is not None:
+        return hmac_err
+
+    subject = token.subject
+    chain_depth = len(token.caveats)
 
     clean_tool = str(tool_name or "").strip().lower()
     if not clean_tool:
@@ -342,36 +458,18 @@ def verify_capability_and_authorize(
     effective_expires_at: Optional[float] = None
 
     for idx, cav in enumerate(token.caveats):
-        if idx > 0 and effective_depth is not None:
-            effective_depth -= 1
-            if effective_depth < 0:
-                return _auth_result(False, "delegation_depth_exceeded", subject, chain_depth)
-
-        if cav.depth_remaining is not None:
-            if cav.depth_remaining < 0:
-                return _auth_result(False, "delegation_depth_exceeded", subject, chain_depth)
-            effective_depth = (
-                cav.depth_remaining
-                if effective_depth is None
-                else min(effective_depth, cav.depth_remaining)
-            )
-
-        if cav.subagent_id is not None:
-            if not cav.subagent_id.strip():
-                return _auth_result(False, "invalid_subagent_id", subject, chain_depth)
-            if pinned_subagent is None:
-                pinned_subagent = cav.subagent_id
-            elif pinned_subagent != cav.subagent_id:
-                return _auth_result(False, "subagent_id_conflict", subject, chain_depth)
-
-        if cav.expires_at is not None:
-            effective_expires_at = (
-                cav.expires_at
-                if effective_expires_at is None
-                else min(effective_expires_at, cav.expires_at)
-            )
-            if current_time > effective_expires_at:
-                return _auth_result(False, "token_expired", subject, chain_depth)
+        meta_err, effective_depth, pinned_subagent, effective_expires_at = _advance_chain_metadata(
+            cav,
+            idx,
+            current_time,
+            effective_depth,
+            pinned_subagent,
+            effective_expires_at,
+            subject,
+            chain_depth,
+        )
+        if meta_err is not None:
+            return meta_err
 
         if cav.allowed_tools is not None:
             if not any(_match_tool(clean_tool, pat) for pat in cav.allowed_tools):
@@ -399,6 +497,158 @@ def verify_capability_and_authorize(
                 return _auth_result(False, f"domain_not_allowed:{clean_domain}", subject, chain_depth)
 
     return _auth_result(True, "authorized", subject, chain_depth)
+
+
+def _validate_non_negative_finite(value: Any, name: str) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    num = float(value)
+    if not math.isfinite(num) or num < 0.0:
+        return None
+    return num
+
+
+def authorize_physical_action(
+    token: CapabilityToken,
+    root_secret: Union[bytes, str],
+    position: Optional[Iterable[float]] = None,
+    linear_vel_mps: Optional[float] = None,
+    kinetic_energy_j: Optional[float] = None,
+    contact_force_n: Optional[float] = None,
+    actuator: Optional[str] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Verify HMAC chain and enforce monotonic intersection of physical safety caveats."""
+    hmac_err = _verify_hmac_chain(token, root_secret)
+    if hmac_err is not None:
+        return hmac_err
+
+    subject = token.subject
+    chain_depth = len(token.caveats)
+    current_time = float(time.time() if now is None else now)
+    if not math.isfinite(current_time):
+        return _auth_result(False, "invalid_timestamp", subject, chain_depth)
+
+    req_vel: Optional[float] = None
+    if linear_vel_mps is not None:
+        req_vel = _validate_non_negative_finite(linear_vel_mps, "linear_vel_mps")
+        if req_vel is None:
+            return _auth_result(False, "invalid_linear_vel", subject, chain_depth)
+
+    req_ke: Optional[float] = None
+    if kinetic_energy_j is not None:
+        req_ke = _validate_non_negative_finite(kinetic_energy_j, "kinetic_energy_j")
+        if req_ke is None:
+            return _auth_result(False, "invalid_kinetic_energy", subject, chain_depth)
+
+    req_force: Optional[float] = None
+    if contact_force_n is not None:
+        req_force = _validate_non_negative_finite(contact_force_n, "contact_force_n")
+        if req_force is None:
+            return _auth_result(False, "invalid_contact_force", subject, chain_depth)
+
+    req_pos: Optional[Tuple[float, ...]] = None
+    if position is not None:
+        if isinstance(position, (str, bytes)) or not isinstance(position, Iterable):
+            return _auth_result(False, "invalid_position", subject, chain_depth)
+        try:
+            req_pos = tuple(float(coord) for coord in position)
+        except (TypeError, ValueError):
+            return _auth_result(False, "invalid_position", subject, chain_depth)
+        if not req_pos or any(not math.isfinite(c) for c in req_pos):
+            return _auth_result(False, "invalid_position", subject, chain_depth)
+
+    clean_actuator: Optional[str] = None
+    if actuator is not None:
+        clean_actuator = str(actuator).strip()
+        if not clean_actuator:
+            return _auth_result(False, "invalid_actuator", subject, chain_depth)
+
+    effective_depth: Optional[int] = None
+    pinned_subagent: Optional[str] = None
+    effective_expires_at: Optional[float] = None
+
+    effective_max_vel: Optional[float] = None
+    effective_max_ke: Optional[float] = None
+    effective_max_force: Optional[float] = None
+    effective_actuators: Optional[set[str]] = None
+    halfspace_count = 0
+
+    for idx, cav in enumerate(token.caveats):
+        meta_err, effective_depth, pinned_subagent, effective_expires_at = _advance_chain_metadata(
+            cav,
+            idx,
+            current_time,
+            effective_depth,
+            pinned_subagent,
+            effective_expires_at,
+            subject,
+            chain_depth,
+        )
+        if meta_err is not None:
+            return meta_err
+
+        if cav.max_linear_vel_mps is not None:
+            bound = _validate_non_negative_finite(cav.max_linear_vel_mps, "max_linear_vel_mps")
+            if bound is None:
+                return _auth_result(False, "invalid_caveat_linear_vel", subject, chain_depth)
+            effective_max_vel = bound if effective_max_vel is None else min(effective_max_vel, bound)
+
+        if cav.max_kinetic_energy_j is not None:
+            bound = _validate_non_negative_finite(cav.max_kinetic_energy_j, "max_kinetic_energy_j")
+            if bound is None:
+                return _auth_result(False, "invalid_caveat_kinetic_energy", subject, chain_depth)
+            effective_max_ke = bound if effective_max_ke is None else min(effective_max_ke, bound)
+
+        if cav.max_contact_force_n is not None:
+            bound = _validate_non_negative_finite(cav.max_contact_force_n, "max_contact_force_n")
+            if bound is None:
+                return _auth_result(False, "invalid_caveat_contact_force", subject, chain_depth)
+            effective_max_force = bound if effective_max_force is None else min(effective_max_force, bound)
+
+        if cav.allowed_actuators is not None:
+            cav_acts = {str(a).strip() for a in cav.allowed_actuators if str(a).strip()}
+            effective_actuators = cav_acts if effective_actuators is None else (effective_actuators & cav_acts)
+
+        if cav.geofence_polytope is not None:
+            halfspace_count += len(cav.geofence_polytope)
+
+    effective_limits = {
+        "max_linear_vel_mps": effective_max_vel,
+        "max_kinetic_energy_j": effective_max_ke,
+        "max_contact_force_n": effective_max_force,
+        "allowed_actuators": sorted(effective_actuators) if effective_actuators is not None else None,
+        "geofence_halfspaces": halfspace_count,
+    }
+    extra = {"effective_limits": effective_limits}
+
+    if effective_max_vel is not None and req_vel is not None and req_vel > effective_max_vel:
+        return _auth_result(False, "linear_vel_exceeded", subject, chain_depth, extra)
+
+    if effective_max_ke is not None and req_ke is not None and req_ke > effective_max_ke:
+        return _auth_result(False, "kinetic_energy_exceeded", subject, chain_depth, extra)
+
+    if effective_max_force is not None and req_force is not None and req_force > effective_max_force:
+        return _auth_result(False, "contact_force_exceeded", subject, chain_depth, extra)
+
+    if effective_actuators is not None and clean_actuator is not None:
+        if not any(_match_pattern(clean_actuator, pat) for pat in effective_actuators):
+            return _auth_result(False, f"actuator_not_allowed:{clean_actuator}", subject, chain_depth, extra)
+
+    if req_pos is not None:
+        for cav in token.caveats:
+            if cav.geofence_polytope is None:
+                continue
+            for normal, offset in cav.geofence_polytope:
+                if not math.isfinite(offset) or any(not math.isfinite(a) for a in normal):
+                    return _auth_result(False, "invalid_geofence_polytope", subject, chain_depth, extra)
+                if len(normal) != len(req_pos):
+                    return _auth_result(False, "geofence_dimension_mismatch", subject, chain_depth, extra)
+                dot = sum(a * p for a, p in zip(normal, req_pos))
+                if dot > offset + 1e-12:
+                    return _auth_result(False, "geofence_violation", subject, chain_depth, extra)
+
+    return _auth_result(True, "authorized", subject, chain_depth, extra)
 
 
 def _get_field(obj: Any, name: str, default: Any = None) -> Any:

@@ -39,6 +39,22 @@ from .atomic import atomic_replace
 from .bitnet_ternary_engine import BitLinearLayer, BitNetQuantizer
 
 
+def _build_trit_4_lut() -> np.ndarray:
+    """Precompute 256x4 LUT mapping packed uint8 bytes to {-1, 0, +1} int32 trits."""
+    lut = np.zeros((256, 4), dtype=np.int32)
+    decode = np.array([-1, 0, 1, 0], dtype=np.int32)
+    for b in range(256):
+        lut[b, 0] = decode[(b >> 0) & 0x03]
+        lut[b, 1] = decode[(b >> 2) & 0x03]
+        lut[b, 2] = decode[(b >> 4) & 0x03]
+        lut[b, 3] = decode[(b >> 6) & 0x03]
+    return lut
+
+
+_TRIT_4_LUT = _build_trit_4_lut()
+_TRIT_4_LUT_T = np.ascontiguousarray(_TRIT_4_LUT.T)
+
+
 class PackedTernaryLinear:
     """Ternary linear layer with 2-bit-packed storage and exact-parity compute paths."""
 
@@ -95,6 +111,63 @@ class PackedTernaryLinear:
         combined_scale = float(self.gamma / scale)
         T = self.decode_int8()
         out_int = np.dot(x_q.astype(np.int32), T.T.astype(np.int32))
+        return out_int.astype(np.float32) * combined_scale
+
+    def matvec_packed_lut(self, x_2d: np.ndarray) -> np.ndarray:
+        """
+        Quantized int8 activation dot product directly from 2-bit ``self.packed``
+        using a precomputed 256-entry 4-trit LUT and per-group activation sums,
+        without materializing an uncompressed ``(out_features, in_features)`` weight
+        matrix. Matches ``matvec_quantized`` bit-for-bit.
+        """
+        x_arr = np.asarray(x_2d, dtype=np.float32)
+        max_abs = float(np.max(np.abs(x_arr)))
+        if max_abs < 1e-9:
+            max_abs = 1e-9
+        scale = 127.0 / max_abs
+        x_q = np.clip(np.round(x_arr * scale), -127.0, 127.0).astype(np.int8)
+        combined_scale = float(self.gamma / scale)
+
+        batch = int(x_q.shape[0])
+        n_groups = (self.in_features + 3) // 4
+        if n_groups == 0 or self.out_features == 0:
+            return np.zeros((batch, self.out_features), dtype=np.float32)
+
+        pad_cols = n_groups * 4 - self.in_features
+        if pad_cols:
+            x_pad = np.pad(x_q, ((0, 0), (0, pad_cols)), constant_values=0).astype(np.int32, copy=False)
+        else:
+            x_pad = x_q.astype(np.int32, copy=False)
+        x_groups = x_pad.reshape(batch, n_groups, 4)
+        # group_sums[b, g, byte_val] = dot(x_q[b, 4g:4g+4], 4_trits(byte_val))
+        group_sums = x_groups @ _TRIT_4_LUT_T
+
+        out_int = np.zeros((batch, self.out_features), dtype=np.int32)
+        rem = self.in_features & 3
+        if rem == 0:
+            packed_2d = self.packed.reshape(self.out_features, n_groups)
+            for g in range(n_groups):
+                out_int += group_sums[:, g, packed_2d[:, g]]
+        else:
+            row_starts = np.arange(self.out_features, dtype=np.int64) * self.in_features
+            byte_base = row_starts >> 2
+            bit_shift = ((row_starts & 3) * 2).astype(np.uint8)
+            r_shift = np.where(bit_shift == 0, np.uint8(0), np.uint8(8) - bit_shift)
+            packed_len = int(self.packed.size)
+            last_mask = np.uint8((1 << (2 * rem)) - 1)
+            last_fill = np.uint8(0x55 & (~int(last_mask) & 0xFF))
+            for g in range(n_groups):
+                idx0 = byte_base + g
+                lo = self.packed[idx0]
+                has_next = (idx0 + 1) < packed_len
+                idx1 = np.where(has_next, idx0 + 1, idx0)
+                hi = np.where(has_next, self.packed[idx1], np.uint8(0x55))
+                shifted = ((lo >> bit_shift) | (hi << r_shift)).astype(np.uint8)
+                aligned = np.where(bit_shift == 0, lo, shifted)
+                if g == n_groups - 1:
+                    aligned = (aligned & last_mask) | last_fill
+                out_int += group_sums[:, g, aligned]
+
         return out_int.astype(np.float32) * combined_scale
 
     def forward(self, x: np.ndarray, quantize_activations: bool = True) -> np.ndarray:
@@ -233,6 +306,67 @@ def export_packed_linear_onnx(
         "weights_mode": "dequantized_float32_constant",
         "opset": opset,
         "honesty_note": "integer-only MatMulInteger export is future work; not MCU-bitnet-parity",
+    }
+
+
+def export_packed_linear_onnx_int8(
+    layer: PackedTernaryLinear,
+    onnx_path: Union[str, Path],
+    opset: int = 17,
+) -> Dict[str, Any]:
+    """
+    Export a genuine integer-quantized ONNX graph using
+    ``DynamicQuantizeLinear -> MatMulInteger -> Cast(FLOAT) -> Mul(scale) -> [Add(bias)]``.
+    Requires the ``onnx`` package (raises RuntimeError with an install hint if missing).
+    """
+    try:
+        import onnx
+        from onnx import TensorProto, helper, numpy_helper
+    except ImportError as exc:
+        raise RuntimeError(
+            "export_packed_linear_onnx_int8 requires the 'onnx' package (pip install onnx). "
+            "No graph was written."
+        ) from exc
+
+    w_int8 = layer.decode_int8().T.astype(np.int8)  # (in_features, out_features)
+    w_init = numpy_helper.from_array(w_int8, name="W_int8")
+    w_zp_init = numpy_helper.from_array(np.array(0, dtype=np.int8), name="W_zp")
+    w_scale_init = numpy_helper.from_array(np.array(layer.gamma, dtype=np.float32), name="W_scale")
+
+    scaled_out_name = "Y_scaled" if layer.bias is not None else "Y"
+    nodes = [
+        helper.make_node("DynamicQuantizeLinear", ["X"], ["X_q", "x_scale", "x_zp"]),
+        helper.make_node("MatMulInteger", ["X_q", "W_int8", "x_zp", "W_zp"], ["Y_int32"]),
+        helper.make_node("Cast", ["Y_int32"], ["Y_f32"], to=TensorProto.FLOAT),
+        helper.make_node("Mul", ["x_scale", "W_scale"], ["combined_scale"]),
+        helper.make_node("Mul", ["Y_f32", "combined_scale"], [scaled_out_name]),
+    ]
+    initializers = [w_init, w_zp_init, w_scale_init]
+    if layer.bias is not None:
+        b_init = numpy_helper.from_array(layer.bias.reshape(1, -1).astype(np.float32), name="B")
+        nodes.append(helper.make_node("Add", [scaled_out_name, "B"], ["Y"]))
+        initializers.append(b_init)
+
+    inputs = [helper.make_tensor_value_info("X", TensorProto.FLOAT, [None, layer.in_features])]
+    outputs = [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [None, layer.out_features])]
+    graph = helper.make_graph(nodes, "packed_ternary_linear_int8", inputs, outputs, initializer=initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)])
+    model.ir_version = min(model.ir_version, 8)
+    onnx.checker.check_model(model)
+
+    onnx_path = Path(onnx_path)
+    tmp = onnx_path.with_name(onnx_path.name + f".tmp{time.time_ns()}")
+    tmp.write_bytes(model.SerializeToString())
+    atomic_replace(tmp, onnx_path)
+    return {
+        "status": "exported",
+        "path": str(onnx_path),
+        "bytes": int(onnx_path.stat().st_size),
+        "weights_mode": "int8_matmul_integer",
+        "opset": opset,
+        "in_features": layer.in_features,
+        "out_features": layer.out_features,
+        "gamma": layer.gamma,
     }
 
 

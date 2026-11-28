@@ -10,6 +10,8 @@ const _REQUIRED_EXPORTS = [
   "aetheris_wasm_dealloc",
   "aetheris_wasm_eval_pretool",
   "aetheris_wasm_scrub",
+  "aetheris_wasm_rt_cbf_filter",
+  "aetheris_rt_cbf_watchdog_scale",
 ];
 
 /**
@@ -66,6 +68,8 @@ export async function loadAetherisWasm(wasmPath = undefined) {
   const dealloc = exports.aetheris_wasm_dealloc;
   const wasmEvalPretool = exports.aetheris_wasm_eval_pretool;
   const wasmScrub = exports.aetheris_wasm_scrub;
+  const wasmRtCbfFilter = exports.aetheris_wasm_rt_cbf_filter;
+  const wasmWatchdogScale = exports.aetheris_rt_cbf_watchdog_scale;
 
   /**
    * Allocate and copy a UTF-8 string into WASM linear memory.
@@ -171,9 +175,38 @@ export async function loadAetherisWasm(wasmPath = undefined) {
     }
   }
 
+  function filterTeleopCbf(request) {
+    const inputJson =
+      typeof request === "string"
+        ? request
+        : JSON.stringify(request ?? {}, (_k, v) =>
+            ArrayBuffer.isView(v) && !(v instanceof DataView) ? Array.from(v) : v,
+          );
+    let inputBuf = null;
+    let outLenSlot = null;
+
+    try {
+      inputBuf = writeUtf8(inputJson);
+      outLenSlot = allocU32Slot();
+
+      const outPtr = wasmRtCbfFilter(inputBuf.ptr, inputBuf.len, outLenSlot.ptr);
+      const rawJson = readAndFreeResult(outPtr, outLenSlot.ptr);
+      return JSON.parse(rawJson);
+    } finally {
+      freeBuf(outLenSlot);
+      freeBuf(inputBuf);
+    }
+  }
+
+  function watchdogScale(ageMs, ttlMs, rampMs) {
+    return wasmWatchdogScale(Number(ageMs), Number(ttlMs), Number(rampMs));
+  }
+
   return {
     evalPretool,
     scrub,
+    filterTeleopCbf,
+    watchdogScale,
   };
 }
 

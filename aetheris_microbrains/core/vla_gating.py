@@ -25,6 +25,7 @@ core/microbrain_telemetry.py (recalibrate_from_window).
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -33,6 +34,12 @@ import numpy as np
 
 from .hyperdimensional_vsa_engine import HyperdimensionalVSAEngine
 from .microbrain_telemetry import MicrobrainTelemetry
+from .pymdp_efe import (
+    EFPAgent,
+    MultiModalEFPAgent,
+    expected_free_energy,
+    expected_free_energy_multimodal,
+)
 from .state_cbf_filter import StateCBFSafetyFilter
 
 log = logging.getLogger("aetheris.vla_gate")
@@ -155,7 +162,7 @@ class ConformalActionGate:
 
 
 class VLActionGate:
-    """Three-tier per-step decision: local_reflex / call_vla / escalate_human."""
+    """Three-tier (plus optional active-inference epistemic probe) per-step decision."""
 
     def __init__(
         self,
@@ -164,13 +171,159 @@ class VLActionGate:
         action_gate: Optional[ConformalActionGate] = None,
         affordance_threshold: float = 0.35,
         deliberator: Optional[Any] = None,
+        enable_epistemic_probe: bool = False,
+        epistemic_probes: Optional[Dict[str, Dict[str, Any]]] = None,
+        epistemic_entropy_threshold: float = 0.05,
     ):
         self.skills = skill_library or SkillLibrary()
         self.safety = safety_filter
         self.action_gate = action_gate
         self.affordance_threshold = float(affordance_threshold)
         self.deliberator = deliberator
-        self.decision_counts = {"local_reflex": 0, "call_vla": 0, "escalate_human": 0}
+        self.enable_epistemic_probe = bool(enable_epistemic_probe)
+        self.epistemic_probes = dict(epistemic_probes) if epistemic_probes is not None else None
+        self.epistemic_entropy_threshold = float(epistemic_entropy_threshold)
+        self.decision_counts = {
+            "local_reflex": 0,
+            "call_vla": 0,
+            "escalate_human": 0,
+            "epistemic_probe": 0,
+        }
+
+    def _select_epistemic_probe(
+        self,
+        state: Sequence[float],
+        fallback_action: Sequence[float],
+    ) -> Optional[Dict[str, Any]]:
+        """Query deliberator for highest-information-gain CBF-safe active perception probe."""
+        if self.deliberator is None:
+            return None
+
+        candidates: List[Dict[str, Any]] = []
+        if self.epistemic_probes is not None:
+            if not self.epistemic_probes:
+                return None
+            for key, spec in self.epistemic_probes.items():
+                if not isinstance(spec, dict):
+                    continue
+                if "policy" in spec:
+                    pol = list(spec["policy"])
+                    action_idx = pol[0]
+                elif "action_idx" in spec:
+                    action_idx = int(spec["action_idx"])
+                    pol = [action_idx]
+                else:
+                    try:
+                        action_idx = int(key)
+                    except (TypeError, ValueError):
+                        continue
+                    pol = [action_idx]
+                candidates.append(
+                    {
+                        "pol": pol,
+                        "action_idx": action_idx,
+                        "label": str(spec.get("label", spec.get("name", key))),
+                        "raw_vec": spec.get("probe_action", spec.get("action")),
+                    }
+                )
+        else:
+            model = getattr(self.deliberator, "model", None)
+            n_actions = int(getattr(model, "n_actions", 0))
+            if n_actions <= 0:
+                return None
+            for u in range(n_actions):
+                candidates.append(
+                    {
+                        "pol": [u],
+                        "action_idx": u,
+                        "label": f"probe_{u}",
+                        "raw_vec": None,
+                    }
+                )
+
+        if not candidates:
+            return None
+
+        try:
+            plan = self.deliberator.plan([c["pol"] for c in candidates])
+        except Exception:
+            return None
+
+        G_list = plan.get("G", [0.0] * len(candidates))
+        scored: List[Dict[str, Any]] = []
+        for idx, cand in enumerate(candidates):
+            g_val = float(G_list[idx]) if idx < len(G_list) else 0.0
+            epistemic = 0.0
+            novelty = 0.0
+            if isinstance(self.deliberator, MultiModalEFPAgent):
+                g_val, tr = expected_free_energy_multimodal(
+                    self.deliberator.model,
+                    self.deliberator.belief_factors,
+                    cand["pol"],
+                    pA=self.deliberator.pA,
+                )
+                epistemic = float(sum(s["epistemic"] for s in tr["per_step"]))
+                novelty = float(sum(s["novelty"] for s in tr["per_step"]))
+            elif isinstance(self.deliberator, EFPAgent):
+                g_val, tr = expected_free_energy(
+                    self.deliberator.model,
+                    self.deliberator.belief,
+                    cand["pol"],
+                )
+                epistemic = float(sum(s["epistemic"] for s in tr["per_step"]))
+            else:
+                # Duck-typed deliberator fallback
+                ig_list = plan.get("info_gains")
+                if isinstance(ig_list, (list, tuple)) and idx < len(ig_list):
+                    epistemic = float(ig_list[idx])
+                elif cand["action_idx"] == plan.get("best_action"):
+                    epistemic = float(plan.get("info_gain", 0.0))
+
+            info_gain = epistemic + novelty
+            if info_gain <= 0.0 or info_gain < self.epistemic_entropy_threshold:
+                continue
+
+            if cand["raw_vec"] is not None:
+                if self.safety is not None:
+                    pf = self.safety.filter(state, cand["raw_vec"])
+                    if not pf.get("verified_safe", False):
+                        continue
+                    safe_vec = [float(v) for v in pf["u_filtered"]]
+                else:
+                    safe_vec = [float(v) for v in cand["raw_vec"]]
+            else:
+                safe_vec = [float(v) for v in fallback_action]
+
+            scored.append(
+                {
+                    "action_idx": cand["action_idx"],
+                    "label": cand["label"],
+                    "safe_vec": safe_vec,
+                    "info_gain": info_gain,
+                    "epistemic": epistemic,
+                    "novelty": novelty,
+                    "g_val": g_val,
+                }
+            )
+
+        if not scored:
+            return None
+
+        best = max(scored, key=lambda item: (item["info_gain"], -item["g_val"]))
+        return {
+            "probe_action": best["safe_vec"],
+            "probe_label": best["label"],
+            "efe_deliberation": {
+                "best_action": best["action_idx"],
+                "plan_best_action": plan.get("best_action"),
+                "q_pi": plan.get("q_pi"),
+                "G": plan.get("G"),
+                "info_gain": round(best["info_gain"], 6),
+                "epistemic": round(best["epistemic"], 6),
+                "novelty": round(best["novelty"], 6),
+                "belief_entropy": getattr(self.deliberator, "belief_entropy", None),
+            },
+        }
 
     def gate(
         self,
@@ -203,8 +356,22 @@ class VLActionGate:
                 check = self.action_gate.check(risk_score)
                 receipt["conformal"] = check
                 if not check["allowed"]:
-                    receipt["reason"] = check.get("reason", "risk_exceeds_q_hat")
-                    decision = "escalate_human"
+                    cbf_safe = filtered is None or bool(filtered.get("verified_safe", False))
+                    if self.enable_epistemic_probe and cbf_safe and self.deliberator is not None:
+                        probe = self._select_epistemic_probe(state, u_out)
+                        if probe is not None:
+                            decision = "epistemic_probe"
+                            receipt["reason"] = "epistemic_probe_high_uncertainty"
+                            receipt["probe_action"] = probe["probe_action"]
+                            receipt["probe_label"] = probe["probe_label"]
+                            receipt["efe_deliberation"] = probe["efe_deliberation"]
+                            u_out = probe["probe_action"]
+                        else:
+                            receipt["reason"] = check.get("reason", "risk_exceeds_q_hat")
+                            decision = "escalate_human"
+                    else:
+                        receipt["reason"] = check.get("reason", "risk_exceeds_q_hat")
+                        decision = "escalate_human"
                 else:
                     decision = None
             else:
@@ -255,4 +422,54 @@ class VLActionGate:
             return {"status": "no_filter_installed", "actions_filtered": [list(a) for a in actions], "all_verified_safe": False}
         out = self.safety.filter_trajectory(np.asarray(state, dtype=np.float64), actions, dt=dt)
         out["status"] = "chunk_clamped" if out["all_verified_safe"] else "chunk_unsafe_steps_present"
+        return out
+
+    def smooth_action_chunk(
+        self,
+        state: Sequence[float],
+        actions: Sequence[Sequence[float]],
+        dt: float = 0.05,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Smooth and safety-filter an action chunk via ActionChunkSmoother with clamp fallback."""
+        try:
+            from .action_chunk_smoother import ActionChunkSmoother
+        except ImportError:
+            ActionChunkSmoother = None  # type: ignore[assignment]
+
+        if ActionChunkSmoother is not None:
+            try:
+                init_sig = inspect.signature(ActionChunkSmoother.__init__)
+                init_params = init_sig.parameters
+                accepts_var_kw = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in init_params.values()
+                )
+                init_kwargs: Dict[str, Any] = {}
+                if "safety_filter" in init_params or accepts_var_kw:
+                    init_kwargs["safety_filter"] = self.safety
+                for k, v in kwargs.items():
+                    if k in init_params or accepts_var_kw:
+                        init_kwargs[k] = v
+                smoother = ActionChunkSmoother(**init_kwargs)
+
+                for method_name in ("smooth", "smooth_chunk", "filter_and_smooth"):
+                    method = getattr(smoother, method_name, None)
+                    if callable(method):
+                        m_sig = inspect.signature(method)
+                        m_params = m_sig.parameters
+                        m_var_kw = any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD for p in m_params.values()
+                        )
+                        call_kwargs: Dict[str, Any] = {}
+                        if "dt" in m_params or m_var_kw:
+                            call_kwargs["dt"] = dt
+                        for k, v in kwargs.items():
+                            if (k in m_params or m_var_kw) and k not in init_kwargs:
+                                call_kwargs[k] = v
+                        return method(state, actions, **call_kwargs)
+            except Exception:
+                pass
+
+        out = self.clamp_action_chunk(state, actions, dt=dt)
+        out.setdefault("fallback", "clamp_action_chunk")
         return out

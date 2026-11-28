@@ -81,6 +81,10 @@ CORE_SECURITY_MODULES: Tuple[str, ...] = (
     "core/workspace_tx",
     "core/capability_enforcer",
     "core/hook_checkpoints",
+    "hosts/ros2_adapter",
+    "core/embodied_ast",
+    "core/embodied_threat_guard",
+    "core/flight_recorder",
 )
 
 LAB_RESEARCH_MODULES: Tuple[str, ...] = (
@@ -128,6 +132,15 @@ LAB_RESEARCH_MODULES: Tuple[str, ...] = (
     "core/tool_routing_moe",
     "core/topological_persistence_merger",
     "core/vla_gating",
+    "core/whole_body_barriers",
+    "core/urdf_spatial_kinematics",
+    "core/action_chunk_smoother",
+    "core/adaptive_conformal_robotics",
+    "core/semantic_cbf_compiler",
+    "core/hybrid_contact_passivity",
+    "core/robust_adaptive_cbf",
+    "core/swarm_cbf_coordinator",
+    "core/proprioceptive_ssm_monitor",
     "core/vsa_algebraic_attention",
     "core/weight_space_memory_synthesis",
     "core/weight_space_vsa",

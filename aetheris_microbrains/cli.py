@@ -995,6 +995,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_rp.add_argument("--key-env", default="AETHERIS_FLEET_SIGNING_KEY", help="Optional HMAC signing key env var")
     p_rp.add_argument("--json", action="store_true", help="Output replay report as JSON")
 
+    p_rr = sub.add_parser("robo-replay", help="Verify and counterfactually replay a JSONL robot flight log")
+    p_rr.add_argument("--log", required=True, help="Path to JSONL flight recorder dump")
+    p_rr.add_argument("--max-vel", type=float, default=None, help="Optional counterfactual max linear velocity (m/s)")
+    p_rr.add_argument("--max-ke", type=float, default=None, help="Optional counterfactual max kinetic energy (J)")
+    p_rr.add_argument("--max-force", type=float, default=None, help="Optional counterfactual max contact force (N)")
+    p_rr.add_argument("--conformal-margin", type=float, default=0.0, help="Conformal margin to apply during replay")
+    p_rr.add_argument("--json", action="store_true", help="Output flight replay report as JSON")
+
     p_ir = sub.add_parser("policy-ir-check", help="Verify single-source policy_ir.json parity across Python and Rust")
     p_ir.add_argument("--json", action="store_true", help="Output parity report as JSON")
 
@@ -1071,6 +1079,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"p95_ms={rep.get('latency_p95_ms')}"
             )
         return 0
+
+    if known.command == "robo-replay":
+        from .core.flight_recorder import replay_flight_log
+
+        hard_limits: Dict[str, Any] = {}
+        if known.max_vel is not None:
+            hard_limits["max_linear_vel_mps"] = known.max_vel
+        if known.max_ke is not None:
+            hard_limits["max_kinetic_energy_j"] = known.max_ke
+        if known.max_force is not None:
+            hard_limits["max_contact_force_n"] = known.max_force
+        rep = replay_flight_log(
+            known.log,
+            hard_limits=hard_limits or None,
+            conformal_margin=float(known.conformal_margin),
+        )
+        if known.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print(
+                f"verified_integrity={rep.get('verified_integrity')} | "
+                f"frames={rep.get('total_frames')} | "
+                f"would_intervene={rep.get('would_intervene')} | "
+                f"violations={len(rep.get('violations') or [])}"
+            )
+        return 0 if rep.get("verified_integrity") else 2
 
     if known.command == "policy-ir-check":
         from .core.policy_ir import verify_policy_ir_parity

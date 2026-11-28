@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .core.mcp_security import MCPManifestPinner, detect_prompt_injection
 from .core.runtime_paths import get_state_dir
@@ -178,6 +180,104 @@ def _qual_key(server_name: str, tool_name: str) -> str:
     return f"{str(server_name or '').strip().lower()}::{str(tool_name or '').strip().lower()}"
 
 
+_EMBODIED_EXACT_TOOLS: Set[str] = {
+    "ros2",
+    "moveit",
+    "moveit2",
+    "mavlink",
+    "lerobot",
+    "publish_cmd_vel",
+    "cmd_vel",
+    "gripper_command",
+    "follow_joint_trajectory",
+    "navigate_to_pose",
+}
+_EMBODIED_SUFFIXES: Tuple[str, ...] = (
+    "_publish_cmd_vel",
+    "_gripper_command",
+    "_follow_joint_trajectory",
+    "_navigate_to_pose",
+)
+
+
+def is_embodied_mcp_tool(
+    tool_name: str,
+    arguments: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """Return True when an MCP tool name/payload targets embodied robot control."""
+    raw = str(tool_name or "").strip().lower()
+    if raw.startswith("mcp__") and raw.count("__") >= 2:
+        raw = raw.split("__", 2)[2]
+    if (
+        raw in _EMBODIED_EXACT_TOOLS
+        or raw.startswith(("ros2_", "ros2-", "moveit", "mavlink_", "mavlink-", "lerobot_", "lerobot-"))
+        or raw.endswith(_EMBODIED_SUFFIXES)
+    ):
+        return True
+    if isinstance(arguments, Mapping):
+        topic = str(arguments.get("topic") or "").strip().lower()
+        if topic in ("/cmd_vel", "cmd_vel") or (
+            isinstance(arguments.get("twist"), Mapping) and "linear" in arguments["twist"]
+        ):
+            return True
+    return False
+
+
+def _infer_embodied_protocol_and_payload(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    raw = str(tool_name or "").strip().lower()
+    if raw.startswith("mcp__") and raw.count("__") >= 2:
+        raw = raw.split("__", 2)[2]
+
+    explicit_proto = str(arguments.get("protocol") or "").strip().lower()
+    if explicit_proto in ("ros2", "moveit2", "lerobot", "mavlink"):
+        protocol = explicit_proto
+    elif raw.startswith("moveit"):
+        protocol = "moveit2"
+    elif raw.startswith(("mavlink_", "mavlink-")) or raw == "mavlink":
+        protocol = "mavlink"
+    elif raw.startswith(("lerobot_", "lerobot-")) or raw == "lerobot":
+        protocol = "lerobot"
+    else:
+        protocol = "ros2"
+
+    payload = dict(arguments)
+    has_action_hint = any(
+        payload.get(k) is not None for k in ("topic_or_action", "topic", "action", "message_type", "msg_type")
+    )
+    if not has_action_hint:
+        if "cmd_vel" in raw:
+            payload["topic_or_action"] = "/cmd_vel"
+        elif "gripper" in raw:
+            payload["action"] = "GripperCommand"
+        elif "follow_joint_trajectory" in raw:
+            payload["action"] = "FollowJointTrajectory"
+        elif "navigate_to_pose" in raw:
+            payload["action"] = "NavigateToPose"
+        elif raw:
+            payload["topic_or_action"] = raw
+    return protocol, payload
+
+
+def _sanitize_for_flight_log(value: Any) -> Any:
+    """Convert non-finite numbers and exotic objects into JSON-safe primitives for FlightDataRecorder."""
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _sanitize_for_flight_log(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_for_flight_log(v) for v in value]
+    return str(value)
+
+
 class StdioMCPDownstreamClient:
     """Line-delimited JSON-RPC stdio client for a downstream MCP child server."""
 
@@ -251,6 +351,14 @@ class MCPProxyGateway:
         secret_broker: Optional[SecretBroker] = None,
         downstream_transports: Optional[Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]] = None,
         block_response_injections: bool = False,
+        embodied_mode: bool = False,
+        embodied_hard_limits: Optional[Dict[str, Any]] = None,
+        mission_envelope: Optional[Any] = None,
+        mission_secret: Optional[bytes | str] = None,
+        capability_token: Optional[Any] = None,
+        root_secret: Optional[bytes | str] = None,
+        sensor_verifier: Optional[Any] = None,
+        flight_recorder: Optional[Any] = None,
     ) -> None:
         base = Path(state_dir) if state_dir is not None else get_state_dir()
         resolved_pin = Path(pin_path) if pin_path is not None else (base / "mcp_manifest_pins.json")
@@ -261,6 +369,14 @@ class MCPProxyGateway:
         self.secret_broker = secret_broker
         self._downstream_transports: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = dict(downstream_transports or {})
         self.block_response_injections = bool(block_response_injections)
+        self.embodied_mode = bool(embodied_mode)
+        self.embodied_hard_limits = dict(embodied_hard_limits) if embodied_hard_limits is not None else None
+        self.mission_envelope = mission_envelope
+        self.mission_secret = mission_secret
+        self.capability_token = capability_token
+        self.root_secret = root_secret
+        self.sensor_verifier = sensor_verifier
+        self.flight_recorder = flight_recorder
         self._quarantined: Set[str] = set()
         self._pinned_prefix: List[str] = []
         self._servers: Dict[str, List[Dict[str, Any]]] = {}
@@ -441,12 +557,128 @@ class MCPProxyGateway:
                 "layer": 1,
             }
 
+        if self.embodied_mode or is_embodied_mcp_tool(tname, args_dict):
+            return self._evaluate_embodied_tool_call(srv, tname, args_dict)
+
         from .core.layered_decision_engine import decide
 
         return decide(
             {"tool": f"mcp__{srv}__{tname}", "arguments": args_dict},
             policy=self.policy,
         )
+
+    def _evaluate_embodied_tool_call(
+        self,
+        server_name: str,
+        tool_name: str,
+        args_dict: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from .hosts.ros2_adapter import evaluate_embodied_action
+
+        protocol, emb_payload = _infer_embodied_protocol_and_payload(tool_name, args_dict)
+        sensor_obs = emb_payload.pop("sensor_observation", None)
+        scene_text = emb_payload.get("scene_text")
+        carrying_n = emb_payload.get("carrying_payload_n", emb_payload.get("load_cell_n"))
+        current_pos = emb_payload.get("current_position")
+
+        emb_res = evaluate_embodied_action(
+            emb_payload,
+            protocol=protocol,
+            capability_token=self.capability_token,
+            root_secret=self.root_secret,
+            hard_limits=self.embodied_hard_limits,
+            mission_envelope=self.mission_envelope,
+            mission_secret=self.mission_secret,
+            sensor_observation=sensor_obs if isinstance(sensor_obs, Mapping) else None,
+            sensor_verifier=self.sensor_verifier,
+            scene_text=scene_text,
+            carrying_payload_n=(
+                float(carrying_n)
+                if isinstance(carrying_n, (int, float)) and not isinstance(carrying_n, bool)
+                else None
+            ),
+            current_position=current_pos,
+        )
+
+        frame_hash: Optional[str] = None
+        if self.flight_recorder is not None:
+            allowed_ok = emb_res.get("decision") == "allow"
+            norm_data = emb_res.get("normalized")
+            token_id = getattr(self.capability_token, "token_id", None) or getattr(
+                self.mission_envelope, "mission_id", None
+            )
+            slack = 1.0 if allowed_ok else -1.0
+            if allowed_ok and isinstance(norm_data, Mapping) and self.embodied_hard_limits:
+                max_v = self.embodied_hard_limits.get("max_linear_vel_mps")
+                cur_v = norm_data.get("linear_vel_mps")
+                if isinstance(max_v, (int, float)) and isinstance(cur_v, (int, float)) and math.isfinite(cur_v):
+                    slack = float(max_v) - float(cur_v)
+
+            recorded = self.flight_recorder.record(
+                tick=self.flight_recorder.total_recorded,
+                timestamp_ns=time.time_ns(),
+                state=_sanitize_for_flight_log(
+                    {
+                        "server": server_name,
+                        "tool": tool_name,
+                        "position": current_pos
+                        or (norm_data.get("target_position") if isinstance(norm_data, Mapping) else None),
+                        "carrying_payload_n": carrying_n,
+                    }
+                ),
+                u_nominal=_sanitize_for_flight_log(args_dict),
+                u_filtered=(
+                    _sanitize_for_flight_log(norm_data)
+                    if allowed_ok
+                    else {
+                        "blocked": True,
+                        "reason": str(emb_res.get("reason") or "denied"),
+                        "clamp_hints": _sanitize_for_flight_log(emb_res.get("clamp_hints") or {}),
+                    }
+                ),
+                min_barrier_slack=slack,
+                aci_q_hat=0.0,
+                token_id=token_id,
+                status="ok" if allowed_ok else f"blocked:{emb_res.get('reason')}",
+            )
+            frame_hash = recorded.get("frame_hash")
+
+        reason = str(emb_res.get("reason") or "denied")
+        if emb_res.get("decision") != "allow":
+            receipt = {
+                "server": server_name,
+                "tool": tool_name,
+                "protocol": protocol,
+                "decision": "deny",
+                "reason": reason,
+                "clamp_hints": emb_res.get("clamp_hints") or {},
+                "flight_frame_hash": frame_hash,
+            }
+            return {
+                "decision": "deny",
+                "authorized": False,
+                "reason": reason,
+                "reason_code": f"mcp_proxy_embodied_veto:{reason}",
+                "label": f"Embodied action blocked ({reason})",
+                "layer": 1,
+                "clamp_hints": emb_res.get("clamp_hints") or {},
+                "embodied_verdict": emb_res,
+                "block_receipt": receipt,
+                "flight_frame_hash": frame_hash,
+            }
+
+        norm_info = emb_res.get("normalized") or {}
+        return {
+            "decision": "allow",
+            "authorized": True,
+            "reason": "authorized",
+            "reason_code": "layer1_embodied_firewall_verified",
+            "label": f"embodied:{protocol}:{norm_info.get('topic_or_action', tool_name)}",
+            "layer": 1,
+            "clamp_hints": emb_res.get("clamp_hints") or {},
+            "embodied_verdict": emb_res,
+            "flight_frame_hash": frame_hash,
+        }
 
     def execute_proxied_tool_call(
         self,
@@ -461,12 +693,16 @@ class MCPProxyGateway:
         srv = str(server_name or "").strip()
         verdict = self.evaluate_tool_call(srv, tool_name, arguments, headers=headers)
         if verdict.get("decision") != "allow":
-            return {
+            denied_out: Dict[str, Any] = {
                 "allowed": False,
                 "verdict": verdict,
                 "isError": True,
                 "content": [{"type": "text", "text": f"Blocked by Aetheris MCP Proxy: {verdict.get('reason_code')}: {verdict.get('label')}"}],
             }
+            if "block_receipt" in verdict:
+                denied_out["block_receipt"] = verdict["block_receipt"]
+                denied_out["reason"] = verdict.get("reason")
+            return denied_out
 
         transport = self._downstream_transports.get(srv) or self._downstream_transports.get(srv.lower())
         if transport is None:
@@ -594,8 +830,40 @@ class MCPProxyGateway:
             args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
             hdrs = params.get("headers") if isinstance(params.get("headers"), dict) else None
             if srv in self._downstream_transports or srv.lower() in self._downstream_transports:
-                return _ok(self.execute_proxied_tool_call(srv, tname, args, headers=hdrs, req_id=req_id))
+                proxied = self.execute_proxied_tool_call(srv, tname, args, headers=hdrs, req_id=req_id)
+                if not proxied.get("allowed") and "block_receipt" in proxied:
+                    v = proxied["verdict"]
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32001,
+                            "message": f"Blocked by Aetheris Embodied Firewall: {v.get('reason')}",
+                            "data": {
+                                "decision": "deny",
+                                "reason": v.get("reason"),
+                                "reason_code": v.get("reason_code"),
+                                "block_receipt": proxied["block_receipt"],
+                            },
+                        },
+                    }
+                return _ok(proxied)
             verdict = self.evaluate_tool_call(srv, tname, args, headers=hdrs)
+            if verdict.get("decision") != "allow" and "block_receipt" in verdict:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32001,
+                        "message": f"Blocked by Aetheris Embodied Firewall: {verdict.get('reason')}",
+                        "data": {
+                            "decision": "deny",
+                            "reason": verdict.get("reason"),
+                            "reason_code": verdict.get("reason_code"),
+                            "block_receipt": verdict["block_receipt"],
+                        },
+                    },
+                }
             return _ok(verdict)
         if method == "subscriptions/listen":
             return _ok({"subscribed": True, "protocolVersion": MCP_PROTOCOL_VERSION})
@@ -642,6 +910,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Register downstream stdio MCP server (`name=command args...`) for live proxying",
     )
     parser.add_argument("--block-injections", action="store_true", help="Quarantine downstream responses containing indirect prompt injections")
+    parser.add_argument("--embodied-ros2", action="store_true", help="Force embodied physical action firewall gating on all MCP tool calls")
     args = parser.parse_args(argv)
 
     if args.check:
@@ -662,6 +931,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             secret_broker=SecretBroker(),
             downstream_transports=transports,
             block_response_injections=bool(args.block_injections),
+            embodied_mode=bool(args.embodied_ros2),
         )
         for sname, cl in clients.items():
             try:
