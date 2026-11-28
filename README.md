@@ -73,6 +73,7 @@ It sits directly in front of tool execution and shell invocation. By analyzing d
 - [CI/CD PR Gate and SARIF Reporting](#cicd-pr-gate-and-sarif-reporting)
 - [Next-Gen Runtime: Rust/WASM Core, Transactions, Subagent IAM & Fleet Attestation](#next-gen-runtime-rustwasm-core-transactions-subagent-iam--fleet-attestation)
 - [🏗️ 4-Layer Decision Architecture](#-4-layer-decision-architecture)
+- [🤖 Embodied AI & Robotics Safety Kernel (VLA, ROS 2, Humanoids & Unitree)](#-embodied-ai--robotics-safety-kernel-vla-ros-2-humanoids--unitree)
 - [🔬 Experimental & Research Extensions (Optional Modules)](#-experimental--research-extensions-optional-modules)
 - [🎯 Scope, Where It Fits & Alternatives](#-scope-where-it-fits--alternatives)
 - [🧪 Testing & Reproducible Benchmarks](#-testing--reproducible-benchmarks)
@@ -121,7 +122,7 @@ cd microbrainsforagents
 pip install -e .
 ```
 
-Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`). The core 69 security modules use pure Python stdlib with zero third-party dependencies (`aetheris verify-core`).
+Importing `aetheris_microbrains` is side-effect clean: it does **not** mutate `sys.path` or shadow top-level project modules (`core`, `tools`, `memory`, `evolution`). The core **75 security modules** use pure Python stdlib with zero third-party dependencies (`aetheris verify-core`).
 
 * **Naming clarity:** Repository name is `microbrainsforagents`, `pip` package name is `aetheris-microbrains`, and the Python import package is `aetheris_microbrains`.
 
@@ -134,8 +135,11 @@ aetheris policy-ir-check                                             # Verify si
 aetheris replay --journal decision_journal.jsonl --profile strict --synthesize-policy
 aetheris audit --ui --port 8767                                      # Launch real-time Audit Web UI
 aetheris doctor --scan-mcp                                           # Check health & audit MCP tools
-aetheris mcp-proxy --stdio --downstream srv=cmd                      # Run MCP gateway + secret broker
+aetheris mcp-proxy --stdio --downstream srv=cmd                      # Run MCP gateway + secret broker (add --embodied-ros2 for physical MCP)
 aetheris pr-gate --base main --format sarif                          # Run CI/CD pre-merge diff gate
+aetheris robo-bench --native-rust                                    # Run 6-scenario embodied robotics safety & latency benchmark
+aetheris robo-replay --log flight.jsonl --synthesize-safety-patch    # Verify SHA-256 flight log & synthesize safety patch
+aetheris unitree-doctor --robot g1_29dof                             # Check Unitree profile, CycloneDDS readiness & safety bridge
 ```
 
 *Optional extras and native Rust shim:*
@@ -1039,7 +1043,7 @@ Export forensic decision events as OpenTelemetry GenAI semantic convention spans
 
 ## Packaging and Pure-Stdlib Core Isolation (`verify-core`)
 
-Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`): **69 core security modules** run strictly on the Python standard library with zero third-party dependencies (zero NumPy or experimental imports on the security decision path), while **49 lab/research modules** remain cleanly isolated. Run `aetheris verify-core` to verify isolation programmatically.
+Aetheris Microbrains strictly decouples production agent security from experimental lab research (`core/packaging_manifest.py`): **75 core security modules** run strictly on the Python standard library with zero third-party dependencies (zero NumPy or experimental imports on the security decision path), while **71 lab/research modules** (including robotics NumPy controllers, kinematic/dynamics solvers, and VLA gating) remain cleanly isolated. Run `aetheris verify-core` to verify isolation programmatically.
 
 ---
 
@@ -1081,6 +1085,23 @@ Microbrains v0.8 adds six production platform layers on top of the zero-NumPy st
    * Calibrated routing with fail-safe abstention: if a query cannot be matched to the top tools with high confidence, the router abstains from pruning and provides the full tool surface to prevent task degradation.
 4. **Layer 3: Honest Escalation**
    * Structured fallback returning `escalate` (in Claude Code hooks: `permissionDecision: "ask"`) with full context for human or LLM review.
+
+---
+
+## 🤖 Embodied AI & Robotics Safety Kernel (VLA, ROS 2, Humanoids & Unitree)
+
+Beyond LLM coding agents, Aetheris Microbrains provides a deterministic, sub-millisecond **embodied safety spinal cord and hardware firewall** sitting between vision-language-action policies (`OpenVLA`, `π₀`, `GR00T`, RL) and physical actuators—all verified across `pytest` and `aetheris robo-bench` (`6/6` closed-loop scenarios, `0/560` safety violations):
+
+| Domain | Capabilities & Key Modules |
+| :--- | :--- |
+| **Control & Safety Filters (1 kHz + Simplex)** | Relative-degree-2 **HOCBF** & `EulerLagrangeDynamics` (`core/state_cbf_filter.py`); Stage-A soft relaxation + `SimplexBackupController` & **ISO/TS 15066** `KineticEnergyBarrier`, `CapsulePairBarrier`, `ManipulabilityBarrier`, `TiltConeBarrier`, `WrenchConeBarrier` (`core/whole_body_barriers.py`); joint **CLF-CBF-QP** & exact KKT implicit differentiation (`core/differentiable_clf_cbf.py`). |
+| **64-DoF Rust/WASM Real-Time Core** | Zero-heap-allocation **64-DoF / 128-barrier** Dykstra CBF projector, `pd_cbf_clamp`, Simplex brake & watchdog scaler in [`rust/aetheris-gate/src/rt_cbf.rs`](rust/aetheris-gate/src/rt_cbf.rs), C99/C++ header ([`aetheris_rt_gate.h`](rust/aetheris-gate/include/aetheris_rt_gate.h)), zero-copy pure-stdlib `ctypes` loader (`core/rust_shim.py`, `use_native_rust=True`), and WebXR teleop clamping in [`wasm-sdk/`](wasm-sdk/index.mjs). |
+| **URDF Kinematics, ESDF & Formal KAN-CBFs** | Dependency-free XML URDF + `SE(3)` Featherstone RNEA/CRBA, Danskin analytical capsule gradients & floating-base `centroidal_momentum_matrix` (`core/urdf_spatial_kinematics.py`); $O(V)$ 3D EDT `VoxelESDFGrid`/`VoxelSDFBarrier`, IRIS convex polytope inflation & Betti-1 homotopy deadlock escape (`core/esdf_corridor_cbf.py`); Chebyshev `KANBarrierConstraint` + interval-arithmetic CEGIS verifier (`core/kan_neural_cbf_verifier.py`). |
+| **VLA Chunking, Adaptation & Active Perception** | RK4 + $O(H \cdot d_u)$ ADMM `ActionChunkSmoother` + latency blending & LogSumExp flow/diffusion guidance (`core/action_chunk_smoother.py`); Gibbs–Candès online **ACI** & directional covariance inflation (`core/adaptive_conformal_robotics.py`); $\mathcal{L}_1$ disturbance observer (`core/robust_adaptive_cbf.py`); SPD pseudo-inertia online RLS SysID (`core/online_inertial_sysid.py`); 4-tier `VLActionGate` with `epistemic_probe` (`core/vla_gating.py`, `core/pymdp_efe.py`); `O(1)` Mini-Mamba `ProprioceptiveSSMMonitor` (`core/proprioceptive_ssm_monitor.py`). |
+| **Humanoids, Bimanual, Hands & Swarms** | 3D LIPM Capture-Point (`CapturePointDCMBarrier`), `SupportPolygonBalanceCBF`, friction-pyramid `GRFFrictionPyramidAllocator`, & `SwingFootClearanceBarrier` (`core/legged_centroidal_cbf.py`); arm-balance `LocoManipulationBalanceCBF` + 2.5D `TerrainFootholdCBF` (`core/loco_manipulation_foothold_cbf.py`); `ClosedChainKinematicBarrier`, 12D grasp-matrix `CooperativeWrenchCBF`, & `TautCableBarrier` (`core/bimanual_grasp_cbf.py`); $N$-finger `DexterousGraspModel` + tactile slip / $I^2 t$ thermal `DexterousTactileCBF` (`core/dexterous_hand_cbf.py`); lexicographic `HierarchicalTaskCBFIK` (`core/hierarchical_task_cbf_ik.py`); capability-weighted deadlock-free `DecentralizedSwarmCBF` (`core/swarm_cbf_coordinator.py`); Rockafellar–Uryasev `MultimodalCVaRCBF` (`core/cvar_multimodal_cbf.py`). |
+| **Unitree Hardware Ecosystem** | Canonical specs (`Go2`, `B2`, `Z1`, `H1`, `H1-2`, `G1 23/29-DoF`, `Dex3-1`), `unitree_crc32`, PD-to-torque `MotorPDCBFAdapter`, & 4-state `SafeUnitreeLowLevelBridge` (`HOMING_RAMP`, `mode_machine`/`mode_pr`, thermal derating, tilt/watchdog damping in `core/unitree_safety_bridge.py`); `aetheris unitree-doctor`. |
+| **Contact Passivity, Dynamic STL & Edge Silicon** | Port-Hamiltonian `EnergyTankPassivityFilter` & `ContactManifoldLearner` (`core/hybrid_contact_passivity.py`); moving-obstacle $\partial h/\partial t$ HOCBFs, Kalman tracker & STL `AND`/`OR`/`UNTIL` trees (`core/semantic_cbf_compiler.py`); `RightInvariantSE3Filter` + `OcclusionShadowBarrier` (`core/se3_belief_occlusion_cbf.py`); non-blocking `AsyncMultiRateSensorimotorLoop` + contraction-bounded plasticity (`core/sensorimotor_loop.py`); 2-bit ternary LUT & `MatMulInteger` ONNX (`core/ternary_edge_runtime.py`, `ternary_simd.rs`); certified `nir` export & `DVSEventSpikeEncoder` (`core/nir_export.py`). |
+| **Stdlib Embodied Security, SHM & Flight Replay** | Pure-stdlib `EmbodiedActionFirewall` for **`ros2`**, **`moveit2`**, **`lerobot`**, **`mavlink`**, and **`unitree`** (`hosts/ros2_adapter.py`, `--embodied-ros2` in `mcp_proxy.py`); `CrossModalSensorVerifier` (freeze/skew/teleport spoof detection), HMAC `SignedMissionEnvelope` & `VisualPromptInjectionGuard` (`core/embodied_threat_guard.py`); kinematic/Unitree AST verifier (`core/embodied_ast.py`); kinetic `CapabilityCaveat`s (`core/capability_tokens.py`); Seqlock `SharedMemorySensorimotorBus` (`core/shm_sensorimotor_bus.py`); SHA-256 `FlightDataRecorder` + `CounterfactualPhysicsGate` (`core/flight_recorder.py`); auto-synthesizer `aetheris robo-replay --synthesize-safety-patch` (`core/robotics_policy_synthesizer.py`); FastAPI `/v1/robotics/*` (`core/microbrain_server.py`). |
 
 ---
 
