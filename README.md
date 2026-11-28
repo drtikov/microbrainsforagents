@@ -258,7 +258,7 @@ Use Microbrains with **stock VS Code Cline and Cline CLI** without forking or re
   Writes executable `PreToolUse` / `PostToolUse` scripts (plus `PreToolUse.ps1` / `PostToolUse.ps1` on Windows) into `.clinerules/hooks/` (`--target vscode`), `~/.cline/hooks/` (`--target cli`, honoring `CLINE_DIR` / `CLINE_HOOKS_DIR`), or both global paths when no `--workspace` is passed, auto-selecting `aetheris-gate` when available (`--no-rust-shim` override) and isolating Python via `-I`.
 - **Full Native Schema & Kernel Coverage:** Accepts Cline's `preToolUse` / `postToolUse` / `tool` JSON payloads, maps Cline tools (`execute_command`, `run_commands`, `write_to_file`, `replace_in_file`, `read_file`, `search_files`, `list_files`, `use_mcp_tool`), extracts Cline `SEARCH/REPLACE` diff blocks for full AST security/syntax linting, blocks unsafe calls with `{"cancel": true, "errorMessage": ...}`, alerts on leaked secrets in `postToolUse.result` via `contextModification`, and protects `.clinerules/` / `.cline/` from tampering.
 
-| Benchmark (Local Cline Env, v0.7.6) | Measured Result | Benefit |
+| Benchmark (Local Cline Env, v0.9.0) | Measured Result | Benefit |
 | :--- | :--- | :--- |
 | **Anti-evasion security (`examples/10`)** | **22/22** TPR · **0/12** FPR · `0.47 ms` p50 / `4.15 ms` p95 | **100.0% attacks blocked · 0.0% benign FP** |
 | **25-step tool-routing & gate** | `12,312` vs `64,800` tokens · **0** FN / **0** FP (baseline: 8 FN, 4 FP) · `2.24 ms` p95 | **-81.0% schema tokens · 100.0% FN/FP drop** |
@@ -680,7 +680,7 @@ cargo build --release --manifest-path rust/aetheris-gate/Cargo.toml
 aetheris install qwen --workspace . --use-rust-shim --profile guardrails
 ```
 
-**Compact Local CPU Benchmarks** (`v0.7.6`, in-process gate, no live LLM calls):
+**Compact Local CPU Benchmarks** (`v0.9.0`, in-process gate, no live LLM calls):
 
 | Benchmark Suite | Results (% Impact) |
 |---|---|
@@ -989,7 +989,7 @@ When AI agents browse the web, read external tickets/PRs, or connect to third-pa
 * **Sensitive Asset Protection Across Tools & Shell (Layer 0 & Layer 1):** Denies writes/mutations to `.env*`, `.git/hooks/`, `.git/config`, `.ssh/`, `id_rsa`, `credentials.json`, `/proc/*/environ`, agent control-plane paths (`.claude/`, `.codex/`, `.cursor/`, `.vscode/`, `CLAUDE.md`, `AGENTS.md`), and cloud/package credential stores (`~/.aws/credentials`, `~/.npmrc`, `~/.pypirc`, `~/.docker/config.json`). Normalizes paths, blocks null-byte bypasses, and matches glob patterns via `fnmatch`.
 * **Obfuscated Payload, Polyglot Code & Deferred-Exec Screening (Layer 1):** Inspects applied Python ASTs/diffs (`eval`/`exec`, `os.system`, `subprocess(shell=True)`, `base64`-to-`exec`, `getattr` obfuscation, `__builtins__` tampering, `secret_leak_pattern_found`, `ast_secret_exfil_pattern`), polyglot diffs across **JS/TS, Go, Rust, SQL, Terraform/HCL, Dockerfiles, shell scripts, and YAML** (`core/multilang_ast.py`), deferred-execution supply-chain edits in `package.json`, `.vscode/tasks.json`, `Makefile`, `conftest.py`, `*.pth`, and CI workflows (`core/deferred_exec_guard.py`), **and** scans command strings and arbitrary nested tool/MCP/web arguments for raw API keys (Stripe `sk_live_...`, Anthropic, OpenAI, GitHub, HuggingFace, Google), database URIs (`postgres://`, `mysql://`, `mongodb://`), JWT tokens, Bearer headers, and PEM private keys (`layer1_secret_egress_veto`).
 * **Allowlist-First Shell Guard, Newline Injection & Wrapper Unwrapping:** Catches newline-separated commands (`echo ok\nrm -rf /`), unwraps wrapper commands (`xargs`, `find -exec/-ok`, `env`, `sudo`, `nohup`, `timeout`, inline `VAR=val`, `LD_PRELOAD` overrides) before running checks—blocking destructive shell chains (`rm -rf`, `env sh -c "rm -rf /"`, `curl | sh`, `dd of=/dev/`, `DROP DATABASE`) and secret env-var exposures (`echo $OPENAI_API_KEY`, `printenv GITHUB_TOKEN`), escalating bare `env`/`printenv`/`ls env:` and unrecognized commands.
-* **MCP Supply-Chain Security & Rug-Pull Defenses (`v0.7.6+`):**
+* **MCP Supply-Chain Security & Rug-Pull Defenses (`v0.9.0+`):**
   * `scan_mcp_tools()` scans incoming MCP tool definitions (including cross-tool ShareLock split payloads) for indirect prompt injection, payload poisoning, and tool shadowing against local built-ins (`trust_is_builtin_field=False` by default).
   * `detect_prompt_injection()` intercepts NFKC/homoglyph evasion, Unicode tag smuggling (`\U000E0000-\U000E007F`), Variation Selectors (`\uFE00-\uFE0F`, `\U000E0100-\U000E01EF`), bidirectional text overrides (`\u202E`), zero-width obfuscation, and spoofed system delimiters (`<IMPORTANT>`, `<system>`, `<system-reminder>`, `[INST]`, `[OVERRIDE]`).
   * Unified launch+manifest pinning (`save_mcp_manifest_pin`, `verify_mcp_manifest`, `doctor --pin-mcp` / `--scan-mcp`) pins `.mcp.json` commands and cryptographic SHA-256 tool hashes, failing closed on modified or newly added unpinned tools.
@@ -1138,7 +1138,7 @@ The repository also includes standalone research modules (including the 18 neuro
 
 ## 🧪 Testing & Reproducible Benchmarks
 
-Run the full verification suite (**`570 passed, 2 skipped`** on Windows / **`566 passed, 6 skipped`** on Linux CI; skips occur when optional dependencies like `nir`, `onnx`, or platform-specific extras are not installed):
+Run the full verification suite (**`970 collected`** on Windows / Linux CI — subset counts vary by optional deps; skips occur when optional dependencies like `nir`, `onnx`, or platform-specific extras are not installed):
 
 ```bash
 pytest aetheris_microbrains/tests -q
@@ -1300,9 +1300,9 @@ python benchmark_dsh_mcp_ab.py
 
 > **Scope note:** The MCP tools are on-demand checks, not automatic enforcement for every DSH action. Use the repository's separate hook for automatic pre-tool enforcement and OS-level isolation for untrusted execution.
 
-### 6. Pi Coding Agent Benchmark Summary (CPU-Only, v0.7.6)
+### 6. Pi Coding Agent Benchmark Summary (CPU-Only, v0.9.0)
 
-Headline local CPU results for Pi (`v0.84.2`) paired with Microbrains (`v0.7.6`): **-81.0%** prefill schema tokens (**52,488** saved per 25-step loop), **100%** attack detection (**22/22**, **0%** benign FP), and **56.7%** cache-adjusted sticky savings at **100%** Recall@4 (**0/120** dropped tools). See [Pi Coding Agent Integration](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks) for 1-command setup (`aetheris install pi --workspace .`).
+Headline local CPU results for Pi (`v0.84.2`) paired with Microbrains (`v0.9.0`): **-81.0%** prefill schema tokens (**52,488** saved per 25-step loop), **100%** attack detection (**22/22**, **0%** benign FP), and **56.7%** cache-adjusted sticky savings at **100%** Recall@4 (**0/120** dropped tools). See [Pi Coding Agent Integration](#pi-coding-agent-integration-zero-npm-dep-native-extension--benchmarks) for 1-command setup (`aetheris install pi --workspace .`).
 
 | Local CPU Operation | p50 Latency | p95 Latency |
 | --- | ---: | ---: |
@@ -1346,7 +1346,7 @@ Measured statelessly from the repo clone through the exact invocation path used 
 
 ### 9. Cline Local Verification & Engine Benchmark Summary
 
-Measured locally from the installed `aetheris-microbrains` v0.7.6 environment alongside `13/13` live Cline API smoke checks (`deny` on `.env`/`sk_live_`/`rm -rf /`/`curl | sh`/`eval()`, `allow` on `git status`/`README.md`, `[REDACTED_AWS_KEY]` DLP). See [Cline Integration](#cline-integration-native-clineruleshooks--warm-rust-shim) for 1-command `.clinerules/hooks/` setup.
+Measured locally from the installed `aetheris-microbrains` v0.9.0 environment alongside `13/13` live Cline API smoke checks (`deny` on `.env`/`sk_live_`/`rm -rf /`/`curl | sh`/`eval()`, `allow` on `git status`/`README.md`, `[REDACTED_AWS_KEY]` DLP). See [Cline Integration](#cline-integration-native-clineruleshooks--warm-rust-shim) for 1-command `.clinerules/hooks/` setup.
 
 | Suite / Metric | Microbrains | Keyword Baseline / Unfiltered | Benefit |
 | :--- | ---: | ---: | :--- |
