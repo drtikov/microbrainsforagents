@@ -580,7 +580,26 @@ class MotorPDCBFAdapter:
 
 
 class SafeUnitreeLowLevelBridge:
-    """4-state lifecycle interlock and safety bridge for Unitree rt/lowcmd."""
+    """4-state lifecycle interlock and safety bridge for Unitree rt/lowcmd.
+
+    Supported robots
+    ----------------
+    Go2 (12 DoF), H1 (19 DoF), H1-2 (21 DoF), G1 (23/29 DoF),
+    Z1 (6 DoF arm), Dex3-1 (7 DoF hand envelope).
+
+    Scope boundary — Dex3-1 / DHHand
+    ----------------------------------
+    This bridge targets the **body motor bus** (``rt/lowcmd`` / ``rt/lowstate``)
+    carried over CycloneDDS as ``unitree_hg.msg.dds_.LowCmd_`` /
+    ``unitree_hg.msg.dds_.LowState_``.  The Dex3-1 hand motor array
+    (``HGHandCmd_``, 7-slot ``MotorCmd_``, published on the separate topic
+    ``rt/dex3/righthand/cmd`` / ``rt/dex3/lefthand/cmd``) is **out of scope**:
+    joint-limit enforcement and CRC packing for hand commands require a
+    dedicated ``Dex3HandBridge`` that speaks the ``HGHandCmd_`` IDL.
+    Per-joint position/velocity limits for Dex3-1 fingers are defined in
+    ``_DEX3_R_LIMITS`` / ``_DEX3_L_LIMITS`` above and are available for
+    re-use by such a bridge; they are not applied here.
+    """
 
     def __init__(
         self,
