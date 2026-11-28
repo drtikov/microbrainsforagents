@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import struct
+import threading
+import time
 
 import numpy as np
 
@@ -11,6 +13,8 @@ from aetheris_microbrains.core.unitree_safety_bridge import (
     MotorPDCBFAdapter,
     SafeUnitreeLowLevelBridge,
     UnitreeDDSWireShim,
+    UnitreeExternalWatchdog,
+    UnitreeLowStateBuffer,
     unitree_crc32,
 )
 
@@ -234,3 +238,152 @@ def test_h1_2_z1_dex3_limits_and_c_struct_crc_wire_parity():
     assert len(hg_bytes) == 1000
     hg_words = list(struct.unpack("<250I", hg_bytes))
     assert g1_wire.crc == unitree_crc32(hg_words)
+
+
+def _make_g1_state(tick: int = 0, q: float = 0.0) -> dict:
+    return {
+        "mode_machine": 3,
+        "tick": tick,
+        "crc": (0xABC000 + tick) if tick else 0,
+        "imu_state": {"rpy": [0.0, 0.0, 0.0]},
+        "motor_state": [{"q": q, "dq": 0.0, "temperature": 35.0} for _ in range(35)],
+    }
+
+
+def test_watchdog_boundary_none_lowstate():
+    """Boundary 1: passing None stops energizing immediately and latches DAMPING_STOP past TTL."""
+    bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.006, watchdog_ttl_ms=30.0)
+    for i in range(5):
+        out = bridge.step(_make_g1_state(tick=i + 1), {"q": [0.1] * 29}, now_s=i * 0.002)
+        assert out["status"] == "ok"
+    assert bridge.lifecycle_state == "ACTIVE_CBF"
+
+    # First None inside TTL emits damping command without losing awareness
+    r_drop = bridge.step(None, {"q": [0.1] * 29}, now_s=0.012)
+    assert r_drop["motor_mode"] == 0
+    assert all(k == 0.0 for k in r_drop["kp"])
+
+    # Sustained None past watchdog_ttl_ms latches DAMPING_STOP
+    r_exp = bridge.step(None, {"q": [0.1] * 29}, now_s=0.050)
+    assert bridge.lifecycle_state == "DAMPING_STOP"
+    assert r_exp["lifecycle_state"] == "DAMPING_STOP"
+    assert r_exp["status"] == "watchdog_expired"
+    assert r_exp["motor_mode"] == 0
+
+
+def test_watchdog_boundary_cached_lowstate_after_dds_stops():
+    """Boundary 2: repeatedly passing a cached LowState at 500 Hz after DDS stops MUST expire watchdog."""
+    # A. Direct bridge path with real-style wire tick/crc frozen after DDS stall
+    bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.006, watchdog_ttl_ms=40.0)
+    # Normal operation with occasional 4ms DDS cadence jitter on a 500Hz loop stays alive
+    t = 0.0
+    for i in range(10):
+        tick = (i // 2) + 1  # 250 Hz sensor ticks vs 500 Hz control calls
+        res = bridge.step(_make_g1_state(tick=tick), {"q": [0.1] * 29}, now_s=t)
+        assert res["status"] == "ok"
+        assert res["lifecycle_state"] in ("HOMING_RAMP", "ACTIVE_CBF")
+        t += 0.002
+    assert bridge.lifecycle_state == "ACTIVE_CBF"
+
+    # DDS drops out cleanly: caller keeps passing the last cached LowState every 2ms (500 Hz)!
+    frozen_cached = _make_g1_state(tick=5)
+    expired = None
+    for _ in range(30):  # up to 60 ms of 500 Hz calls using cached LowState
+        res = bridge.step(frozen_cached, {"q": [0.2] * 29}, now_s=t)
+        if res["lifecycle_state"] == "DAMPING_STOP":
+            expired = res
+            break
+        t += 0.002
+    assert expired is not None, "Cached LowState at 500 Hz kept watchdog alive!"
+    assert expired["status"] == "watchdog_expired"
+    assert expired["packet_fresh"] is False
+    assert expired["motor_mode"] == 0
+    assert all(k == 0.0 for k in expired["kp"])
+
+    # B. Intended DDS integration path: UnitreeLowStateBuffer tracks RX arrival timestamp
+    now_box = [100.0]
+    buf = UnitreeLowStateBuffer(clock=lambda: now_box[0])
+    buf_bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.006, watchdog_ttl_ms=40.0)
+    static_no_tick = {
+        "mode_machine": 3,
+        "imu_state": {"rpy": [0.0, 0.0, 0.0]},
+        "motor_state": [{"q": 0.0, "dq": 0.0, "temperature": 35.0} for _ in range(35)],
+    }
+    for _ in range(6):
+        buf.on_low_state(static_no_tick)
+        out = buf.step_bridge(buf_bridge, {"q": [0.1] * 29})
+        assert out["status"] == "ok"
+        now_box[0] += 0.002
+
+    # Stop DDS callbacks (no more on_low_state), keep stepping buffer at 500 Hz
+    tripped_buf = None
+    for _ in range(30):
+        now_box[0] += 0.002
+        out = buf.step_bridge(buf_bridge, {"q": [0.2] * 29})
+        if out["lifecycle_state"] == "DAMPING_STOP":
+            tripped_buf = out
+            break
+    assert tripped_buf is not None
+    assert tripped_buf["status"] == "watchdog_expired"
+    assert buf.age_ms() > 40.0
+
+    # C. Even without tick or UnitreeLowStateBuffer, a frozen payload dict at 500 Hz expires past TTL
+    dict_bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.004, watchdog_ttl_ms=30.0)
+    tripped_dict = None
+    for i in range(30):
+        out = dict_bridge.step(static_no_tick, {"q": [0.1] * 29}, now_s=i * 0.002)
+        if out["lifecycle_state"] == "DAMPING_STOP":
+            tripped_dict = out
+            break
+    assert tripped_dict is not None
+    assert tripped_dict["status"] == "watchdog_expired"
+
+
+def test_watchdog_boundary_stopped_python_loop_external_timeout():
+    """Boundary 3: stopping the Python control loop completely requires an external out-of-loop timeout."""
+    bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.004, watchdog_ttl_ms=35.0)
+    chan_pub = _CapturingChannelPublisher()
+    shim = UnitreeDDSWireShim(chan_pub, "g1_29dof")
+
+    stop_ctrl = threading.Event()
+    ctrl_stopped = threading.Event()
+
+    def control_loop():
+        tick = 1
+        while not stop_ctrl.is_set():
+            bridge.step(_make_g1_state(tick=tick), {"q": [0.1] * 29}, publisher=shim)
+            tick += 1
+            time.sleep(0.002)
+        ctrl_stopped.set()
+
+    watchdog = UnitreeExternalWatchdog(bridge, publisher=shim, timeout_ms=35.0, check_interval_s=0.005)
+    ctrl_thread = threading.Thread(target=control_loop, daemon=True)
+    watchdog.start()
+    ctrl_thread.start()
+    try:
+        # Let loop reach ACTIVE_CBF
+        deadline = time.monotonic() + 1.0
+        while bridge.lifecycle_state != "ACTIVE_CBF" and time.monotonic() < deadline:
+            time.sleep(0.004)
+        assert bridge.lifecycle_state == "ACTIVE_CBF"
+
+        # Simulate frozen/stopped Python control loop (never calls bridge.step again!)
+        stop_ctrl.set()
+        assert ctrl_stopped.wait(timeout=1.0)
+        cmds_before_freeze = len(chan_pub.messages)
+
+        # Out-of-loop external watchdog must fire without any further step() calls
+        assert watchdog.wait_tripped(timeout=1.0) is True
+        assert bridge.lifecycle_state == "DAMPING_STOP"
+        assert watchdog.last_damping_cmd is not None
+        assert watchdog.last_damping_cmd["status"] == "loop_watchdog_expired"
+        assert watchdog.last_damping_cmd["motor_mode"] == 0
+        assert len(chan_pub.messages) > cmds_before_freeze
+        last_wire = chan_pub.messages[-1]
+        assert last_wire.motor_cmd[0].mode == 0
+        assert last_wire.motor_cmd[0].kp == 0.0
+        assert last_wire.crc == watchdog.last_damping_cmd["crc"]
+    finally:
+        stop_ctrl.set()
+        watchdog.stop(timeout=1.0)
+        ctrl_thread.join(timeout=1.0)

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import struct
+import threading
 import time
 import warnings
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -615,17 +616,26 @@ class SafeUnitreeLowLevelBridge:
         self.thermal_critical_c = max(self.thermal_derate_start_c + 1.0, float(thermal_critical_c))
 
         self.pd_adapter = MotorPDCBFAdapter(self.spec, dt=self.dt)
+        self._lock = threading.Lock()
         self.lifecycle_state: str = "UNINITIALIZED"
         self.q_init: Optional[np.ndarray] = None
         self.q_des_prev: Optional[np.ndarray] = None
         self.mode_machine: int = 0
         self.ramp_elapsed_s: float = 0.0
         self.last_lowstate_s: Optional[float] = None
+        self.last_step_s: Optional[float] = None
+        self.last_packet_rx_s: Optional[float] = None
+        self._last_packet_token: Optional[Tuple[Any, ...]] = None
+        self._last_step_monotonic_s: Optional[float] = None
+        self.step_call_count: int = 0
+        self.fresh_packet_count: int = 0
+        self.stale_packet_count: int = 0
         self.e_stopped: bool = False
 
     def e_stop(self) -> None:
-        self.lifecycle_state = "DAMPING_STOP"
-        self.e_stopped = True
+        with self._lock:
+            self.lifecycle_state = "DAMPING_STOP"
+            self.e_stopped = True
 
     @staticmethod
     def _temp_to_scalar(raw: Any, default: float = 35.0) -> float:
@@ -693,122 +703,257 @@ class SafeUnitreeLowLevelBridge:
             crc_calc=crc_calc,
         )
 
+    @staticmethod
+    def _get_lowstate_field(low_state: Any, name: str) -> Any:
+        if isinstance(low_state, Mapping):
+            return low_state.get(name)
+        return getattr(low_state, name, None)
+
+    @classmethod
+    def _extract_rx_time_s(cls, low_state: Any, packet_time_s: Optional[float]) -> Optional[float]:
+        """Extract explicit monotonic RX packet timestamp if provided by caller/subscriber."""
+        raw = packet_time_s
+        if raw is None:
+            for key in ("packet_time_s", "rx_time_s", "stamp_s", "timestamp_s"):
+                raw = cls._get_lowstate_field(low_state, key)
+                if raw is not None:
+                    break
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    @classmethod
+    def _coerce_opt_int(cls, val: Any) -> Optional[int]:
+        if val is None or isinstance(val, bool):
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _build_packet_token(
+        cls,
+        low_state: Any,
+        q: np.ndarray,
+        dq: np.ndarray,
+        temps: np.ndarray,
+        mm: int,
+        roll: float,
+        pitch: float,
+    ) -> Tuple[Any, ...]:
+        """Build a packet-freshness fingerprint separating fresh DDS frames from frozen caches."""
+        tick = cls._coerce_opt_int(cls._get_lowstate_field(low_state, "tick"))
+        seq = cls._coerce_opt_int(cls._get_lowstate_field(low_state, "seq"))
+        crc = cls._coerce_opt_int(cls._get_lowstate_field(low_state, "crc"))
+        has_nonzero_wire_counter = any(v is not None and v != 0 for v in (tick, seq, crc))
+        if has_nonzero_wire_counter:
+            return ("wire", tick, seq, crc)
+        return (
+            "payload",
+            tick,
+            seq,
+            crc,
+            q.tobytes(),
+            dq.tobytes(),
+            temps.tobytes(),
+            int(mm),
+            round(roll, 12),
+            round(pitch, 12),
+        )
+
+    def _update_packet_freshness_locked(
+        self,
+        low_state: Any,
+        q: np.ndarray,
+        dq: np.ndarray,
+        temps: np.ndarray,
+        mm: int,
+        roll: float,
+        pitch: float,
+        t_now: float,
+        packet_time_s: Optional[float],
+    ) -> Tuple[Optional[str], bool, float]:
+        """Track fresh sensor packet arrivals independently of step() call cadence.
+
+        Returns ``(failure_reason, is_fresh, lowstate_age_ms)``.
+        """
+        rx_ts = self._extract_rx_time_s(low_state, packet_time_s)
+        if rx_ts is not None and not math.isfinite(rx_ts):
+            return "non_finite_lowstate", False, 0.0
+
+        if self.last_lowstate_s is not None and (t_now - self.last_lowstate_s) * 1000.0 > self.watchdog_ttl_ms:
+            age_ms = max(0.0, (t_now - self.last_lowstate_s) * 1000.0)
+            return "watchdog_expired", False, age_ms
+
+        if rx_ts is not None:
+            rx_age_ms = (t_now - rx_ts) * 1000.0
+            if rx_age_ms > self.watchdog_ttl_ms:
+                return "watchdog_expired", False, max(0.0, rx_age_ms)
+            is_fresh = self.last_packet_rx_s is None or rx_ts > self.last_packet_rx_s
+            if is_fresh:
+                self.last_packet_rx_s = rx_ts
+                self.last_lowstate_s = min(t_now, rx_ts)
+                self.fresh_packet_count += 1
+            else:
+                if self.last_lowstate_s is None:
+                    self.last_lowstate_s = min(t_now, rx_ts)
+                self.stale_packet_count += 1
+            return None, is_fresh, max(0.0, (t_now - self.last_lowstate_s) * 1000.0)
+
+        token = self._build_packet_token(low_state, q, dq, temps, mm, roll, pitch)
+        is_fresh = self._last_packet_token is None or token != self._last_packet_token
+        if is_fresh:
+            self._last_packet_token = token
+            self.last_lowstate_s = t_now
+            self.fresh_packet_count += 1
+        else:
+            self.stale_packet_count += 1
+        age_ms = 0.0 if self.last_lowstate_s is None else max(0.0, (t_now - self.last_lowstate_s) * 1000.0)
+        return None, is_fresh, age_ms
+
     def step(
         self,
         low_state: Optional[Any],
         nominal_cmd: Mapping[str, Any],
         now_s: Optional[float] = None,
         publisher: Optional[Any] = None,
+        packet_time_s: Optional[float] = None,
     ) -> Dict[str, Any]:
-        t_now = time.monotonic() if now_s is None else float(now_s)
-        n = self.spec.n_dof
-
-        if low_state is None:
-            if self.last_lowstate_s is not None and (t_now - self.last_lowstate_s) * 1000.0 > self.watchdog_ttl_ms:
+        with self._lock:
+            t_now = time.monotonic() if now_s is None else float(now_s)
+            if not math.isfinite(t_now):
                 self.lifecycle_state = "DAMPING_STOP"
-            return self._build_damping_cmd("no_lowstate" if self.lifecycle_state == "UNINITIALIZED" else "watchdog_expired", publisher)
+                return self._build_damping_cmd("non_finite_lowstate", publisher, packet_fresh=False)
 
-        q, dq, temps, mm, roll, pitch = self._extract_lowstate(low_state)
-        if not (np.all(np.isfinite(q)) and np.all(np.isfinite(dq)) and math.isfinite(roll) and math.isfinite(pitch)):
-            self.lifecycle_state = "DAMPING_STOP"
-            return self._build_damping_cmd("non_finite_lowstate", publisher)
+            self.last_step_s = t_now
+            self._last_step_monotonic_s = time.monotonic()
+            self.step_call_count += 1
+            n = self.spec.n_dof
 
-        if self.last_lowstate_s is not None and (t_now - self.last_lowstate_s) * 1000.0 > self.watchdog_ttl_ms:
-            self.lifecycle_state = "DAMPING_STOP"
-            return self._build_damping_cmd("watchdog_expired", publisher)
+            if low_state is None:
+                age_ms = None if self.last_lowstate_s is None else max(0.0, (t_now - self.last_lowstate_s) * 1000.0)
+                if self.last_lowstate_s is not None and (t_now - self.last_lowstate_s) * 1000.0 > self.watchdog_ttl_ms:
+                    self.lifecycle_state = "DAMPING_STOP"
+                reason = "no_lowstate" if self.lifecycle_state == "UNINITIALIZED" else "watchdog_expired"
+                return self._build_damping_cmd(reason, publisher, lowstate_age_ms=age_ms, packet_fresh=False)
 
-        self.last_lowstate_s = t_now
-        if abs(roll) > self.spec.fall_tilt_rad or abs(pitch) > self.spec.fall_tilt_rad or self.e_stopped:
-            self.lifecycle_state = "DAMPING_STOP"
-            return self._build_damping_cmd("fall_tilt_or_estop", publisher)
+            q, dq, temps, mm, roll, pitch = self._extract_lowstate(low_state)
+            if not (np.all(np.isfinite(q)) and np.all(np.isfinite(dq)) and math.isfinite(roll) and math.isfinite(pitch)):
+                self.lifecycle_state = "DAMPING_STOP"
+                return self._build_damping_cmd("non_finite_lowstate", publisher, packet_fresh=False)
 
-        if self.lifecycle_state == "UNINITIALIZED":
-            self.q_init = q.copy()
-            self.q_des_prev = q.copy()
-            self.mode_machine = mm
-            self.ramp_elapsed_s = 0.0
-            self.lifecycle_state = "HOMING_RAMP"
-        elif self.lifecycle_state == "DAMPING_STOP":
-            return self._build_damping_cmd("damping_latched", publisher)
+            fresh_err, is_fresh, lowstate_age_ms = self._update_packet_freshness_locked(
+                low_state, q, dq, temps, mm, roll, pitch, t_now, packet_time_s
+            )
+            if fresh_err is not None:
+                self.lifecycle_state = "DAMPING_STOP"
+                return self._build_damping_cmd(fresh_err, publisher, lowstate_age_ms=lowstate_age_ms, packet_fresh=False)
 
-        q_nom = np.asarray(nominal_cmd.get("q", q), dtype=np.float64).flatten()[:n]
-        dq_nom = np.asarray(nominal_cmd.get("dq", np.zeros(n)), dtype=np.float64).flatten()[:n]
-        tau_nom = np.asarray(nominal_cmd.get("tau", np.zeros(n)), dtype=np.float64).flatten()[:n]
-        kp_nom = np.minimum(np.asarray(self.spec.kp_safe_max), np.maximum(0.0, np.asarray(nominal_cmd.get("kp", self.spec.kp_safe_max), dtype=np.float64).flatten()[:n]))
-        kd_nom = np.maximum(0.0, np.asarray(nominal_cmd.get("kd", self.spec.kd_damping_default), dtype=np.float64).flatten()[:n])
+            if abs(roll) > self.spec.fall_tilt_rad or abs(pitch) > self.spec.fall_tilt_rad or self.e_stopped:
+                self.lifecycle_state = "DAMPING_STOP"
+                return self._build_damping_cmd("fall_tilt_or_estop", publisher, lowstate_age_ms=lowstate_age_ms, packet_fresh=is_fresh)
 
-        if not (np.all(np.isfinite(q_nom)) and np.all(np.isfinite(kp_nom))):
-            self.lifecycle_state = "DAMPING_STOP"
-            return self._build_damping_cmd("non_finite_nominal_cmd", publisher)
+            if self.lifecycle_state == "UNINITIALIZED":
+                self.q_init = q.copy()
+                self.q_des_prev = q.copy()
+                self.mode_machine = mm
+                self.ramp_elapsed_s = 0.0
+                self.lifecycle_state = "HOMING_RAMP"
+            elif self.lifecycle_state == "DAMPING_STOP":
+                return self._build_damping_cmd("damping_latched", publisher, lowstate_age_ms=lowstate_age_ms, packet_fresh=is_fresh)
 
-        # Thermal derating from motor temperatures
-        tau_max = np.asarray(self.spec.tau_max, dtype=np.float64).copy()
-        denom = max(1.0, self.thermal_critical_c - self.thermal_derate_start_c)
-        therm_scale = np.clip(1.0 - 0.7 * np.maximum(0.0, temps - self.thermal_derate_start_c) / denom, 0.25, 1.0)
-        tau_max = tau_max * therm_scale
+            q_nom = np.asarray(nominal_cmd.get("q", q), dtype=np.float64).flatten()[:n]
+            dq_nom = np.asarray(nominal_cmd.get("dq", np.zeros(n)), dtype=np.float64).flatten()[:n]
+            tau_nom = np.asarray(nominal_cmd.get("tau", np.zeros(n)), dtype=np.float64).flatten()[:n]
+            kp_nom = np.minimum(np.asarray(self.spec.kp_safe_max), np.maximum(0.0, np.asarray(nominal_cmd.get("kp", self.spec.kp_safe_max), dtype=np.float64).flatten()[:n]))
+            kd_nom = np.maximum(0.0, np.asarray(nominal_cmd.get("kd", self.spec.kd_damping_default), dtype=np.float64).flatten()[:n])
 
-        # Homing ramp
-        if self.lifecycle_state == "HOMING_RAMP":
-            self.ramp_elapsed_s += self.dt
-            s = min(1.0, self.ramp_elapsed_s / self.ramp_duration_s)
-            alpha = 3.0 * s * s - 2.0 * s * s * s
-            q_target = (1.0 - alpha) * self.q_init + alpha * q_nom
-            kp_eff = alpha * kp_nom
-            if s >= 1.0 - 1e-9:
-                self.lifecycle_state = "ACTIVE_CBF"
-        else:
-            q_target = q_nom
-            kp_eff = kp_nom
+            if not (np.all(np.isfinite(q_nom)) and np.all(np.isfinite(kp_nom))):
+                self.lifecycle_state = "DAMPING_STOP"
+                return self._build_damping_cmd("non_finite_nominal_cmd", publisher, lowstate_age_ms=lowstate_age_ms, packet_fresh=is_fresh)
 
-        A_tau, b_tau = None, None
-        if self.safety_filter is not None:
-            x_full = np.concatenate([q, dq])
-            A_tau, b_tau, _ = self.safety_filter._halfspaces(x_full)
+            # Thermal derating from motor temperatures
+            tau_max = np.asarray(self.spec.tau_max, dtype=np.float64).copy()
+            denom = max(1.0, self.thermal_critical_c - self.thermal_derate_start_c)
+            therm_scale = np.clip(1.0 - 0.7 * np.maximum(0.0, temps - self.thermal_derate_start_c) / denom, 0.25, 1.0)
+            tau_max = tau_max * therm_scale
 
-        pd_out = self.pd_adapter.filter_pd_target(
-            q=q, dq=dq, q_des_nom=q_target, kp=kp_eff, kd=kd_nom,
-            dq_des=dq_nom, tau_ff=tau_nom, A_tau=A_tau, b_tau=b_tau,
-            q_des_prev=self.q_des_prev, tau_max_override=tau_max,
-        )
-        q_safe = pd_out["q_des_safe"]
-        self.q_des_prev = q_safe.copy()
+            # Homing ramp
+            if self.lifecycle_state == "HOMING_RAMP":
+                self.ramp_elapsed_s += self.dt
+                s = min(1.0, self.ramp_elapsed_s / self.ramp_duration_s)
+                alpha = 3.0 * s * s - 2.0 * s * s * s
+                q_target = (1.0 - alpha) * self.q_init + alpha * q_nom
+                kp_eff = alpha * kp_nom
+                if s >= 1.0 - 1e-9:
+                    self.lifecycle_state = "ACTIVE_CBF"
+            else:
+                q_target = q_nom
+                kp_eff = kp_nom
 
-        words = pack_lowcmd_crc_words(
-            q_safe,
-            dq_nom,
-            tau_nom,
-            kp_eff,
-            kd_nom,
-            self.mode_pr,
-            self.mode_machine,
-            motor_mode=1,
-            motor_slot_map=self.spec.effective_motor_slots,
-            n_slots=(35 if self.spec.idl_family == "unitree_hg" else 20),
-            idl_family=self.spec.idl_family,
-        )
-        crc = unitree_crc32(words)
-        out = {
-            "lifecycle_state": self.lifecycle_state,
-            "robot_model": self.spec.name,
-            "idl_family": self.spec.idl_family,
-            "mode_pr": self.mode_pr,
-            "mode_machine": self.mode_machine,
-            "q": q_safe.tolist(),
-            "dq": dq_nom.tolist(),
-            "tau": tau_nom.tolist(),
-            "kp": kp_eff.tolist(),
-            "kd": kd_nom.tolist(),
-            "tau_applied": pd_out["tau_applied"].tolist(),
-            "thermal_min_scale": float(np.min(therm_scale)),
-            "verified_safe": pd_out["verified_safe"],
-            "crc": crc,
-            "status": "ok",
-        }
-        if publisher is not None and hasattr(publisher, "Write"):
-            publisher.Write(out)
-        return out
+            A_tau, b_tau = None, None
+            if self.safety_filter is not None:
+                x_full = np.concatenate([q, dq])
+                A_tau, b_tau, _ = self.safety_filter._halfspaces(x_full)
 
-    def _build_damping_cmd(self, reason: str, publisher: Optional[Any]) -> Dict[str, Any]:
+            pd_out = self.pd_adapter.filter_pd_target(
+                q=q, dq=dq, q_des_nom=q_target, kp=kp_eff, kd=kd_nom,
+                dq_des=dq_nom, tau_ff=tau_nom, A_tau=A_tau, b_tau=b_tau,
+                q_des_prev=self.q_des_prev, tau_max_override=tau_max,
+            )
+            q_safe = pd_out["q_des_safe"]
+            self.q_des_prev = q_safe.copy()
+
+            words = pack_lowcmd_crc_words(
+                q_safe,
+                dq_nom,
+                tau_nom,
+                kp_eff,
+                kd_nom,
+                self.mode_pr,
+                self.mode_machine,
+                motor_mode=1,
+                motor_slot_map=self.spec.effective_motor_slots,
+                n_slots=(35 if self.spec.idl_family == "unitree_hg" else 20),
+                idl_family=self.spec.idl_family,
+            )
+            crc = unitree_crc32(words)
+            out = {
+                "lifecycle_state": self.lifecycle_state,
+                "robot_model": self.spec.name,
+                "idl_family": self.spec.idl_family,
+                "mode_pr": self.mode_pr,
+                "mode_machine": self.mode_machine,
+                "motor_mode": 1,
+                "q": q_safe.tolist(),
+                "dq": dq_nom.tolist(),
+                "tau": tau_nom.tolist(),
+                "kp": kp_eff.tolist(),
+                "kd": kd_nom.tolist(),
+                "tau_applied": pd_out["tau_applied"].tolist(),
+                "thermal_min_scale": float(np.min(therm_scale)),
+                "verified_safe": pd_out["verified_safe"],
+                "packet_fresh": is_fresh,
+                "lowstate_age_ms": round(lowstate_age_ms, 4),
+                "crc": crc,
+                "status": "ok",
+            }
+            if publisher is not None and hasattr(publisher, "Write"):
+                publisher.Write(out)
+            return out
+
+    def _build_damping_cmd(
+        self,
+        reason: str,
+        publisher: Optional[Any],
+        *,
+        lowstate_age_ms: Optional[float] = None,
+        packet_fresh: bool = False,
+    ) -> Dict[str, Any]:
         n = self.spec.n_dof
         zeros = [0.0] * n
         kd = list(self.spec.kd_damping_default)
@@ -831,12 +976,15 @@ class SafeUnitreeLowLevelBridge:
             "idl_family": self.spec.idl_family,
             "mode_pr": self.mode_pr,
             "mode_machine": self.mode_machine,
+            "motor_mode": 0,
             "q": zeros,
             "dq": zeros,
             "tau": zeros,
             "kp": zeros,
             "kd": kd,
             "verified_safe": False,
+            "packet_fresh": packet_fresh,
+            "lowstate_age_ms": None if lowstate_age_ms is None else round(float(lowstate_age_ms), 4),
             "crc": unitree_crc32(words),
             "status": reason,
         }
@@ -1082,14 +1230,171 @@ class UnitreeDDSWireShim:
         """Convert dict command to CRC-signed LowCmd_ IDL and forward to ChannelPublisher.Write."""
         if isinstance(cmd_or_dict, Mapping):
             msg = self.lowcmd_factory() if self.lowcmd_factory is not None else _allocate_lowcmd_idl(self.spec)
+            cmd_mode = int(cmd_or_dict.get("motor_mode", self.motor_mode))
             populate_unitree_lowcmd_idl(
                 cmd_or_dict,
                 msg,
                 spec=self.spec,
-                motor_mode=self.motor_mode,
+                motor_mode=cmd_mode,
                 crc_calc=self.crc_calc,
             )
         else:
             msg = cmd_or_dict
         self.last_idl_msg = msg
         return self.channel_publisher.Write(msg)
+
+
+class UnitreeLowStateBuffer:
+    """Subscriber-side DDS freshness buffer pairing with SafeUnitreeLowLevelBridge.
+
+    Register ``buffer.on_low_state`` with Unitree SDK2's ``ChannelSubscriber``
+    and call ``buffer.step_bridge(...)`` inside the 500 Hz control thread so
+    sensor arrival time is tracked at DDS RX independently of control-loop
+    call cadence.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._latest: Optional[Tuple[int, float, Any]] = None
+        self._rx_seq: int = 0
+
+    def on_low_state(self, msg: Any, rx_time_s: Optional[float] = None) -> None:
+        """CycloneDDS ChannelSubscriber callback storing stamped sensor packets."""
+        if msg is None:
+            return
+        rx_s = float(self._clock() if rx_time_s is None else rx_time_s)
+        self._rx_seq += 1
+        self._latest = (self._rx_seq, rx_s, msg)
+
+    def latest(self) -> Tuple[Optional[Any], Optional[float], int]:
+        """Return ``(msg, rx_time_s, rx_seq)`` for the newest received LowState."""
+        snap = self._latest
+        if snap is None:
+            return None, None, 0
+        return snap[2], snap[1], snap[0]
+
+    def age_ms(self, now_s: Optional[float] = None) -> Optional[float]:
+        """Milliseconds elapsed since the latest DDS LowState packet arrived."""
+        snap = self._latest
+        if snap is None:
+            return None
+        t_now = float(self._clock() if now_s is None else now_s)
+        return max(0.0, (t_now - snap[1]) * 1000.0)
+
+    def step_bridge(
+        self,
+        bridge: SafeUnitreeLowLevelBridge,
+        nominal_cmd: Mapping[str, Any],
+        *,
+        now_s: Optional[float] = None,
+        publisher: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Step ``bridge`` with the latest buffered packet and its RX timestamp."""
+        t_now = float(self._clock() if now_s is None else now_s)
+        snap = self._latest
+        msg = snap[2] if snap is not None else None
+        rx_s = snap[1] if snap is not None else None
+        return bridge.step(
+            msg,
+            nominal_cmd,
+            now_s=t_now,
+            publisher=publisher,
+            packet_time_s=rx_s,
+        )
+
+
+class UnitreeExternalWatchdog:
+    """Out-of-loop supervisor thread enforcing damping if the Python control loop stalls."""
+
+    def __init__(
+        self,
+        bridge: SafeUnitreeLowLevelBridge,
+        publisher: Optional[Any] = None,
+        *,
+        timeout_ms: Optional[float] = None,
+        check_interval_s: float = 0.005,
+        keepalive_damping: bool = False,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.bridge = bridge
+        self.publisher = publisher
+        self.timeout_ms = max(1.0, float(bridge.watchdog_ttl_ms if timeout_ms is None else timeout_ms))
+        self.check_interval_s = max(0.001, float(check_interval_s))
+        self.keepalive_damping = bool(keepalive_damping)
+        self._clock = clock
+        self._stop_event = threading.Event()
+        self._tripped_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._arm_time_s: float = 0.0
+        self._arm_step_count: int = 0
+        self.tripped: bool = False
+        self.trip_count: int = 0
+        self.last_damping_cmd: Optional[Dict[str, Any]] = None
+
+    def start(self) -> "UnitreeExternalWatchdog":
+        if self._thread is not None and self._thread.is_alive():
+            return self
+        self._stop_event.clear()
+        self._tripped_event.clear()
+        self.tripped = False
+        self.trip_count = 0
+        self.last_damping_cmd = None
+        with self.bridge._lock:
+            self._arm_time_s = float(self._clock())
+            self._arm_step_count = self.bridge.step_call_count
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name="unitree-external-watchdog",
+        )
+        self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self._stop_event.set()
+        t = self._thread
+        self._thread = None
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout)
+
+    def wait_tripped(self, timeout: float = 1.0) -> bool:
+        return self._tripped_event.wait(timeout=timeout)
+
+    def check_once(self, now_s: Optional[float] = None) -> bool:
+        """Check whether the monitored control loop missed its heartbeat deadline."""
+        now = float(self._clock() if now_s is None else now_s)
+        with self.bridge._lock:
+            if (
+                self.bridge._last_step_monotonic_s is not None
+                and self.bridge.step_call_count > self._arm_step_count
+            ):
+                ref_s = max(self._arm_time_s, self.bridge._last_step_monotonic_s)
+            else:
+                ref_s = self._arm_time_s
+            age_ms = max(0.0, (now - ref_s) * 1000.0)
+            if age_ms <= self.timeout_ms:
+                return False
+            self.bridge.lifecycle_state = "DAMPING_STOP"
+            if not self.tripped or self.keepalive_damping:
+                self.last_damping_cmd = self.bridge._build_damping_cmd(
+                    "loop_watchdog_expired",
+                    self.publisher,
+                    lowstate_age_ms=age_ms,
+                    packet_fresh=False,
+                )
+            self.tripped = True
+            self.trip_count += 1
+            self._tripped_event.set()
+            return True
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.wait(self.check_interval_s):
+            self.check_once()
+            if self.tripped and not self.keepalive_damping:
+                return
+
+    def __enter__(self) -> "UnitreeExternalWatchdog":
+        return self.start()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.stop()
