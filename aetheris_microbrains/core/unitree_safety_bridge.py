@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import struct
 import time
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -31,6 +32,22 @@ class UnitreeRobotSpec:
     idl_family: str  # "unitree_go" or "unitree_hg"
     pr_ab_supported: bool = False
     fall_tilt_rad: float = 0.85
+    motor_slot_map: Optional[Tuple[int, ...]] = None
+    n_motor_slots: Optional[int] = None
+
+    @property
+    def effective_motor_slots(self) -> Tuple[int, ...]:
+        """Hardware motor_state/motor_cmd slot index for each logical joint."""
+        if self.motor_slot_map is not None:
+            return self.motor_slot_map
+        return tuple(range(self.n_dof))
+
+    @property
+    def total_motor_slots(self) -> int:
+        """Total physical hardware motor slots in LowState/LowCmd frames."""
+        if self.n_motor_slots is not None:
+            return int(self.n_motor_slots)
+        return self.n_dof
 
 
 def _make_spec(
@@ -46,6 +63,8 @@ def _make_spec(
     pr_ab_supported: bool = False,
     stand_q: Optional[Sequence[float]] = None,
     fall_tilt_rad: float = 0.85,
+    motor_slot_map: Optional[Sequence[int]] = None,
+    n_motor_slots: Optional[int] = None,
 ) -> UnitreeRobotSpec:
     n = len(joint_names)
     return UnitreeRobotSpec(
@@ -62,6 +81,8 @@ def _make_spec(
         idl_family=idl_family,
         pr_ab_supported=pr_ab_supported,
         fall_tilt_rad=float(fall_tilt_rad),
+        motor_slot_map=tuple(int(s) for s in motor_slot_map) if motor_slot_map is not None else None,
+        n_motor_slots=int(n_motor_slots) if n_motor_slots is not None else None,
     )
 
 
@@ -70,9 +91,25 @@ _GO2_STAND = (0.0, 0.67, -1.3) * 4
 _H1_JOINTS = (
     "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle",
     "left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle",
-    "torso_yaw",
+    "waist_yaw",
     "right_shoulder_pitch", "right_shoulder_roll", "right_shoulder_yaw", "right_elbow",
     "left_shoulder_pitch", "left_shoulder_roll", "left_shoulder_yaw", "left_elbow",
+)
+# Official Unitree H1JointIndex mapping (H1_NUM_MOTOR = 20; hardware slot 9 is unused).
+_H1_MOTOR_SLOT_MAP = (
+    8,   # right_hip_yaw -> motor 8
+    0,   # right_hip_roll -> motor 0
+    1,   # right_hip_pitch -> motor 1
+    2,   # right_knee -> motor 2
+    11,  # right_ankle -> motor 11
+    7,   # left_hip_yaw -> motor 7
+    3,   # left_hip_roll -> motor 3
+    4,   # left_hip_pitch -> motor 4
+    5,   # left_knee -> motor 5
+    10,  # left_ankle -> motor 10
+    6,   # waist_yaw -> motor 6
+    12, 13, 14, 15,  # right_shoulder_pitch/roll/yaw, right_elbow
+    16, 17, 18, 19,  # left_shoulder_pitch/roll/yaw, left_elbow
 )
 _G1_23_JOINTS = (
     "left_hip_pitch", "left_hip_roll", "left_hip_yaw", "left_knee", "left_ankle_pitch", "left_ankle_roll",
@@ -95,7 +132,20 @@ UNITREE_ROBOT_SPECS: Dict[str, UnitreeRobotSpec] = {
     "go2": _make_spec("go2", _GO2_JOINTS, -2.72, 2.72, 30.0, 23.7, 80.0, 2.0, "unitree_go", False, _GO2_STAND),
     "b2": _make_spec("b2", _GO2_JOINTS, -2.8, 2.8, 23.0, 140.0, 200.0, 5.0, "unitree_go", False, _GO2_STAND),
     "z1": _make_spec("z1", tuple(f"joint_{i}" for i in range(1, 7)), -2.8, 2.8, 3.14, 30.0, 60.0, 2.5, "unitree_go", False),
-    "h1": _make_spec("h1", _H1_JOINTS, -2.8, 2.8, 20.0, 200.0, 200.0, 5.0, "unitree_hg", False),
+    "h1": _make_spec(
+        "h1",
+        _H1_JOINTS,
+        -2.8,
+        2.8,
+        20.0,
+        200.0,
+        200.0,
+        5.0,
+        "unitree_hg",
+        False,
+        motor_slot_map=_H1_MOTOR_SLOT_MAP,
+        n_motor_slots=20,
+    ),
     "h1_2": _make_spec("h1_2", tuple(f"joint_{i}" for i in range(27)), -3.0, 3.0, 20.0, 200.0, 200.0, 5.0, "unitree_hg", True),
     "g1_23dof": _make_spec("g1_23dof", _G1_23_JOINTS, -2.8, 2.8, 25.0, 88.0, 150.0, 4.0, "unitree_hg", True),
     "g1_29dof": _make_spec("g1_29dof", _G1_29_JOINTS, -2.8, 2.8, 25.0, 88.0, 150.0, 4.0, "unitree_hg", True),
@@ -298,25 +348,71 @@ class SafeUnitreeLowLevelBridge:
         self.lifecycle_state = "DAMPING_STOP"
         self.e_stopped = True
 
+    @staticmethod
+    def _temp_to_scalar(raw: Any, default: float = 35.0) -> float:
+        """Normalize a motor temperature field to scalar degrees Celsius.
+
+        Real SDK2 IDL shapes: unitree_hg MotorState.temperature is int16[2]
+        (motor, driver), unitree_go MotorState.temperature is a uint8 scalar,
+        and dict-style feeds may pass either form. Takes max across array
+        elements so either motor winding or MOSFET overheating triggers derating.
+        """
+        try:
+            if isinstance(raw, (list, tuple)) or (hasattr(raw, "__len__") and not isinstance(raw, (str, bytes))):
+                vals = [float(v) for v in raw if v is not None and math.isfinite(float(v))]
+                return float(max(vals)) if vals else default
+            val = float(raw)
+            return val if math.isfinite(val) else default
+        except (TypeError, ValueError):
+            return default
+
     def _extract_lowstate(self, low_state: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, float, float]:
         n = self.spec.n_dof
         if isinstance(low_state, Mapping):
             motors = low_state.get("motor_state") or []
-            q = np.array([float(motors[i]["q"]) if i < len(motors) else 0.0 for i in range(n)], dtype=np.float64)
-            dq = np.array([float(motors[i]["dq"]) if i < len(motors) else 0.0 for i in range(n)], dtype=np.float64)
-            temps = np.array([float(motors[i].get("temperature", 35.0)) if i < len(motors) else 35.0 for i in range(n)], dtype=np.float64)
+            use_slot_map = self.spec.motor_slot_map is not None and len(motors) >= self.spec.total_motor_slots
+            slots = self.spec.effective_motor_slots if use_slot_map else tuple(range(n))
+            q = np.array([float(motors[s]["q"]) if s < len(motors) else 0.0 for s in slots], dtype=np.float64)
+            dq = np.array([float(motors[s]["dq"]) if s < len(motors) else 0.0 for s in slots], dtype=np.float64)
+            temps = np.array(
+                [self._temp_to_scalar(motors[s].get("temperature", 35.0)) if s < len(motors) else 35.0 for s in slots],
+                dtype=np.float64,
+            )
             mm = int(low_state.get("mode_machine", 0))
             rpy = (low_state.get("imu_state") or {}).get("rpy", (0.0, 0.0, 0.0))
         else:
             motors = getattr(low_state, "motor_state", ())
-            q = np.array([float(motors[i].q) if i < len(motors) else 0.0 for i in range(n)], dtype=np.float64)
-            dq = np.array([float(motors[i].dq) if i < len(motors) else 0.0 for i in range(n)], dtype=np.float64)
-            temps = np.array([float(getattr(motors[i], "temperature", 35.0)) if i < len(motors) else 35.0 for i in range(n)], dtype=np.float64)
+            use_slot_map = self.spec.motor_slot_map is not None and len(motors) >= self.spec.total_motor_slots
+            slots = self.spec.effective_motor_slots if use_slot_map else tuple(range(n))
+            q = np.array([float(motors[s].q) if s < len(motors) else 0.0 for s in slots], dtype=np.float64)
+            dq = np.array([float(motors[s].dq) if s < len(motors) else 0.0 for s in slots], dtype=np.float64)
+            temps = np.array(
+                [self._temp_to_scalar(getattr(motors[s], "temperature", 35.0)) if s < len(motors) else 35.0 for s in slots],
+                dtype=np.float64,
+            )
             mm = int(getattr(low_state, "mode_machine", 0))
             imu = getattr(low_state, "imu_state", None)
             rpy = getattr(imu, "rpy", (0.0, 0.0, 0.0)) if imu is not None else (0.0, 0.0, 0.0)
         roll, pitch = float(rpy[0]), float(rpy[1])
         return q, dq, temps, mm, roll, pitch
+
+    def to_wire_lowcmd(
+        self,
+        cmd_dict: Mapping[str, Any],
+        low_cmd_msg: Optional[Any] = None,
+        *,
+        motor_mode: int = 1,
+        crc_calc: Optional[Any] = None,
+    ) -> Any:
+        """Convert a bridge output dict into a CRC-signed Unitree LowCmd IDL object."""
+        msg = low_cmd_msg if low_cmd_msg is not None else _allocate_lowcmd_idl(self.spec)
+        return populate_unitree_lowcmd_idl(
+            cmd_dict,
+            msg,
+            spec=self.spec,
+            motor_mode=motor_mode,
+            crc_calc=crc_calc,
+        )
 
     def step(
         self,
@@ -444,3 +540,175 @@ class SafeUnitreeLowLevelBridge:
         if publisher is not None and hasattr(publisher, "Write"):
             publisher.Write(out)
         return out
+
+
+class _FallbackMotorCmdIDL:
+    """Lightweight duck-typed MotorCmd IDL slot used when unitree_sdk2py is not installed."""
+
+    __slots__ = ("mode", "q", "dq", "tau", "kp", "kd", "reserve")
+
+    def __init__(self) -> None:
+        self.mode: int = 0
+        self.q: float = 0.0
+        self.dq: float = 0.0
+        self.tau: float = 0.0
+        self.kp: float = 0.0
+        self.kd: float = 0.0
+        self.reserve: List[int] = [0, 0, 0]
+
+
+class _FallbackLowCmdIDL:
+    """Lightweight duck-typed LowCmd_ IDL struct used when unitree_sdk2py is not installed."""
+
+    def __init__(self, n_slots: int = 35) -> None:
+        self.mode_pr: int = 0
+        self.mode_machine: int = 0
+        self.motor_cmd: List[_FallbackMotorCmdIDL] = [_FallbackMotorCmdIDL() for _ in range(n_slots)]
+        self.reserve: List[int] = [0, 0, 0, 0]
+        self.crc: int = 0
+
+
+def _allocate_lowcmd_idl(spec: UnitreeRobotSpec) -> Any:
+    """Instantiate real unitree_sdk2py LowCmd_ IDL if available, else fallback struct."""
+    try:
+        from unitree_sdk2py.idl.default import (  # type: ignore[import-not-found]
+            unitree_go_msg_dds__LowCmd_,
+            unitree_hg_msg_dds__LowCmd_,
+        )
+
+        if spec.idl_family == "unitree_hg":
+            return unitree_hg_msg_dds__LowCmd_()
+        return unitree_go_msg_dds__LowCmd_()
+    except ImportError:
+        n_slots = 35 if spec.idl_family == "unitree_hg" else 20
+        return _FallbackLowCmdIDL(n_slots=max(n_slots, spec.total_motor_slots))
+
+
+def _f32_to_u32(val: float) -> int:
+    return int.from_bytes(struct.pack("<f", float(val)), "little")
+
+
+def _compute_idl_wire_crc(low_cmd_msg: Any, crc_calc: Optional[Any] = None) -> int:
+    """Compute real SDK2 CRC(low_cmd_msg) if available, else deterministic float32-packed CRC32."""
+    if crc_calc is not None and hasattr(crc_calc, "Crc"):
+        return int(crc_calc.Crc(low_cmd_msg)) & 0xFFFFFFFF
+    try:
+        from unitree_sdk2py.utils.crc import CRC  # type: ignore[import-not-found]
+
+        return int(CRC().Crc(low_cmd_msg)) & 0xFFFFFFFF
+    except ImportError:
+        words: List[int] = [
+            int(getattr(low_cmd_msg, "mode_pr", 0)) & 0xFF,
+            int(getattr(low_cmd_msg, "mode_machine", 0)) & 0xFF,
+        ]
+        for mc in getattr(low_cmd_msg, "motor_cmd", ()):
+            words.append(int(getattr(mc, "mode", 0)) & 0xFFFFFFFF)
+            words.append(_f32_to_u32(getattr(mc, "q", 0.0)))
+            words.append(_f32_to_u32(getattr(mc, "dq", 0.0)))
+            words.append(_f32_to_u32(getattr(mc, "tau", 0.0)))
+            words.append(_f32_to_u32(getattr(mc, "kp", 0.0)))
+            words.append(_f32_to_u32(getattr(mc, "kd", 0.0)))
+        return unitree_crc32(words)
+
+
+def populate_unitree_lowcmd_idl(
+    cmd_dict: Mapping[str, Any],
+    low_cmd_msg: Any,
+    spec: Optional[Union[str, UnitreeRobotSpec]] = None,
+    *,
+    motor_mode: int = 1,
+    crc_calc: Optional[Any] = None,
+) -> Any:
+    """Scatter a SafeUnitreeLowLevelBridge command dict into a Unitree LowCmd_ IDL struct with wire CRC."""
+    resolved_spec: Optional[UnitreeRobotSpec]
+    if isinstance(spec, UnitreeRobotSpec):
+        resolved_spec = spec
+    elif isinstance(spec, str):
+        resolved_spec = UNITREE_ROBOT_SPECS[spec.strip().lower()]
+    else:
+        rm = str(cmd_dict.get("robot_model") or "").strip().lower()
+        resolved_spec = UNITREE_ROBOT_SPECS.get(rm)
+
+    if hasattr(low_cmd_msg, "mode_pr"):
+        low_cmd_msg.mode_pr = int(cmd_dict.get("mode_pr", 0))
+    if hasattr(low_cmd_msg, "mode_machine"):
+        low_cmd_msg.mode_machine = int(cmd_dict.get("mode_machine", 0))
+
+    q = cmd_dict.get("q") or ()
+    dq = cmd_dict.get("dq") or ()
+    tau = cmd_dict.get("tau") or ()
+    kp = cmd_dict.get("kp") or ()
+    kd = cmd_dict.get("kd") or ()
+    n = len(q)
+
+    motor_cmds = getattr(low_cmd_msg, "motor_cmd", ())
+    slots = resolved_spec.effective_motor_slots if resolved_spec is not None else tuple(range(n))
+    active_slots = set(slots[:n])
+
+    # Zero/disable any unused motor slots (e.g. H1 hardware motor index 9)
+    for hw_idx in range(len(motor_cmds)):
+        if hw_idx not in active_slots:
+            mc = motor_cmds[hw_idx]
+            mc.mode = 0
+            mc.q = 0.0
+            mc.dq = 0.0
+            mc.tau = 0.0
+            mc.kp = 0.0
+            mc.kd = 0.0
+
+    for logical_idx in range(min(n, len(slots))):
+        hw_idx = int(slots[logical_idx])
+        if hw_idx >= len(motor_cmds):
+            continue
+        mc = motor_cmds[hw_idx]
+        mc.mode = int(motor_mode)
+        mc.q = float(q[logical_idx])
+        mc.dq = float(dq[logical_idx]) if logical_idx < len(dq) else 0.0
+        mc.tau = float(tau[logical_idx]) if logical_idx < len(tau) else 0.0
+        mc.kp = float(kp[logical_idx]) if logical_idx < len(kp) else 0.0
+        mc.kd = float(kd[logical_idx]) if logical_idx < len(kd) else 0.0
+
+    low_cmd_msg.crc = _compute_idl_wire_crc(low_cmd_msg, crc_calc=crc_calc)
+    return low_cmd_msg
+
+
+class UnitreeDDSWireShim:
+    """Adapter wrapping a Unitree ChannelPublisher to convert bridge dicts into wire LowCmd_ IDL messages."""
+
+    def __init__(
+        self,
+        channel_publisher: Any,
+        robot_model: Union[str, UnitreeRobotSpec] = "g1_29dof",
+        *,
+        lowcmd_factory: Optional[Callable[[], Any]] = None,
+        crc_calc: Optional[Any] = None,
+        motor_mode: int = 1,
+    ) -> None:
+        if isinstance(robot_model, str):
+            key = robot_model.strip().lower()
+            if key not in UNITREE_ROBOT_SPECS:
+                raise ValueError(f"Unknown Unitree robot model: {robot_model!r}")
+            self.spec = UNITREE_ROBOT_SPECS[key]
+        else:
+            self.spec = robot_model
+        self.channel_publisher = channel_publisher
+        self.lowcmd_factory = lowcmd_factory
+        self.crc_calc = crc_calc
+        self.motor_mode = int(motor_mode)
+        self.last_idl_msg: Optional[Any] = None
+
+    def Write(self, cmd_or_dict: Any) -> Any:
+        """Convert dict command to CRC-signed LowCmd_ IDL and forward to ChannelPublisher.Write."""
+        if isinstance(cmd_or_dict, Mapping):
+            msg = self.lowcmd_factory() if self.lowcmd_factory is not None else _allocate_lowcmd_idl(self.spec)
+            populate_unitree_lowcmd_idl(
+                cmd_or_dict,
+                msg,
+                spec=self.spec,
+                motor_mode=self.motor_mode,
+                crc_calc=self.crc_calc,
+            )
+        else:
+            msg = cmd_or_dict
+        self.last_idl_msg = msg
+        return self.channel_publisher.Write(msg)

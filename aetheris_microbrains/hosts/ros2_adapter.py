@@ -9,6 +9,8 @@ Macaroon-style physical capability tokens via ``authorize_physical_action``.
 from __future__ import annotations
 
 import math
+import re
+import unicodedata
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from aetheris_microbrains.core.capability_tokens import (
@@ -23,6 +25,57 @@ from aetheris_microbrains.core.embodied_threat_guard import (
 
 
 SUPPORTED_PROTOCOLS = frozenset({"ros2", "moveit2", "lerobot", "mavlink", "unitree"})
+
+_HOMOGLYPH_MAP = str.maketrans({
+    # Cyrillic lowercase/uppercase confusables
+    "\u0430": "a", "\u0410": "a",
+    "\u0432": "b", "\u0412": "b",
+    "\u0435": "e", "\u0415": "e", "\u0451": "e", "\u0401": "e",
+    "\u0456": "i", "\u0406": "i", "\u0457": "i",
+    "\u043a": "k", "\u041a": "k",
+    "\u043c": "m", "\u041c": "m",
+    "\u043d": "h", "\u041d": "h",
+    "\u043e": "o", "\u041e": "o",
+    "\u0440": "p", "\u0420": "p",
+    "\u0441": "c", "\u0421": "c",
+    "\u0442": "t", "\u0422": "t",
+    "\u0443": "y", "\u0423": "y",
+    "\u0445": "x", "\u0425": "x",
+    "\u0455": "s", "\u0405": "s",
+    "\u0458": "j", "\u0408": "j",
+    # Greek lowercase/uppercase confusables
+    "\u03b1": "a", "\u0391": "a",
+    "\u03b2": "b", "\u0392": "b",
+    "\u03b5": "e", "\u0395": "e",
+    "\u03b6": "z", "\u0396": "z",
+    "\u03b7": "n", "\u0397": "h",
+    "\u03b9": "i", "\u0399": "i",
+    "\u03ba": "k", "\u039a": "k",
+    "\u03bc": "m", "\u039c": "m",
+    "\u03bd": "v", "\u039d": "n",
+    "\u03bf": "o", "\u039f": "o",
+    "\u03c1": "p", "\u03a1": "p",
+    "\u03c4": "t", "\u03a4": "t",
+    "\u03c5": "u", "\u03a5": "y",
+    "\u03c7": "x", "\u03a7": "x",
+})
+
+_UNITREE_STUNT_TOKENS = (
+    "frontflip",
+    "backflip",
+    "jumpyaw",
+    "zerotorque",
+    "sideflip",
+    "handstand",
+)
+
+
+def _canonicalize_embodied_token(value: str) -> str:
+    """Normalize NFKD diacritics, Cyrillic/Greek homoglyphs, and strip separators."""
+    nfkd = unicodedata.normalize("NFKD", str(value or ""))
+    stripped = "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+    mapped = stripped.translate(_HOMOGLYPH_MAP).lower()
+    return re.sub(r"[^a-z0-9]+", "", mapped)
 
 
 def _contains_non_finite(value: Any) -> bool:
@@ -285,18 +338,23 @@ class EmbodiedActionFirewall:
         topic_or_action = str(
             _first_present(payload, "topic_or_action", "rpc", "method", "action", "topic") or "unitree_cmd"
         ).strip()
+        canon_action = _canonicalize_embodied_token(topic_or_action)
         actuator = _first_present(payload, "actuator", "robot_model") or (
-            "dex3_hand" if "dex3" in topic_or_action.lower() else "unitree_body"
+            "dex3_hand" if "dex3" in canon_action else "unitree_body"
         )
         vx = payload.get("vx")
         vy = payload.get("vy")
+        vz = payload.get("vz")
         linear_vel_mps: Optional[float] = None
-        if vx is not None or vy is not None:
-            vx_f = _to_finite_float(vx or 0.0, "vx")
-            vy_f = _to_finite_float(vy or 0.0, "vy")
-            linear_vel_mps = math.hypot(vx_f, vy_f)
-        elif payload.get("linear_vel_mps") is not None:
-            linear_vel_mps = abs(_to_finite_float(payload["linear_vel_mps"], "linear_vel_mps"))
+        if vx is not None or vy is not None or vz is not None:
+            vx_f = _to_finite_float(vx if vx is not None else 0.0, "vx")
+            vy_f = _to_finite_float(vy if vy is not None else 0.0, "vy")
+            vz_f = _to_finite_float(vz if vz is not None else 0.0, "vz")
+            linear_vel_mps = math.sqrt(vx_f * vx_f + vy_f * vy_f + vz_f * vz_f)
+        else:
+            vel_fallback = _first_present(payload, "linear_vel_mps", "velocity", "speed")
+            if vel_fallback is not None:
+                linear_vel_mps = abs(_to_finite_float(vel_fallback, "linear_vel_mps"))
 
         contact_force = _first_present(payload, "contact_force_n", "max_effort", "tau")
         contact_force_n: Optional[float] = None
@@ -482,6 +540,7 @@ class EmbodiedActionFirewall:
         current_position: Optional[Union[Sequence[float], Mapping[str, Any]]] = None,
         allow_acrobatic_stunts: bool = False,
         base_speed_mps: Optional[float] = None,
+        require_physical_limits: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Validate, normalize, and authorize an embodied action payload."""
         if not isinstance(payload, Mapping):
@@ -520,13 +579,36 @@ class EmbodiedActionFirewall:
         clamp_hints: Dict[str, Any] = {}
 
         if normalized["protocol"] == "unitree":
-            act_low = str(normalized["topic_or_action"]).strip().lower()
-            if any(stunt in act_low for stunt in ("frontflip", "backflip", "jumpyaw", "zerotorque")) and not allow_acrobatic_stunts:
+            act_canon = _canonicalize_embodied_token(normalized["topic_or_action"])
+            if any(stunt in act_canon for stunt in _UNITREE_STUNT_TOKENS) and not allow_acrobatic_stunts:
                 return self._deny("unitree_acrobatic_stunt_blocked", normalized, clamp_hints)
             eff_base_speed = base_speed_mps if base_speed_mps is not None else payload.get("base_speed_mps")
-            if ("standdown" in act_low or "zerotorque" in act_low) and eff_base_speed is not None:
-                if abs(_to_finite_float(eff_base_speed, "base_speed_mps")) > 0.1:
-                    return self._deny("unitree_mid_motion_stand_down_blocked", normalized, clamp_hints)
+            speeds: List[float] = []
+            if eff_base_speed is not None:
+                speeds.append(abs(_to_finite_float(eff_base_speed, "base_speed_mps")))
+            if normalized["linear_vel_mps"] is not None:
+                speeds.append(abs(float(normalized["linear_vel_mps"])))
+            if ("standdown" in act_canon or "zerotorque" in act_canon) and speeds and max(speeds) > 0.1:
+                return self._deny("unitree_mid_motion_stand_down_blocked", normalized, clamp_hints)
+
+        enforce_bounds = (
+            bool(require_physical_limits)
+            if require_physical_limits is not None
+            else normalized["protocol"] in ("unitree", "mavlink")
+        )
+        if enforce_bounds:
+            has_hard_bounds = isinstance(hard_limits, Mapping) and any(
+                hard_limits.get(k) is not None
+                for k in (
+                    "max_linear_vel_mps",
+                    "max_kinetic_energy_j",
+                    "max_contact_force_n",
+                    "allowed_actuators",
+                    "geofence_polytope",
+                )
+            )
+            if capability_token is None and not has_hard_bounds and mission_envelope is None:
+                return self._deny("missing_capability_token_or_hard_limits", normalized, clamp_hints)
 
         eff_current_pos = current_position
         if sensor_observation is not None:
@@ -599,15 +681,19 @@ class EmbodiedActionFirewall:
                     )
 
             polytope = hard_limits.get("geofence_polytope")
-            if polytope is not None and normalized["target_position"] is not None:
-                pos = normalized["target_position"]
-                for normal, offset in polytope:
-                    if len(normal) != len(pos):
-                        return self._deny("hard_limit_geofence_dimension_mismatch", normalized, clamp_hints)
-                    dot = sum(float(a) * float(p) for a, p in zip(normal, pos))
-                    if dot > float(offset) + 1e-12:
-                        clamp_hints["geofence_violation"] = True
-                        return self._deny("hard_limit_geofence_violation", normalized, clamp_hints)
+            if polytope is not None:
+                fence_points: List[Tuple[float, ...]] = []
+                if normalized["target_position"] is not None:
+                    fence_points.append(normalized["target_position"])
+                fence_points.extend(normalized["waypoints"])
+                for pos in fence_points:
+                    for normal, offset in polytope:
+                        if len(normal) != len(pos):
+                            return self._deny("hard_limit_geofence_dimension_mismatch", normalized, clamp_hints)
+                        dot = sum(float(a) * float(p) for a, p in zip(normal, pos))
+                        if dot > float(offset) + 1e-12:
+                            clamp_hints["geofence_violation"] = True
+                            return self._deny("hard_limit_geofence_violation", normalized, clamp_hints)
 
         eff_scene_text = scene_text
         if eff_scene_text is None and isinstance(sensor_observation, Mapping):
@@ -665,6 +751,7 @@ class EmbodiedActionFirewall:
                 kinetic_energy_j=normalized["kinetic_energy_j"],
                 contact_force_n=normalized["contact_force_n"],
                 actuator=normalized["actuator"],
+                waypoints=normalized["waypoints"],
             )
             if not token_auth["authorized"]:
                 limits = token_auth.get("effective_limits") or {}

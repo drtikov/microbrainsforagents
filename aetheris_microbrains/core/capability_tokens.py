@@ -517,6 +517,7 @@ def authorize_physical_action(
     contact_force_n: Optional[float] = None,
     actuator: Optional[str] = None,
     now: Optional[float] = None,
+    waypoints: Optional[Iterable[Iterable[float]]] = None,
 ) -> Dict[str, Any]:
     """Verify HMAC chain and enforce monotonic intersection of physical safety caveats."""
     hmac_err = _verify_hmac_chain(token, root_secret)
@@ -635,18 +636,36 @@ def authorize_physical_action(
         if not any(_match_pattern(clean_actuator, pat) for pat in effective_actuators):
             return _auth_result(False, f"actuator_not_allowed:{clean_actuator}", subject, chain_depth, extra)
 
+    fence_points: List[Tuple[float, ...]] = []
     if req_pos is not None:
+        fence_points.append(req_pos)
+    if waypoints is not None:
+        if isinstance(waypoints, (str, bytes)) or not isinstance(waypoints, Iterable):
+            return _auth_result(False, "invalid_position", subject, chain_depth)
+        for wp in waypoints:
+            if isinstance(wp, (str, bytes)) or not isinstance(wp, Iterable):
+                return _auth_result(False, "invalid_position", subject, chain_depth)
+            try:
+                wp_tup = tuple(float(coord) for coord in wp)
+            except (TypeError, ValueError):
+                return _auth_result(False, "invalid_position", subject, chain_depth)
+            if not wp_tup or any(not math.isfinite(c) for c in wp_tup):
+                return _auth_result(False, "invalid_position", subject, chain_depth)
+            fence_points.append(wp_tup)
+
+    if fence_points:
         for cav in token.caveats:
             if cav.geofence_polytope is None:
                 continue
-            for normal, offset in cav.geofence_polytope:
-                if not math.isfinite(offset) or any(not math.isfinite(a) for a in normal):
-                    return _auth_result(False, "invalid_geofence_polytope", subject, chain_depth, extra)
-                if len(normal) != len(req_pos):
-                    return _auth_result(False, "geofence_dimension_mismatch", subject, chain_depth, extra)
-                dot = sum(a * p for a, p in zip(normal, req_pos))
-                if dot > offset + 1e-12:
-                    return _auth_result(False, "geofence_violation", subject, chain_depth, extra)
+            for pt in fence_points:
+                for normal, offset in cav.geofence_polytope:
+                    if not math.isfinite(offset) or any(not math.isfinite(a) for a in normal):
+                        return _auth_result(False, "invalid_geofence_polytope", subject, chain_depth, extra)
+                    if len(normal) != len(pt):
+                        return _auth_result(False, "geofence_dimension_mismatch", subject, chain_depth, extra)
+                    dot = sum(a * p for a, p in zip(normal, pt))
+                    if dot > offset + 1e-12:
+                        return _auth_result(False, "geofence_violation", subject, chain_depth, extra)
 
     return _auth_result(True, "authorized", subject, chain_depth, extra)
 

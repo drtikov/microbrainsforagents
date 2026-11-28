@@ -8,6 +8,7 @@ from aetheris_microbrains.core.unitree_safety_bridge import (
     UNITREE_ROBOT_SPECS,
     MotorPDCBFAdapter,
     SafeUnitreeLowLevelBridge,
+    UnitreeDDSWireShim,
     unitree_crc32,
 )
 
@@ -67,3 +68,67 @@ def test_safe_unitree_bridge_homing_thermal_and_watchdog():
     assert r_wd["status"] == "watchdog_expired"
     assert all(k == 0.0 for k in r_wd["kp"])
     assert r_wd["kd"] == list(UNITREE_ROBOT_SPECS["g1_29dof"].kd_damping_default)
+
+
+class _FakeMotorStateIDL:
+    def __init__(self, q: float = 0.0, dq: float = 0.0, temperature=(35, 35)):
+        self.q = q
+        self.dq = dq
+        self.temperature = temperature
+
+
+class _FakeHGLowStateIDL:
+    def __init__(self, n_slots: int = 35, temperature=(45, 20)):
+        self.mode_pr = 1
+        self.mode_machine = 3
+        self.imu_state = type("IMU", (), {"rpy": [0.0, 0.0, 0.0]})()
+        self.motor_state = [_FakeMotorStateIDL(temperature=list(temperature)) for _ in range(n_slots)]
+
+
+class _CapturingChannelPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def Write(self, msg):
+        self.messages.append(msg)
+
+
+def test_hg_int16_pair_temperature_and_h1_motor_slot_remap_and_wire_shim():
+    # 1. HG IDL int16[2] temperature (list) must not crash _extract_lowstate
+    bridge = SafeUnitreeLowLevelBridge("g1_29dof", dt=0.002, ramp_duration_s=0.006, mode_pr=1)
+    ls_cool = _FakeHGLowStateIDL(35, temperature=(45, 20))
+    r1 = bridge.step(ls_cool, {"q": [0.1] * 29}, now_s=0.0)
+    assert r1["status"] == "ok"
+    assert r1["thermal_min_scale"] == 1.0
+
+    # Driver/MOSFET overheating in second slot of int16[2] must still derate
+    ls_hot_driver = _FakeHGLowStateIDL(35, temperature=(35, 95))
+    r2 = bridge.step(ls_hot_driver, {"q": [0.1] * 29}, now_s=0.002)
+    assert r2["thermal_min_scale"] < 0.6
+
+    # 2. H1 20-slot scatter map (motor index 9 unused; waist_yaw at slot 6; right_hip_yaw at slot 8)
+    h1_spec = UNITREE_ROBOT_SPECS["h1"]
+    assert h1_spec.total_motor_slots == 20
+    assert h1_spec.effective_motor_slots[0] == 8  # right_hip_yaw -> slot 8
+    assert h1_spec.effective_motor_slots[10] == 6  # waist_yaw -> slot 6
+    assert 9 not in h1_spec.effective_motor_slots
+
+    h1_ls = _FakeHGLowStateIDL(35, temperature=(35, 35))
+    h1_ls.motor_state[8].q = 0.25  # physical right_hip_yaw
+    h1_ls.motor_state[9].q = 99.0  # unused hardware slot should be ignored
+    h1_bridge = SafeUnitreeLowLevelBridge("h1", dt=0.002, ramp_duration_s=0.004)
+    chan_pub = _CapturingChannelPublisher()
+    shim = UnitreeDDSWireShim(chan_pub, "h1")
+    cmd_q = [0.0] * 19
+    cmd_q[10] = 0.15  # logical waist_yaw
+    out_h1 = h1_bridge.step(h1_ls, {"q": cmd_q}, now_s=0.0, publisher=shim)
+    assert abs(h1_bridge.q_init[0] - 0.25) < 1e-9
+    assert out_h1["status"] == "ok"
+    assert len(chan_pub.messages) == 1
+    wire_msg = chan_pub.messages[0]
+    assert not isinstance(wire_msg, dict)
+    assert wire_msg.crc != 0
+    assert wire_msg.motor_cmd[9].mode == 0
+    assert wire_msg.motor_cmd[9].q == 0.0
+    assert wire_msg.motor_cmd[6].mode == 1
+    assert wire_msg.motor_cmd[8].mode == 1

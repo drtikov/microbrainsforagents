@@ -1173,6 +1173,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "ok": True,
             "robot": spec.name,
             "n_dof": spec.n_dof,
+            "n_motor_slots": spec.total_motor_slots,
+            "has_motor_slot_remap": spec.motor_slot_map is not None,
             "idl_family": spec.idl_family,
             "pr_ab_supported": spec.pr_ab_supported,
             "unitree_sdk2_python_installed": sdk_installed,
