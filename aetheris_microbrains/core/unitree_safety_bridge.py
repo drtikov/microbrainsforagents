@@ -51,15 +51,24 @@ class UnitreeRobotSpec:
         return self.n_dof
 
 
+def _expand_per_joint(val: Union[float, Sequence[float]], n: int) -> Tuple[float, ...]:
+    if isinstance(val, Sequence) and not isinstance(val, (str, bytes)):
+        seq = tuple(float(v) for v in val)
+        if len(seq) != n:
+            raise ValueError(f"Expected {n} per-joint values, got {len(seq)}")
+        return seq
+    return (float(val),) * n
+
+
 def _make_spec(
     name: str,
     joint_names: Sequence[str],
-    q_min: float,
-    q_max: float,
-    dq_max: float,
-    tau_max: float,
-    kp_max: float,
-    kd_damp: float,
+    q_min: Union[float, Sequence[float]],
+    q_max: Union[float, Sequence[float]],
+    dq_max: Union[float, Sequence[float]],
+    tau_max: Union[float, Sequence[float]],
+    kp_max: Union[float, Sequence[float]],
+    kd_damp: Union[float, Sequence[float]],
     idl_family: str,
     pr_ab_supported: bool = False,
     stand_q: Optional[Sequence[float]] = None,
@@ -72,12 +81,12 @@ def _make_spec(
         name=name,
         n_dof=n,
         joint_names=tuple(joint_names),
-        q_min=(float(q_min),) * n,
-        q_max=(float(q_max),) * n,
-        dq_max=(float(dq_max),) * n,
-        tau_max=(float(tau_max),) * n,
-        kp_safe_max=(float(kp_max),) * n,
-        kd_damping_default=(float(kd_damp),) * n,
+        q_min=_expand_per_joint(q_min, n),
+        q_max=_expand_per_joint(q_max, n),
+        dq_max=_expand_per_joint(dq_max, n),
+        tau_max=_expand_per_joint(tau_max, n),
+        kp_safe_max=_expand_per_joint(kp_max, n),
+        kd_damping_default=_expand_per_joint(kd_damp, n),
         nominal_stand_q=tuple(float(v) for v in stand_q) if stand_q is not None else (0.0,) * n,
         idl_family=idl_family,
         pr_ab_supported=pr_ab_supported,
@@ -85,6 +94,33 @@ def _make_spec(
         motor_slot_map=tuple(int(s) for s in motor_slot_map) if motor_slot_map is not None else None,
         n_motor_slots=int(n_motor_slots) if n_motor_slots is not None else None,
     )
+
+
+def _table_bounds(
+    joint_names: Sequence[str],
+    rules: Mapping[str, Tuple[float, float, float, float, float, float]],
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float]]:
+    """Build per-joint (q_min, q_max, dq_max, tau_max, kp_max, kd_damp) from suffix/name lookup."""
+    q_mins, q_maxs, dq_maxs, tau_maxs, kp_maxs, kd_damps = [], [], [], [], [], []
+    for j in joint_names:
+        matched: Optional[Tuple[float, float, float, float, float, float]] = None
+        if j in rules:
+            matched = rules[j]
+        else:
+            for key, vals in rules.items():
+                if j.endswith(key):
+                    matched = vals
+                    break
+        if matched is None:
+            raise KeyError(f"Missing per-joint limit rule for {j!r}")
+        lo, hi, dqm, tm, kpm, kdd = matched
+        q_mins.append(lo)
+        q_maxs.append(hi)
+        dq_maxs.append(dqm)
+        tau_maxs.append(tm)
+        kp_maxs.append(kpm)
+        kd_damps.append(kdd)
+    return q_mins, q_maxs, dq_maxs, tau_maxs, kp_maxs, kd_damps
 
 
 _GO2_JOINTS = tuple(f"{leg}_{j}" for leg in ("FR", "FL", "RR", "RL") for j in ("hip", "thigh", "calf"))
@@ -129,27 +165,80 @@ _G1_29_JOINTS = (
     "right_wrist_roll", "right_wrist_pitch", "right_wrist_yaw",
 )
 
+_GO2_LIMITS = _table_bounds(
+    _GO2_JOINTS,
+    {
+        "_hip": (-1.0472, 1.0472, 30.1, 23.7, 80.0, 2.0),
+        "_thigh": (-1.5708, 3.4907, 30.1, 23.7, 80.0, 2.0),
+        # Negative-only flexion on Go2 calf prevents backward knee hyper-extension into chassis
+        "_calf": (-2.7227, -0.8378, 15.7, 45.43, 80.0, 2.0),
+    },
+)
+_B2_LIMITS = _table_bounds(
+    _GO2_JOINTS,
+    {
+        "_hip": (-0.87, 0.87, 23.0, 140.0, 200.0, 5.0),
+        "_thigh": (-0.94, 4.69, 23.0, 140.0, 200.0, 5.0),
+        "_calf": (-2.82, -0.43, 16.0, 200.0, 200.0, 5.0),
+    },
+)
+_H1_LIMITS = _table_bounds(
+    _H1_JOINTS,
+    {
+        "_hip_yaw": (-0.43, 0.43, 23.0, 200.0, 200.0, 5.0),
+        "_hip_roll": (-0.43, 0.43, 23.0, 200.0, 200.0, 5.0),
+        "_hip_pitch": (-3.14, 2.53, 23.0, 200.0, 200.0, 5.0),
+        # Asymmetric knee flexion prevents backward knee snap
+        "_knee": (-0.26, 2.05, 14.0, 200.0, 200.0, 5.0),
+        "_ankle": (-0.87, 0.52, 9.0, 40.0, 60.0, 2.5),
+        "waist_yaw": (-2.35, 2.35, 23.0, 200.0, 200.0, 5.0),
+        "_shoulder_pitch": (-2.87, 2.87, 9.0, 40.0, 60.0, 2.0),
+        "left_shoulder_roll": (-0.34, 3.11, 9.0, 40.0, 60.0, 2.0),
+        "right_shoulder_roll": (-3.11, 0.34, 9.0, 40.0, 60.0, 2.0),
+        "_shoulder_yaw": (-1.3, 4.45, 20.0, 18.0, 40.0, 1.5),
+        "_elbow": (-1.25, 2.61, 20.0, 18.0, 40.0, 1.5),
+    },
+)
+_G1_LIMIT_RULES = {
+    "_hip_pitch": (-2.5307, 2.8798, 32.0, 88.0, 150.0, 4.0),
+    "left_hip_roll": (-0.5236, 2.9671, 32.0, 88.0, 150.0, 4.0),
+    "right_hip_roll": (-2.9671, 0.5236, 32.0, 88.0, 150.0, 4.0),
+    "_hip_yaw": (-2.7576, 2.7576, 32.0, 88.0, 150.0, 4.0),
+    # Asymmetric knee range prevents backward hyper-extension
+    "_knee": (-0.0873, 2.8798, 20.0, 88.0, 150.0, 4.0),
+    "_ankle_pitch": (-0.8727, 0.5236, 37.0, 35.0, 60.0, 2.0),
+    "_ankle_roll": (-0.2618, 0.2618, 37.0, 35.0, 60.0, 2.0),
+    "waist_yaw": (-2.618, 2.618, 32.0, 88.0, 150.0, 4.0),
+    "waist_roll": (-0.52, 0.52, 37.0, 50.0, 100.0, 3.0),
+    "waist_pitch": (-0.52, 0.52, 37.0, 50.0, 100.0, 3.0),
+    "_shoulder_pitch": (-3.0892, 2.6704, 37.0, 25.0, 60.0, 2.0),
+    "left_shoulder_roll": (-1.5882, 2.2515, 37.0, 25.0, 60.0, 2.0),
+    "right_shoulder_roll": (-2.2515, 1.5882, 37.0, 25.0, 60.0, 2.0),
+    "_shoulder_yaw": (-2.618, 2.618, 37.0, 25.0, 60.0, 2.0),
+    "_elbow": (-1.0472, 2.0944, 37.0, 25.0, 60.0, 2.0),
+    "_wrist_roll": (-1.9722, 1.9722, 37.0, 5.0, 40.0, 1.0),
+    "_wrist_pitch": (-1.6144, 1.6144, 37.0, 5.0, 40.0, 1.0),
+    "_wrist_yaw": (-1.6144, 1.6144, 37.0, 5.0, 40.0, 1.0),
+}
+_G1_23_LIMITS = _table_bounds(_G1_23_JOINTS, _G1_LIMIT_RULES)
+_G1_29_LIMITS = _table_bounds(_G1_29_JOINTS, _G1_LIMIT_RULES)
+
 UNITREE_ROBOT_SPECS: Dict[str, UnitreeRobotSpec] = {
-    "go2": _make_spec("go2", _GO2_JOINTS, -2.72, 2.72, 30.0, 23.7, 80.0, 2.0, "unitree_go", False, _GO2_STAND),
-    "b2": _make_spec("b2", _GO2_JOINTS, -2.8, 2.8, 23.0, 140.0, 200.0, 5.0, "unitree_go", False, _GO2_STAND),
+    "go2": _make_spec("go2", _GO2_JOINTS, *_GO2_LIMITS, "unitree_go", False, _GO2_STAND),
+    "b2": _make_spec("b2", _GO2_JOINTS, *_B2_LIMITS, "unitree_go", False, _GO2_STAND),
     "z1": _make_spec("z1", tuple(f"joint_{i}" for i in range(1, 7)), -2.8, 2.8, 3.14, 30.0, 60.0, 2.5, "unitree_go", False),
     "h1": _make_spec(
         "h1",
         _H1_JOINTS,
-        -2.8,
-        2.8,
-        20.0,
-        200.0,
-        200.0,
-        5.0,
+        *_H1_LIMITS,
         "unitree_hg",
         False,
         motor_slot_map=_H1_MOTOR_SLOT_MAP,
         n_motor_slots=20,
     ),
     "h1_2": _make_spec("h1_2", tuple(f"joint_{i}" for i in range(27)), -3.0, 3.0, 20.0, 200.0, 200.0, 5.0, "unitree_hg", True),
-    "g1_23dof": _make_spec("g1_23dof", _G1_23_JOINTS, -2.8, 2.8, 25.0, 88.0, 150.0, 4.0, "unitree_hg", True),
-    "g1_29dof": _make_spec("g1_29dof", _G1_29_JOINTS, -2.8, 2.8, 25.0, 88.0, 150.0, 4.0, "unitree_hg", True),
+    "g1_23dof": _make_spec("g1_23dof", _G1_23_JOINTS, *_G1_23_LIMITS, "unitree_hg", True),
+    "g1_29dof": _make_spec("g1_29dof", _G1_29_JOINTS, *_G1_29_LIMITS, "unitree_hg", True),
     "dex3_1": _make_spec("dex3_1", ("thumb_0", "thumb_1", "thumb_2", "index_0", "index_1", "middle_0", "middle_1"), -0.1, 1.75, 12.0, 2.5, 15.0, 0.3, "unitree_hg", False, fall_tilt_rad=3.14),
 }
 
@@ -180,12 +269,41 @@ def pack_lowcmd_crc_words(
     kd: Sequence[float],
     mode_pr: int = 0,
     mode_machine: int = 0,
+    *,
+    motor_mode: int = 1,
+    motor_slot_map: Optional[Sequence[int]] = None,
+    n_slots: Optional[int] = None,
+    idl_family: str = "unitree_hg",
 ) -> List[int]:
-    """Pack LowCmd fields into deterministic uint32 words for CRC32."""
-    words: List[int] = [int(mode_pr) & 0xFF, int(mode_machine) & 0xFF]
-    for arr in (q, dq, tau, kp, kd):
-        for v in arr:
-            words.append(int(round(float(v) * 1000.0)) & 0xFFFFFFFF)
+    """Pack LowCmd fields into IEEE-754 float32 + C-struct little-endian uint32 words for CRC32."""
+    total_slots = int(n_slots) if n_slots is not None else (35 if idl_family == "unitree_hg" else 20)
+    slots = tuple(int(s) for s in motor_slot_map) if motor_slot_map is not None else tuple(range(len(q)))
+    # HG LowCmd C-struct header: uint8 mode_pr, uint8 mode_machine, uint16 pad (<BB2x)
+    header_word = (int(mode_pr) & 0xFF) | ((int(mode_machine) & 0xFF) << 8)
+    slot_data: Dict[int, Tuple[int, float, float, float, float, float]] = {}
+    for logical_idx in range(min(len(q), len(slots))):
+        hw_idx = slots[logical_idx]
+        if 0 <= hw_idx < total_slots:
+            slot_data[hw_idx] = (
+                int(motor_mode) & 0xFF,
+                float(q[logical_idx]),
+                float(dq[logical_idx]) if logical_idx < len(dq) else 0.0,
+                float(tau[logical_idx]) if logical_idx < len(tau) else 0.0,
+                float(kp[logical_idx]) if logical_idx < len(kp) else 0.0,
+                float(kd[logical_idx]) if logical_idx < len(kd) else 0.0,
+            )
+
+    words: List[int] = [header_word]
+    for hw_idx in range(total_slots):
+        m, qv, dqv, tv, kpv, kdv = slot_data.get(hw_idx, (0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        words.append(m & 0xFF)
+        words.append(_f32_to_u32(qv))
+        words.append(_f32_to_u32(dqv))
+        words.append(_f32_to_u32(tv))
+        words.append(_f32_to_u32(kpv))
+        words.append(_f32_to_u32(kdv))
+        words.extend((0, 0, 0))  # MotorCmd_.reserve[3]
+    words.extend((0, 0, 0, 0))  # LowCmd_.reserve[4]
     return words
 
 
@@ -495,7 +613,19 @@ class SafeUnitreeLowLevelBridge:
         q_safe = pd_out["q_des_safe"]
         self.q_des_prev = q_safe.copy()
 
-        words = pack_lowcmd_crc_words(q_safe, dq_nom, tau_nom, kp_eff, kd_nom, self.mode_pr, self.mode_machine)
+        words = pack_lowcmd_crc_words(
+            q_safe,
+            dq_nom,
+            tau_nom,
+            kp_eff,
+            kd_nom,
+            self.mode_pr,
+            self.mode_machine,
+            motor_mode=1,
+            motor_slot_map=self.spec.effective_motor_slots,
+            n_slots=(35 if self.spec.idl_family == "unitree_hg" else 20),
+            idl_family=self.spec.idl_family,
+        )
         crc = unitree_crc32(words)
         out = {
             "lifecycle_state": self.lifecycle_state,
@@ -522,7 +652,19 @@ class SafeUnitreeLowLevelBridge:
         n = self.spec.n_dof
         zeros = [0.0] * n
         kd = list(self.spec.kd_damping_default)
-        words = pack_lowcmd_crc_words(zeros, zeros, zeros, zeros, kd, self.mode_pr, self.mode_machine)
+        words = pack_lowcmd_crc_words(
+            zeros,
+            zeros,
+            zeros,
+            zeros,
+            kd,
+            self.mode_pr,
+            self.mode_machine,
+            motor_mode=0,
+            motor_slot_map=self.spec.effective_motor_slots,
+            n_slots=(35 if self.spec.idl_family == "unitree_hg" else 20),
+            idl_family=self.spec.idl_family,
+        )
         out = {
             "lifecycle_state": self.lifecycle_state,
             "robot_model": self.spec.name,
@@ -603,17 +745,20 @@ def _compute_idl_wire_crc(low_cmd_msg: Any, crc_calc: Optional[Any] = None) -> i
             RuntimeWarning,
             stacklevel=2,
         )
-        words: List[int] = [
-            int(getattr(low_cmd_msg, "mode_pr", 0)) & 0xFF,
-            int(getattr(low_cmd_msg, "mode_machine", 0)) & 0xFF,
-        ]
+        mode_pr = int(getattr(low_cmd_msg, "mode_pr", 0)) & 0xFF
+        mode_machine = int(getattr(low_cmd_msg, "mode_machine", 0)) & 0xFF
+        words: List[int] = [mode_pr | (mode_machine << 8)]
         for mc in getattr(low_cmd_msg, "motor_cmd", ()):
-            words.append(int(getattr(mc, "mode", 0)) & 0xFFFFFFFF)
+            words.append(int(getattr(mc, "mode", 0)) & 0xFF)
             words.append(_f32_to_u32(getattr(mc, "q", 0.0)))
             words.append(_f32_to_u32(getattr(mc, "dq", 0.0)))
             words.append(_f32_to_u32(getattr(mc, "tau", 0.0)))
             words.append(_f32_to_u32(getattr(mc, "kp", 0.0)))
             words.append(_f32_to_u32(getattr(mc, "kd", 0.0)))
+            res = getattr(mc, "reserve", (0, 0, 0))
+            words.extend(int(res[i]) & 0xFFFFFFFF if i < len(res) else 0 for i in range(3))
+        tail = getattr(low_cmd_msg, "reserve", (0, 0, 0, 0))
+        words.extend(int(tail[i]) & 0xFFFFFFFF if i < len(tail) else 0 for i in range(4))
         return unitree_crc32(words)
 
 

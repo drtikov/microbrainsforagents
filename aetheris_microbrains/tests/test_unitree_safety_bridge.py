@@ -27,14 +27,25 @@ def test_unitree_specs_and_crc32():
 def test_motor_pd_cbf_clamps_torque_and_halfspaces():
     spec = UNITREE_ROBOT_SPECS["go2"]
     adapter = MotorPDCBFAdapter(spec, dt=0.002)
-    q = np.zeros(12)
+    q = np.asarray(spec.nominal_stand_q, dtype=np.float64)
     dq = np.zeros(12)
     kp = np.full(12, 60.0)
     kd = np.full(12, 2.0)
-    # Extreme step jump q_des = 2.0 rad -> 120 N*m > 23.7 N*m tau_max
+    # Extreme step jump q_des = 2.0 rad (backward calf hyper-extension + torque overflow)
     out = adapter.filter_pd_target(q=q, dq=dq, q_des_nom=np.full(12, 2.0), kp=kp, kd=kd)
     assert out["verified_safe"] is True
     assert np.all(np.abs(out["tau_applied"]) <= np.asarray(spec.tau_max) + 1e-6)
+    # Go2 calf joints (indices 2, 5, 8, 11) must stay strictly in negative flexion range [-2.7227, -0.8378]
+    for calf_idx in (2, 5, 8, 11):
+        assert out["q_des_safe"][calf_idx] <= -0.8378 + 1e-6
+        assert out["q_des_safe"][calf_idx] >= -2.7227 - 1e-6
+
+    # Asymmetric knee limits on H1 and G1 block backward hyper-extension, and wrist torque is capped safely
+    h1_spec = UNITREE_ROBOT_SPECS["h1"]
+    g1_spec = UNITREE_ROBOT_SPECS["g1_29dof"]
+    assert h1_spec.q_min[3] > -0.3 and h1_spec.q_max[3] > 2.0  # H1 right_knee
+    assert g1_spec.q_min[3] > -0.1 and g1_spec.q_max[3] > 2.8  # G1 left_knee
+    assert g1_spec.tau_max[20] <= 5.0  # G1 wrist torque must stay small vs hip (88 N*m)
 
 
 def test_safe_unitree_bridge_homing_thermal_and_watchdog():
@@ -128,6 +139,7 @@ def test_hg_int16_pair_temperature_and_h1_motor_slot_remap_and_wire_shim():
     wire_msg = chan_pub.messages[0]
     assert not isinstance(wire_msg, dict)
     assert wire_msg.crc != 0
+    assert wire_msg.crc == out_h1["crc"]
     assert wire_msg.motor_cmd[9].mode == 0
     assert wire_msg.motor_cmd[9].q == 0.0
     assert wire_msg.motor_cmd[6].mode == 1
