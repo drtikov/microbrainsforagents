@@ -199,3 +199,38 @@ def test_auto_approve_refuses_unrecognized_and_sensitive_escalations():
         )
         assert v["decision"] == "escalate", f"Expected escalate for {cmd}, got {v}"
         assert v["hookSpecificOutput"]["decision"] in {"ask", "force_ask"}
+
+
+def test_ntfs_ads_and_symlink_protected_path_resolution(tmp_path):
+    assert lde.is_protected_path(".env::$DATA") is True
+    assert lde.is_protected_path("C:\\proj\\.env:secret") is True
+    assert lde.is_protected_path("C:\\proj\\src\\main.py") is False
+
+    v_ads = evaluate_hook_payload(
+        {"tool_name": "Bash", "tool_input": {"command": "cat .env::$DATA"}},
+        host="claude",
+        profile="strict",
+        session_state_path=None,
+        log_decisions=False,
+    )
+    assert v_ads["decision"] in {"deny", "escalate"}
+
+    real_env = tmp_path / ".env"
+    real_env.write_text("SECRET=1\n", encoding="utf-8")
+    link_path = tmp_path / "innocent.txt"
+    try:
+        link_path.symlink_to(real_env)
+    except (OSError, NotImplementedError):
+        return  # Windows unprivileged symlink creation may be disabled
+    assert lde.is_protected_path(str(link_path)) is True
+
+
+def test_approve_once_scope_key_hashes_full_command():
+    from aetheris_microbrains.hook import _approval_scope_key
+
+    k_ls = _approval_scope_key("Bash", "ssh host 'ls'")
+    k_rm = _approval_scope_key("Bash", "ssh host 'rm -rf /'")
+    k_ls_again = _approval_scope_key("Bash", "ssh host 'ls'")
+    assert k_ls is not None and k_rm is not None
+    assert k_ls == k_ls_again
+    assert k_ls != k_rm

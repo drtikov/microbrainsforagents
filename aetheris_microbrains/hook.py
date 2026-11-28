@@ -98,7 +98,9 @@ def _approval_scope_key(tool_name: str, cmd: Optional[str] = None) -> Optional[s
                     base = base[: -len(ext)]
                     break
             if base:
-                return f"shell:{base}"
+                norm_cmd = " ".join(tokens) if tokens else cmd_str
+                cmd_fp = hashlib.sha256(norm_cmd.encode("utf-8")).hexdigest()[:16]
+                return f"shell:{base}:{cmd_fp}"
     if clean_tool:
         return f"tool:{clean_tool}"
     return None

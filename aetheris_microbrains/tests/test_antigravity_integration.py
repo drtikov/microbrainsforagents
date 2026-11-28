@@ -308,7 +308,7 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
     assert r1["decision"] == "escalate"
     assert r1["hookSpecificOutput"]["decision"] == "ask"
     store1 = json.loads(ap_file.read_text(encoding="utf-8"))
-    assert "shell:python" in store1["pending"]
+    assert any(k.startswith("shell:python:") for k in store1["pending"])
 
     # 2. If PostToolUse never fires (user denied), second PreToolUse still returns ask
     r2 = evaluate_hook_payload(
@@ -330,10 +330,10 @@ def test_antigravity_approve_once_lifecycle(tmp_path):
         approve_once=True,
         approvals_path=str(ap_file),
     )
-    assert post_r.get("approval_recorded", "").startswith("shell:python|")
+    assert post_r.get("approval_recorded", "").startswith("shell:python:")
 
     r3 = evaluate_hook_payload(
-        {"toolCall": {"id": "ao_2", "name": "run_command", "args": {"CommandLine": 'python -c "print(2)"'}}},
+        {"toolCall": {"id": "ao_2", "name": "run_command", "args": {"CommandLine": 'python -c "print(1)"'}}},
         host="antigravity",
         profile="dev",
         log_decisions=False,

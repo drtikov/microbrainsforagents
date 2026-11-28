@@ -729,6 +729,23 @@ def _is_protected_path_cached(raw: str, all_patterns: Tuple[str, ...]) -> bool:
     return False
 
 
+def _strip_ntfs_ads_suffix(raw: str) -> str:
+    """Strip Windows NTFS Alternate Data Stream suffix (`:stream` / `::$DATA`) from the final path segment."""
+    norm = raw.replace("\\", "/")
+    slash_idx = norm.rfind("/")
+    prefix = norm[: slash_idx + 1]
+    tail = norm[slash_idx + 1 :]
+    if ":" in tail:
+        # Preserve bare Windows drive letter like `C:` if there was no slash
+        if slash_idx == -1 and len(tail) >= 2 and tail[1] == ":" and tail[0].isalpha():
+            rest = tail[2:]
+            if ":" in rest:
+                return prefix + tail[:2] + rest.split(":", 1)[0]
+            return raw
+        return prefix + tail.split(":", 1)[0]
+    return raw
+
+
 def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = None) -> bool:
     """Return True if path points to a constitutional, credential, or security-critical asset.
 
@@ -742,7 +759,21 @@ def is_protected_path(path_str: Optional[str], policy: Optional[PolicyConfig] = 
     raw = str(path_str)
     if "\x00" in raw:
         return True
-    return _is_protected_path_cached(raw, _policy_protected_patterns(policy))
+    patterns = _policy_protected_patterns(policy)
+    if _is_protected_path_cached(raw, patterns):
+        return True
+    ads_stripped = _strip_ntfs_ads_suffix(raw)
+    if ads_stripped != raw and _is_protected_path_cached(ads_stripped, patterns):
+        return True
+    for candidate in (raw, ads_stripped):
+        try:
+            if candidate and os.path.lexists(candidate):
+                real = os.path.realpath(candidate)
+                if real != candidate and _is_protected_path_cached(real, patterns):
+                    return True
+        except OSError:
+            pass
+    return False
 
 
 _LIVE_PACKAGE_DIR: Optional[str] = None

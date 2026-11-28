@@ -365,7 +365,9 @@ def replay_decision_journal(
         Structured counterfactual replay summary dictionary.
     """
     from ..hook import evaluate_hook_payload
+    from .runtime_paths import verify_jsonl_hash_chain
 
+    chain_integrity = verify_jsonl_hash_chain(journal_path)
     entries, skipped_lines = _load_journal_with_stats(journal_path)
 
     original_counts: Dict[str, int] = {"allow": 0, "deny": 0, "escalate": 0, "other": 0}
@@ -455,6 +457,7 @@ def replay_decision_journal(
         "journal_path": str(journal_path),
         "target_profile": target_profile,
         "host": host,
+        "chain_integrity": chain_integrity,
         "total_entries": len(entries),
         "replayed_entries": replayed_count,
         "skipped_lines": skipped_lines,
